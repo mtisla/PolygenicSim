@@ -277,6 +277,15 @@ without a runtime gather, unlocking SIMD.
     return true
 end
 
+# --- Threading helper -------------------------------------------------------
+# BV fill + matvec are embarrassingly parallel across individuals. Partition
+# the 1:N range into `cc` static chunks. For tiny populations (or 1 thread)
+# the chunked path collapses to a single in-place call.
+@inline function _bv_chunk_count(N::Int)
+    nt = Threads.nthreads()
+    return (nt > 1 && N >= 256) ? nt : 1
+end
+
 """
     fill_genotype_buf_dense!(G, H, qtl_idx, N)
 
@@ -285,25 +294,49 @@ a dense haplotype matrix. Dispatches to a contiguous fast path that avoids
 the `qtl_idx` gather when QTL sites form a single run (e.g. the common
 all-QTL case). UInt8 storage avoids inner-loop sign-extend conversions so
 LLVM keeps the loop SIMD-vectorized (vpaddb on 32 bytes per cycle).
+Threaded over individuals when `Threads.nthreads() > 1`.
 """
 function fill_genotype_buf_dense!(G::Matrix{UInt8}, H::Matrix{UInt8},
                                      qtl_idx::Vector{Int}, N::Integer)
     n_qtl = size(G, 1)
     n_qtl == 0 && return nothing
+    Nint = Int(N)
+    cc = _bv_chunk_count(Nint)
     if is_contiguous_qtl_idx(qtl_idx, n_qtl)
         @inbounds offset = qtl_idx[1] - 1
-        _fill_genotype_buf_dense_contig!(G, H, offset, Int(N), n_qtl)
+        if cc == 1
+            _fill_dense_contig_range!(G, H, offset, 1, Nint, n_qtl)
+        else
+            chunk = cld(Nint, cc)
+            Threads.@threads :static for k in 1:cc
+                i_lo = (k - 1) * chunk + 1
+                i_hi = min(k * chunk, Nint)
+                i_lo <= i_hi || continue
+                _fill_dense_contig_range!(G, H, offset, i_lo, i_hi, n_qtl)
+            end
+        end
     else
-        _fill_genotype_buf_dense_gather!(G, H, qtl_idx, Int(N), n_qtl)
+        if cc == 1
+            _fill_dense_gather_range!(G, H, qtl_idx, 1, Nint, n_qtl)
+        else
+            chunk = cld(Nint, cc)
+            Threads.@threads :static for k in 1:cc
+                i_lo = (k - 1) * chunk + 1
+                i_hi = min(k * chunk, Nint)
+                i_lo <= i_hi || continue
+                _fill_dense_gather_range!(G, H, qtl_idx, i_lo, i_hi, n_qtl)
+            end
+        end
     end
     return nothing
 end
 
 # Contiguous fast path: SIMD-friendly. Inner loop reads two contiguous H rows
 # and writes a contiguous G column. Pure UInt8 arithmetic — no conversions.
-function _fill_genotype_buf_dense_contig!(G::Matrix{UInt8}, H::Matrix{UInt8},
-                                             offset::Int, N::Int, n_qtl::Int)
-    @inbounds for i in 1:N
+@inline function _fill_dense_contig_range!(G::Matrix{UInt8}, H::Matrix{UInt8},
+                                              offset::Int, i_lo::Int, i_hi::Int,
+                                              n_qtl::Int)
+    @inbounds for i in i_lo:i_hi
         h1 = 2i - 1
         h2 = 2i
         @simd for kk in 1:n_qtl
@@ -314,9 +347,10 @@ function _fill_genotype_buf_dense_contig!(G::Matrix{UInt8}, H::Matrix{UInt8},
 end
 
 # Sparse-qtl_idx fallback: indirect gather, no SIMD on the H access.
-function _fill_genotype_buf_dense_gather!(G::Matrix{UInt8}, H::Matrix{UInt8},
-                                             qtl_idx::Vector{Int}, N::Int, n_qtl::Int)
-    @inbounds for i in 1:N
+@inline function _fill_dense_gather_range!(G::Matrix{UInt8}, H::Matrix{UInt8},
+                                              qtl_idx::Vector{Int}, i_lo::Int,
+                                              i_hi::Int, n_qtl::Int)
+    @inbounds for i in i_lo:i_hi
         h1 = 2i - 1
         h2 = 2i
         @simd for kk in 1:n_qtl
@@ -330,19 +364,41 @@ end
 """
     fill_genotype_buf_packed!(G, H, qtl_idx, N)
 
-Same, from a packed UInt64 haplotype matrix. Contiguous fast path processes
-each UInt64 word once per individual (64 variants per word), avoiding the
-per-variant `qtl_idx[kk]` gather.
+Same, from a packed UInt64 haplotype matrix. Contiguous fast path uses a
+LUT-driven 8-bits-per-store unpack (`_unpack_word_pair_to_G!`) instead of
+per-bit shifts. Threaded over individuals when `Threads.nthreads() > 1`.
 """
 function fill_genotype_buf_packed!(G::Matrix{UInt8}, H::Matrix{UInt64},
                                       qtl_idx::Vector{Int}, N::Integer)
     n_qtl = size(G, 1)
     n_qtl == 0 && return nothing
+    Nint = Int(N)
+    cc = _bv_chunk_count(Nint)
     if is_contiguous_qtl_idx(qtl_idx, n_qtl)
         @inbounds offset = qtl_idx[1] - 1
-        _fill_genotype_buf_packed_contig!(G, H, offset, Int(N), n_qtl)
+        if cc == 1
+            _fill_packed_contig_range!(G, H, offset, 1, Nint, n_qtl)
+        else
+            chunk = cld(Nint, cc)
+            Threads.@threads :static for k in 1:cc
+                i_lo = (k - 1) * chunk + 1
+                i_hi = min(k * chunk, Nint)
+                i_lo <= i_hi || continue
+                _fill_packed_contig_range!(G, H, offset, i_lo, i_hi, n_qtl)
+            end
+        end
     else
-        _fill_genotype_buf_packed_gather!(G, H, qtl_idx, Int(N), n_qtl)
+        if cc == 1
+            _fill_packed_gather_range!(G, H, qtl_idx, 1, Nint, n_qtl)
+        else
+            chunk = cld(Nint, cc)
+            Threads.@threads :static for k in 1:cc
+                i_lo = (k - 1) * chunk + 1
+                i_hi = min(k * chunk, Nint)
+                i_lo <= i_hi || continue
+                _fill_packed_gather_range!(G, H, qtl_idx, i_lo, i_hi, n_qtl)
+            end
+        end
     end
     return nothing
 end
@@ -406,9 +462,10 @@ end
 
 # Contiguous packed fast path: per source word, shift by b_start so the first
 # extracted bit is bit 0, then dispatch to `_unpack_word_pair_to_G!`.
-function _fill_genotype_buf_packed_contig!(G::Matrix{UInt8}, H::Matrix{UInt64},
-                                              offset::Int, N::Int, n_qtl::Int)
-    @inbounds for i in 1:N
+@inline function _fill_packed_contig_range!(G::Matrix{UInt8}, H::Matrix{UInt64},
+                                               offset::Int, i_lo::Int, i_hi::Int,
+                                               n_qtl::Int)
+    @inbounds for i in i_lo:i_hi
         h1 = 2i - 1
         h2 = 2i
         kk = 1
@@ -427,9 +484,10 @@ function _fill_genotype_buf_packed_contig!(G::Matrix{UInt8}, H::Matrix{UInt64},
 end
 
 # Sparse-qtl_idx packed fallback.
-function _fill_genotype_buf_packed_gather!(G::Matrix{UInt8}, H::Matrix{UInt64},
-                                              qtl_idx::Vector{Int}, N::Int, n_qtl::Int)
-    @inbounds for i in 1:N
+@inline function _fill_packed_gather_range!(G::Matrix{UInt8}, H::Matrix{UInt64},
+                                               qtl_idx::Vector{Int}, i_lo::Int,
+                                               i_hi::Int, n_qtl::Int)
+    @inbounds for i in i_lo:i_hi
         h1 = 2i - 1
         h2 = 2i
         for kk in 1:n_qtl
@@ -449,12 +507,32 @@ end
 
 Compute breeding values `A[i] = Σ_kk alpha_qtl[kk] · Float64(G[kk, i])` for
 `i ∈ 1..N`. Inner loop is `@simd`-vectorizable: contiguous UInt8 loads from G,
-contiguous Float64 loads from alpha, FMA reduction.
+contiguous Float64 loads from alpha, FMA reduction. Threaded over individuals
+when `Threads.nthreads() > 1`.
 """
 function matvec_bv!(A::Vector{Float64}, G::Matrix{UInt8},
                      alpha_qtl::Vector{Float64}, N::Integer)
+    Nint = Int(N)
     n_qtl = size(G, 1)
-    @inbounds for i in 1:N
+    cc = _bv_chunk_count(Nint)
+    if cc == 1
+        _matvec_bv_range!(A, G, alpha_qtl, 1, Nint, n_qtl)
+    else
+        chunk = cld(Nint, cc)
+        Threads.@threads :static for k in 1:cc
+            i_lo = (k - 1) * chunk + 1
+            i_hi = min(k * chunk, Nint)
+            i_lo <= i_hi || continue
+            _matvec_bv_range!(A, G, alpha_qtl, i_lo, i_hi, n_qtl)
+        end
+    end
+    return nothing
+end
+
+@inline function _matvec_bv_range!(A::Vector{Float64}, G::Matrix{UInt8},
+                                      alpha_qtl::Vector{Float64},
+                                      i_lo::Int, i_hi::Int, n_qtl::Int)
+    @inbounds for i in i_lo:i_hi
         s = 0.0
         @simd for kk in 1:n_qtl
             s += alpha_qtl[kk] * Float64(G[kk, i])
