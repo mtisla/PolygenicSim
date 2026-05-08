@@ -220,7 +220,7 @@ code. Key answers:
 | Q57 | MAF | default `maf_min = 0`; output-side filter would be downstream of the simulator |
 | Q58 | BV coordinate | kernel raw; report demeaned |
 | Q59 | IID indexing | column-major `demeID = x + y · grid_size + 1` (matches bulmer.slim:536) |
-| Q60 | Convergence interval | opt-in via `report_convergence`; `convergence_interval` defaults to `max(1, ngen_eq ÷ 100)` |
+| Q60 | Summary interval | unified into single `n_int` knob: `n_int=0` (default) ⇒ final-gen summary only; `n_int=k>0` ⇒ also log every k gens |
 | Q61 | Replication API | user-side loop; no `replicate()` in the package |
 
 ## File layout

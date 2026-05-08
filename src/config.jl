@@ -65,8 +65,10 @@ Base.@kwdef struct Config
     output_prefix::String = "polygenicsim"
 
     # diagnostics
-    report_convergence::Bool = false
-    convergence_interval::Int = 0                   # 0 ⇒ auto: max(1, ngen_eq ÷ 100)
+    # n_int controls intermediate summary frequency:
+    #   n_int == 0  ⇒ only a final-generation summary is produced
+    #   n_int >  0  ⇒ a summary is also produced every n_int generations
+    n_int::Int = 0
 
     # backend
     backend::Symbol = :packed                        # :packed | :dense
@@ -126,17 +128,6 @@ Per-site per-generation symmetric flip rate, derived from the haploid-gamete rat
 mu_per_site(cfg::Config) = cfg.U / n_variants(cfg)
 
 """
-    convergence_interval_effective(cfg) -> Int
-
-Resolves the convergence sampling interval: the user-supplied value if positive,
-else `max(1, ngen_eq ÷ 100)` so ~100 samples are taken regardless of phase length.
-"""
-function convergence_interval_effective(cfg::Config)
-    cfg.convergence_interval > 0 && return cfg.convergence_interval
-    return max(1, cfg.ngen_eq ÷ 100)
-end
-
-"""
     validate(cfg) -> Nothing
 
 Throws `ArgumentError` if `cfg` violates Phase-1 invariants. Phase 4/5 fields
@@ -174,6 +165,7 @@ function validate(cfg::Config)
     end
     cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))
+    cfg.n_int >= 0 || throw(ArgumentError("n_int must be >= 0"))
     # Phase 4 invariants (spatial)
     cfg.grid_size >= 1 ||
         throw(ArgumentError("grid_size must be >= 1"))

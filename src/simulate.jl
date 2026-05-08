@@ -73,9 +73,10 @@ function simulate(cfg::Config)
     checkpoint_set = Set(checkpoint_gens)
     paths = String[]
 
-    # ---- convergence buffer ---------------------------------------------
+    # ---- summary trajectory buffer --------------------------------------
+    # n_int == 0 ⇒ only a final-gen summary; n_int > 0 ⇒ also every n_int gens.
     conv_buffer = NamedTuple{(:gen, :B, :mean_p, :var_p),Tuple{Int,Float64,Float64,Float64}}[]
-    conv_interval = convergence_interval_effective(cfg)
+    n_int = cfg.n_int
     p_buf = zeros(Float64, L)
     # Per-deme work buffers (resized after expansion).
     mean_buf = zeros(Float64, layout.n_demes)
@@ -109,7 +110,7 @@ function simulate(cfg::Config)
         else
             step!(pop, vt, cfg, phase, scratch, rng, gen_in_phase)
         end
-        if cfg.report_convergence && (gen % conv_interval == 0 || gen == total_gens)
+        if n_int > 0 && (gen % n_int == 0 || gen == total_gens)
             # Within-deme weighted-average diagnostics. For panmictic
             # (n_demes=1) this reduces to the pooled value.
             compute_breeding_values!(scratch, pop, vt)

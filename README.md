@@ -141,7 +141,7 @@ For fixed seed and matching `n_threads`, both backends produce **bit-identical**
 
 - **PLINK 1 trio** (`{prefix}_gen{t}.bed/bim/fam`) plus a sibling `{prefix}_gen{t}.effects.tsv` with per-variant effect sizes. IIDs are `p{deme}_{i}` (1-indexed) so loaders can recover deme assignments.
 - **Native restart** (`{prefix}_gen{t}.psim.zst`) — phase-preserving full state with bit-packed haplotypes, variant table, effects, and deme assignments. zstd-compressed (level 3).
-- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, and a convergence log when `report_convergence=true`.
+- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, and an intermediate trajectory log of (gen, B, mean_p, var_p) controlled by `n_int`: `n_int=0` (default) emits only the final-gen summary; `n_int=k>0` additionally logs every k generations.
 
 ## Loading
 
