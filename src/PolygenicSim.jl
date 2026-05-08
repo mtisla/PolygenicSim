@@ -1,0 +1,24 @@
+module PolygenicSim
+
+using Random
+using Distributions
+using StatsBase
+
+include("config.jl")
+include("rng.jl")
+include("variants.jl")
+include("population_packed.jl")
+include("population_dense.jl")
+include("recombination.jl")
+include("mutation.jl")
+include("spatial.jl")
+include("fitness.jl")
+include("stats.jl")
+include("reproduction.jl")
+include("expansion.jl")
+include("io_plink.jl")
+include("io_native.jl")
+include("summary.jl")
+include("simulate.jl")
+
+end # module PolygenicSim
