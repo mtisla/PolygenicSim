@@ -347,8 +347,65 @@ function fill_genotype_buf_packed!(G::Matrix{UInt8}, H::Matrix{UInt64},
     return nothing
 end
 
-# Contiguous packed fast path: walk word boundaries; per-word, unroll 64 bit
-# extractions.
+# --- Portable byte LUT for fast packed bit-unpack ---------------------------
+# `_BIT_UNPACK_LUT[b + 1]` is a UInt64 whose byte k holds bit k of `b` (0 or 1),
+# packed little-endian. Storing the LUT entry as a UInt64 to a UInt8 buffer
+# yields 8 sequential 0/1 bytes — i.e. unpacks 8 source bits in one 64-bit
+# store. Adding two LUT entries byte-wise (a single UInt64 add, no overflow
+# since each byte ≤ 1) gives the per-bit sum bit_h1 + bit_h2 ∈ {0,1,2}.
+const _BIT_UNPACK_LUT = let
+    arr = Vector{UInt64}(undef, 256)
+    for b in 0:255
+        u = UInt64(0)
+        for k in 0:7
+            u |= UInt64((b >> k) & 1) << (k * 8)
+        end
+        arr[b + 1] = u
+    end
+    arr
+end
+
+# Unpack `n_bits` bits (≤ 64) from `word_h1`, `word_h2` (already shifted so the
+# first bit to extract is bit 0) into G[row_start_zero+1 : row_start_zero+n_bits, col]
+# as `bit_h1 + bit_h2`. 8 bits per LUT-driven 64-bit store; tail < 8 bits via
+# scalar bytes. No SIMD intrinsics — just UInt64 arithmetic and unaligned
+# 64-bit stores, which every CPU Julia targets handles natively.
+@inline function _unpack_word_pair_to_G!(G::Matrix{UInt8}, col::Int,
+                                            row_start_zero::Int,
+                                            word_h1::UInt64, word_h2::UInt64,
+                                            n_bits::Int)
+    @inbounds begin
+        n_rows = size(G, 1)
+        ptr_base = pointer(G, (col - 1) * n_rows + row_start_zero + 1)
+        n_full = n_bits >> 3
+        n_rem = n_bits & 7
+        wh1 = word_h1
+        wh2 = word_h2
+        bi = 0
+        while bi < n_full
+            b1 = Int(wh1 & 0xff) + 1
+            b2 = Int(wh2 & 0xff) + 1
+            sum_bits = _BIT_UNPACK_LUT[b1] + _BIT_UNPACK_LUT[b2]
+            unsafe_store!(reinterpret(Ptr{UInt64}, ptr_base + bi * 8), sum_bits)
+            wh1 >>= 8
+            wh2 >>= 8
+            bi += 1
+        end
+        if n_rem > 0
+            b1 = Int(wh1 & 0xff) + 1
+            b2 = Int(wh2 & 0xff) + 1
+            sum_bits = _BIT_UNPACK_LUT[b1] + _BIT_UNPACK_LUT[b2]
+            base = n_full * 8
+            for k in 0:(n_rem - 1)
+                unsafe_store!(ptr_base + base + k, UInt8((sum_bits >> (k * 8)) & 0xff))
+            end
+        end
+    end
+    return nothing
+end
+
+# Contiguous packed fast path: per source word, shift by b_start so the first
+# extracted bit is bit 0, then dispatch to `_unpack_word_pair_to_G!`.
 function _fill_genotype_buf_packed_contig!(G::Matrix{UInt8}, H::Matrix{UInt64},
                                               offset::Int, N::Int, n_qtl::Int)
     @inbounds for i in 1:N
@@ -359,15 +416,10 @@ function _fill_genotype_buf_packed_contig!(G::Matrix{UInt8}, H::Matrix{UInt64},
             j_first = kk + offset
             w = ((j_first - 1) >> 6) + 1
             b_start = (j_first - 1) & 63
-            word_h1 = H[w, h1]
-            word_h2 = H[w, h2]
+            word_h1 = H[w, h1] >> b_start
+            word_h2 = H[w, h2] >> b_start
             n_bits_in_word = min(64 - b_start, n_qtl - kk + 1)
-            for b_off in 0:(n_bits_in_word - 1)
-                b = b_start + b_off
-                bit1 = (word_h1 >> b) & UInt64(1)
-                bit2 = (word_h2 >> b) & UInt64(1)
-                G[kk + b_off, i] = UInt8(bit1 + bit2)
-            end
+            _unpack_word_pair_to_G!(G, i, kk - 1, word_h1, word_h2, n_bits_in_word)
             kk += n_bits_in_word
         end
     end
