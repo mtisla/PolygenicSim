@@ -175,24 +175,36 @@ end
     fill_cumulative_per_deme!(cumw, w, layout) -> Nothing
 
 Per-deme cumulative-sum fill. Each deme's slice in `cumw` is its own cumulative
-starting from 0 to `sum(w in deme)`.
+starting from 0 to `sum(w in deme)`. The cumsum within a deme is sequential by
+nature, so threading happens *across* demes — useful only when `n_demes >= 4`
+(spatial mode with grid_size >= 2). Panmictic runs (one deme) fall through
+to the serial path.
 """
 function fill_cumulative_per_deme!(cumw::Vector{Float64}, w::Vector{Float64},
                                       layout::DemeLayout)
     npd = layout.N_per_deme
     n_d = layout.n_demes
+    cc = _parallel_chunks(n_d, 4)
+    if cc == 1
+        @inbounds for d in 1:n_d
+            _cumsum_one_deme!(cumw, w, d, npd)
+        end
+    else
+        Threads.@threads :static for d in 1:n_d
+            _cumsum_one_deme!(cumw, w, d, npd)
+        end
+    end
+    return nothing
+end
+
+@inline function _cumsum_one_deme!(cumw::Vector{Float64}, w::Vector{Float64},
+                                      d::Int, npd::Int)
     @inbounds begin
-        d = 1
-        while d <= n_d
-            offset = (d - 1) * npd
-            s = 0.0
-            k = 1
-            while k <= npd
-                s += w[offset + k]
-                cumw[offset + k] = s
-                k += 1
-            end
-            d += 1
+        offset = (d - 1) * npd
+        s = 0.0
+        for k in 1:npd
+            s += w[offset + k]
+            cumw[offset + k] = s
         end
     end
     return nothing

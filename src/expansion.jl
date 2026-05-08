@@ -98,22 +98,26 @@ function step_generation_packed_expand!(pop::PackedPop, vt::VariantTable,
 
     cc = scratch.chunk_count
     chunk_size_new = cld(new_total, cc)
-    @inbounds for k in 1:cc
-        lo = (k - 1) * chunk_size_new + 1
-        hi = min(k * chunk_size_new, new_total)
-        lo > hi && continue
-        rng_k = scratch.chunk_rngs[k]
-        recomb_k = scratch.chunk_recomb[k]
-        i = lo
-        while i <= hi
-            d = deme_of(new_layout, i)
-            d_mom = sample_source_deme(rng_k, old_layout, d)
-            mom = sample_parent_in_deme(rng_k, scratch.cumw, old_layout, d_mom)
-            d_dad = sample_source_deme(rng_k, old_layout, d)
-            dad = sample_parent_in_deme(rng_k, scratch.cumw, old_layout, d_dad)
-            gamete_packed!(view(new_H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng_k, recomb_k)
-            gamete_packed!(view(new_H_buf, :, 2i),     pop.H, dad, vt, cfg, rng_k, recomb_k)
-            i += 1
+    use_threads = cc > 1 && Threads.nthreads() > 1
+    if use_threads
+        Threads.@threads :static for k in 1:cc
+            lo = (k - 1) * chunk_size_new + 1
+            hi = min(k * chunk_size_new, new_total)
+            lo > hi && continue
+            _do_expand_chunk_packed!(pop, vt, cfg, new_H_buf, scratch.cumw,
+                                       old_layout, new_layout,
+                                       scratch.chunk_rngs[k], scratch.chunk_recomb[k],
+                                       lo, hi)
+        end
+    else
+        @inbounds for k in 1:cc
+            lo = (k - 1) * chunk_size_new + 1
+            hi = min(k * chunk_size_new, new_total)
+            lo > hi && continue
+            _do_expand_chunk_packed!(pop, vt, cfg, new_H_buf, scratch.cumw,
+                                       old_layout, new_layout,
+                                       scratch.chunk_rngs[k], scratch.chunk_recomb[k],
+                                       lo, hi)
         end
     end
 
@@ -141,6 +145,25 @@ function step_generation_packed_expand!(pop::PackedPop, vt::VariantTable,
     return nothing
 end
 
+@inline function _do_expand_chunk_packed!(pop::PackedPop, vt::VariantTable,
+                                             cfg::Config, new_H_buf::Matrix{UInt64},
+                                             cumw::Vector{Float64},
+                                             old_layout::DemeLayout,
+                                             new_layout::DemeLayout,
+                                             rng_k::Xoshiro, recomb_k::RecombScratch,
+                                             lo::Int, hi::Int)
+    @inbounds for i in lo:hi
+        d = deme_of(new_layout, i)
+        d_mom = sample_source_deme(rng_k, old_layout, d)
+        mom = sample_parent_in_deme(rng_k, cumw, old_layout, d_mom)
+        d_dad = sample_source_deme(rng_k, old_layout, d)
+        dad = sample_parent_in_deme(rng_k, cumw, old_layout, d_dad)
+        gamete_packed!(view(new_H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng_k, recomb_k)
+        gamete_packed!(view(new_H_buf, :, 2i),     pop.H, dad, vt, cfg, rng_k, recomb_k)
+    end
+    return nothing
+end
+
 # ---------------------------------------------------------------------------
 # Dense expansion step
 # ---------------------------------------------------------------------------
@@ -156,22 +179,26 @@ function step_generation_dense_expand!(pop::DensePop, vt::VariantTable,
 
     cc = scratch.chunk_count
     chunk_size_new = cld(new_total, cc)
-    @inbounds for k in 1:cc
-        lo = (k - 1) * chunk_size_new + 1
-        hi = min(k * chunk_size_new, new_total)
-        lo > hi && continue
-        rng_k = scratch.chunk_rngs[k]
-        recomb_k = scratch.chunk_recomb[k]
-        i = lo
-        while i <= hi
-            d = deme_of(new_layout, i)
-            d_mom = sample_source_deme(rng_k, old_layout, d)
-            mom = sample_parent_in_deme(rng_k, scratch.cumw, old_layout, d_mom)
-            d_dad = sample_source_deme(rng_k, old_layout, d)
-            dad = sample_parent_in_deme(rng_k, scratch.cumw, old_layout, d_dad)
-            gamete_dense!(view(new_H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng_k, recomb_k)
-            gamete_dense!(view(new_H_buf, :, 2i),     pop.H, dad, vt, cfg, rng_k, recomb_k)
-            i += 1
+    use_threads = cc > 1 && Threads.nthreads() > 1
+    if use_threads
+        Threads.@threads :static for k in 1:cc
+            lo = (k - 1) * chunk_size_new + 1
+            hi = min(k * chunk_size_new, new_total)
+            lo > hi && continue
+            _do_expand_chunk_dense!(pop, vt, cfg, new_H_buf, scratch.cumw,
+                                      old_layout, new_layout,
+                                      scratch.chunk_rngs[k], scratch.chunk_recomb[k],
+                                      lo, hi)
+        end
+    else
+        @inbounds for k in 1:cc
+            lo = (k - 1) * chunk_size_new + 1
+            hi = min(k * chunk_size_new, new_total)
+            lo > hi && continue
+            _do_expand_chunk_dense!(pop, vt, cfg, new_H_buf, scratch.cumw,
+                                      old_layout, new_layout,
+                                      scratch.chunk_rngs[k], scratch.chunk_recomb[k],
+                                      lo, hi)
         end
     end
 
@@ -193,6 +220,25 @@ function step_generation_dense_expand!(pop::DensePop, vt::VariantTable,
     end
 
     _finalize_expansion!(pop, scratch, new_H_buf, new_layout, L, UInt8(0))
+    return nothing
+end
+
+@inline function _do_expand_chunk_dense!(pop::DensePop, vt::VariantTable,
+                                            cfg::Config, new_H_buf::Matrix{UInt8},
+                                            cumw::Vector{Float64},
+                                            old_layout::DemeLayout,
+                                            new_layout::DemeLayout,
+                                            rng_k::Xoshiro, recomb_k::RecombScratch,
+                                            lo::Int, hi::Int)
+    @inbounds for i in lo:hi
+        d = deme_of(new_layout, i)
+        d_mom = sample_source_deme(rng_k, old_layout, d)
+        mom = sample_parent_in_deme(rng_k, cumw, old_layout, d_mom)
+        d_dad = sample_source_deme(rng_k, old_layout, d)
+        dad = sample_parent_in_deme(rng_k, cumw, old_layout, d_dad)
+        gamete_dense!(view(new_H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng_k, recomb_k)
+        gamete_dense!(view(new_H_buf, :, 2i),     pop.H, dad, vt, cfg, rng_k, recomb_k)
+    end
     return nothing
 end
 

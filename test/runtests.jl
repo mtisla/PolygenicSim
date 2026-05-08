@@ -254,13 +254,15 @@ end
 # Test 7: Stabilizing — Bulmer B < 0
 # ---------------------------------------------------------------------------
 @testset "Test 7 — stabilizing: B < 0" begin
+    # Pin n_threads=1 so the random sample path is independent of
+    # JULIA_NUM_THREADS — the calibrated seed expects single-chunk RNG.
     res = PS.simulate(PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=200_000,
                                  n_qtl=500, n_neutral=0, U=0.02,
                                  theta_override=0.5,
                                  vs_over_vp0=10.0,
                                  selection_mode=:stabilizing,
                                  ngen_eq=20, ngen_dir=0,
-                                 seed=UInt64(3),
+                                 seed=UInt64(3), n_threads=1,
                                  output_formats=Symbol[:summary],
                                  output_prefix=tempname()))
     @test res.summary !== nothing
@@ -749,12 +751,13 @@ end
 # Phase 4/diagnostics — weighted-average Bulmer B for 2D
 # ---------------------------------------------------------------------------
 @testset "Diagnostics — weighted-average Bulmer B for 2D" begin
+    # Pin n_threads=1 in both runs so seeds aren't sensitive to JULIA_NUM_THREADS.
     # In a panmictic run, weighted-avg B equals pooled B (single deme).
     cfg_pan = PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=50_000,
                          n_qtl=300, n_neutral=0, U=0.02, theta_override=0.5,
                          vs_over_vp0=10.0,
                          selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
-                         seed=UInt64(0xD0C0),
+                         seed=UInt64(0xD0C0), n_threads=1,
                          output_formats=Symbol[:summary],
                          output_prefix=tempname())
     res_pan = PS.simulate(cfg_pan)
@@ -768,7 +771,7 @@ end
                         grid_size=3, migration_rate=0.05, cline_amp=0.0,
                         vs_over_vp0=10.0,
                         selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
-                        seed=UInt64(0xD0C1),
+                        seed=UInt64(0xD0C1), n_threads=1,
                         output_formats=Symbol[:summary],
                         output_prefix=tempname())
     res_2d = PS.simulate(cfg_2d)

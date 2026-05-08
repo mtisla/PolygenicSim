@@ -190,4 +190,16 @@ function validate(cfg::Config)
     return nothing
 end
 
+"""
+    _parallel_chunks(N, min_size=256) -> Int
+
+Decide how many static chunks to split a length-N parallel-for into. Returns
+`Threads.nthreads()` if threading is enabled and `N >= min_size`, else 1
+(serial). The threshold avoids paying spawn/barrier overhead for tiny ranges.
+"""
+@inline function _parallel_chunks(N::Integer, min_size::Integer=256)
+    nt = Threads.nthreads()
+    return (nt > 1 && N >= min_size) ? nt : 1
+end
+
 export Config, n_variants, n_demes, n_total, theta, mu_per_site, validate

@@ -102,8 +102,11 @@ function compute_breeding_values!(scratch::GenScratch, pop::DensePop, vt::Varian
         fill!(scratch.A, 0.0)
         return nothing
     end
-    fill_genotype_buf_dense!(scratch.genotype_buf, pop.H, scratch.qtl_idx, N_total)
-    matvec_bv!(scratch.A, scratch.genotype_buf, scratch.alpha_qtl, N_total)
+    cc = scratch.chunk_count
+    fill_genotype_buf_dense!(scratch.genotype_buf, pop.H, scratch.qtl_idx, N_total;
+                              chunk_count=cc)
+    matvec_bv!(scratch.A, scratch.genotype_buf, scratch.alpha_qtl, N_total;
+                chunk_count=cc)
     return nothing
 end
 
@@ -113,8 +116,11 @@ function compute_breeding_values!(scratch::GenScratch, pop::PackedPop, vt::Varia
         fill!(scratch.A, 0.0)
         return nothing
     end
-    fill_genotype_buf_packed!(scratch.genotype_buf, pop.H, scratch.qtl_idx, N_total)
-    matvec_bv!(scratch.A, scratch.genotype_buf, scratch.alpha_qtl, N_total)
+    cc = scratch.chunk_count
+    fill_genotype_buf_packed!(scratch.genotype_buf, pop.H, scratch.qtl_idx, N_total;
+                               chunk_count=cc)
+    matvec_bv!(scratch.A, scratch.genotype_buf, scratch.alpha_qtl, N_total;
+                chunk_count=cc)
     return nothing
 end
 
@@ -189,16 +195,27 @@ function step_generation_dense!(pop::DensePop, vt::VariantTable, cfg::Config,
     apply_fitness!(scratch.w, scratch.A, scratch.env, phase, gen_in_phase, layout)
     fill_cumulative_per_deme!(scratch.cumw, scratch.w, layout)
     cc = scratch.chunk_count
-    @inbounds begin
-        k = 1
-        while k <= cc
-            if scratch.chunk_offspring_lo[k] <= scratch.chunk_offspring_hi[k]
-                _do_chunk_dense!(pop, vt, cfg, scratch.cumw, layout,
-                                  scratch.chunk_rngs[k], scratch.chunk_recomb[k],
-                                  scratch.chunk_offspring_lo[k],
-                                  scratch.chunk_offspring_hi[k])
+    use_threads = cc > 1 && Threads.nthreads() > 1
+    if use_threads
+        Threads.@threads :static for k in 1:cc
+            scratch.chunk_offspring_lo[k] <= scratch.chunk_offspring_hi[k] || continue
+            _do_chunk_dense!(pop, vt, cfg, scratch.cumw, layout,
+                              scratch.chunk_rngs[k], scratch.chunk_recomb[k],
+                              scratch.chunk_offspring_lo[k],
+                              scratch.chunk_offspring_hi[k])
+        end
+    else
+        @inbounds begin
+            k = 1
+            while k <= cc
+                if scratch.chunk_offspring_lo[k] <= scratch.chunk_offspring_hi[k]
+                    _do_chunk_dense!(pop, vt, cfg, scratch.cumw, layout,
+                                      scratch.chunk_rngs[k], scratch.chunk_recomb[k],
+                                      scratch.chunk_offspring_lo[k],
+                                      scratch.chunk_offspring_hi[k])
+                end
+                k += 1
             end
-            k += 1
         end
     end
     mutate_dense!(pop, mu_per_site(cfg), rng, scratch.mscratch)

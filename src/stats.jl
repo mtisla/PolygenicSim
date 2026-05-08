@@ -14,42 +14,101 @@
 
 """
     population_mean_var(A) -> (mean, var)
+
+Two-pass mean/variance over a length-N vector. Threaded over individuals when
+`Threads.nthreads() > 1` and N is large.
 """
 function population_mean_var(A::Vector{Float64})
     n = length(A)
     n == 0 && return (0.0, 0.0)
-    s = 0.0
-    @inbounds for x in A
-        s += x
+    cc = _parallel_chunks(n, 1024)
+    if cc == 1
+        s = 0.0
+        @inbounds for x in A
+            s += x
+        end
+        m = s / n
+        v = 0.0
+        @inbounds for x in A
+            d = x - m
+            v += d * d
+        end
+        return (m, n > 1 ? v / (n - 1) : 0.0)
     end
-    m = s / n
+    chunk = cld(n, cc)
+    sums = zeros(Float64, cc)
+    Threads.@threads :static for k in 1:cc
+        i_lo = (k - 1) * chunk + 1
+        i_hi = min(k * chunk, n)
+        s = 0.0
+        @inbounds for i in i_lo:i_hi
+            s += A[i]
+        end
+        sums[k] = s
+    end
+    m = sum(sums) / n
+    sumsq = zeros(Float64, cc)
+    Threads.@threads :static for k in 1:cc
+        i_lo = (k - 1) * chunk + 1
+        i_hi = min(k * chunk, n)
+        v = 0.0
+        @inbounds for i in i_lo:i_hi
+            d = A[i] - m
+            v += d * d
+        end
+        sumsq[k] = v
+    end
     v = 0.0
-    @inbounds for x in A
-        d = x - m
-        v += d * d
+    @inbounds for x in sumsq
+        v += x
     end
-    var = n > 1 ? v / (n - 1) : 0.0
-    return (m, var)
+    return (m, n > 1 ? v / (n - 1) : 0.0)
 end
 
 """
     allele_freqs!(p, pop, vt) -> Vector{Float64}
 
 In-place compute of empirical allele frequencies for every variant. Dispatches
-on the population backend.
+on the population backend. Threaded across loci when `Threads.nthreads() > 1`.
 """
 function allele_freqs!(p::Vector{Float64}, pop::DensePop, vt::VariantTable)
     twoN = 2 * pop.N
-    @inbounds for j in 1:pop.L
-        p[j] = allele_frequency_dense(pop.H, j, twoN)
+    L = pop.L
+    cc = _parallel_chunks(L, 1024)
+    if cc == 1
+        @inbounds for j in 1:L
+            p[j] = allele_frequency_dense(pop.H, j, twoN)
+        end
+    else
+        chunk = cld(L, cc)
+        Threads.@threads :static for k in 1:cc
+            j_lo = (k - 1) * chunk + 1
+            j_hi = min(k * chunk, L)
+            @inbounds for j in j_lo:j_hi
+                p[j] = allele_frequency_dense(pop.H, j, twoN)
+            end
+        end
     end
     return p
 end
 
 function allele_freqs!(p::Vector{Float64}, pop::PackedPop, vt::VariantTable)
     twoN = 2 * pop.N
-    @inbounds for j in 1:pop.L
-        p[j] = allele_frequency_packed(pop.H, j, twoN)
+    L = pop.L
+    cc = _parallel_chunks(L, 1024)
+    if cc == 1
+        @inbounds for j in 1:L
+            p[j] = allele_frequency_packed(pop.H, j, twoN)
+        end
+    else
+        chunk = cld(L, cc)
+        Threads.@threads :static for k in 1:cc
+            j_lo = (k - 1) * chunk + 1
+            j_hi = min(k * chunk, L)
+            @inbounds for j in j_lo:j_hi
+                p[j] = allele_frequency_packed(pop.H, j, twoN)
+            end
+        end
     end
     return p
 end
@@ -58,12 +117,32 @@ end
     sum_of_per_locus_var(p, alpha) -> Float64
 
 `Σ_j 2 p_j (1−p_j) α_j²` — the additive variance under HWE/LE summed across
-QTL sites (neutral sites contribute 0 because α = 0).
+QTL sites (neutral sites contribute 0 because α = 0). Threaded across loci.
 """
 function sum_of_per_locus_var(p::Vector{Float64}, alpha::Vector{Float64})
+    L = length(p)
+    cc = _parallel_chunks(L, 1024)
+    if cc == 1
+        s = 0.0
+        @inbounds for j in eachindex(p)
+            s += 2.0 * p[j] * (1.0 - p[j]) * alpha[j] * alpha[j]
+        end
+        return s
+    end
+    chunk = cld(L, cc)
+    sums = zeros(Float64, cc)
+    Threads.@threads :static for k in 1:cc
+        j_lo = (k - 1) * chunk + 1
+        j_hi = min(k * chunk, L)
+        s = 0.0
+        @inbounds for j in j_lo:j_hi
+            s += 2.0 * p[j] * (1.0 - p[j]) * alpha[j] * alpha[j]
+        end
+        sums[k] = s
+    end
     s = 0.0
-    @inbounds for j in eachindex(p)
-        s += 2.0 * p[j] * (1.0 - p[j]) * alpha[j] * alpha[j]
+    @inbounds for x in sums
+        s += x
     end
     return s
 end
@@ -81,15 +160,36 @@ end
 
 """
     polymorphic_count(p; tol=1e-12) -> Int
+
+Count of loci with `tol < p < 1 - tol`. Threaded across loci.
 """
 function polymorphic_count(p::Vector{Float64}; tol::Float64=1e-12)
-    n = 0
-    @inbounds for v in p
-        if v > tol && v < 1 - tol
-            n += 1
+    L = length(p)
+    cc = _parallel_chunks(L, 1024)
+    if cc == 1
+        n = 0
+        @inbounds for v in p
+            if v > tol && v < 1 - tol
+                n += 1
+            end
         end
+        return n
     end
-    return n
+    chunk = cld(L, cc)
+    counts = zeros(Int, cc)
+    Threads.@threads :static for k in 1:cc
+        j_lo = (k - 1) * chunk + 1
+        j_hi = min(k * chunk, L)
+        c = 0
+        @inbounds for j in j_lo:j_hi
+            v = p[j]
+            if v > tol && v < 1 - tol
+                c += 1
+            end
+        end
+        counts[k] = c
+    end
+    return sum(counts)
 end
 
 # ---------------------------------------------------------------------------
@@ -121,7 +221,7 @@ end
     breeding_value_stats_per_deme!(mean_buf, var_buf, A, layout) -> Nothing
 
 Fill `mean_buf[d]` and `var_buf[d]` with the within-deme mean and (sample)
-variance of `A` for each deme.
+variance of `A` for each deme. Threaded across demes when `n_demes >= 4`.
 """
 function breeding_value_stats_per_deme!(mean_buf::Vector{Float64},
                                            var_buf::Vector{Float64},
@@ -129,7 +229,23 @@ function breeding_value_stats_per_deme!(mean_buf::Vector{Float64},
                                            layout::DemeLayout)
     n_d = layout.n_demes
     npd = layout.N_per_deme
-    @inbounds for d in 1:n_d
+    cc = _parallel_chunks(n_d, 4)
+    if cc == 1
+        @inbounds for d in 1:n_d
+            _bv_stats_one_deme!(mean_buf, var_buf, A, d, npd)
+        end
+    else
+        Threads.@threads :static for d in 1:n_d
+            _bv_stats_one_deme!(mean_buf, var_buf, A, d, npd)
+        end
+    end
+    return nothing
+end
+
+@inline function _bv_stats_one_deme!(mean_buf::Vector{Float64},
+                                        var_buf::Vector{Float64},
+                                        A::Vector{Float64}, d::Int, npd::Int)
+    @inbounds begin
         offset = (d - 1) * npd
         s = 0.0
         for k in 1:npd
@@ -150,14 +266,31 @@ end
 """
     phenotype_var_per_deme!(var_buf, A, env, layout) -> Nothing
 
-Fill `var_buf[d]` with the within-deme variance of `A + env`.
+Fill `var_buf[d]` with the within-deme variance of `A + env`. Threaded across
+demes when `n_demes >= 4`.
 """
 function phenotype_var_per_deme!(var_buf::Vector{Float64},
                                     A::Vector{Float64}, env::Vector{Float64},
                                     layout::DemeLayout)
     n_d = layout.n_demes
     npd = layout.N_per_deme
-    @inbounds for d in 1:n_d
+    cc = _parallel_chunks(n_d, 4)
+    if cc == 1
+        @inbounds for d in 1:n_d
+            _pheno_var_one_deme!(var_buf, A, env, d, npd)
+        end
+    else
+        Threads.@threads :static for d in 1:n_d
+            _pheno_var_one_deme!(var_buf, A, env, d, npd)
+        end
+    end
+    return nothing
+end
+
+@inline function _pheno_var_one_deme!(var_buf::Vector{Float64},
+                                         A::Vector{Float64}, env::Vector{Float64},
+                                         d::Int, npd::Int)
+    @inbounds begin
         offset = (d - 1) * npd
         s = 0.0
         for k in 1:npd
@@ -178,7 +311,8 @@ end
     sum_of_var_per_deme!(sov_buf, pop, layout, qtl_idx, alpha_qtl) -> Nothing
 
 For each deme `d`, fill `sov_buf[d] = Σ_j 2 p_d[j] (1 − p_d[j]) α_j²` where
-`p_d[j]` is the within-deme allele frequency at QTL site `j`.
+`p_d[j]` is the within-deme allele frequency at QTL site `j`. Threaded across
+demes when `n_demes >= 4`.
 """
 function sum_of_var_per_deme!(sov_buf::Vector{Float64},
                                 pop::PackedPop, layout::DemeLayout,
@@ -186,17 +320,15 @@ function sum_of_var_per_deme!(sov_buf::Vector{Float64},
                                 alpha_qtl::Vector{Float64})
     n_d = layout.n_demes
     npd = layout.N_per_deme
-    @inbounds for d in 1:n_d
-        offset = (d - 1) * npd
-        col_start = 2 * offset + 1
-        col_end = 2 * (offset + npd)
-        s = 0.0
-        for kk in eachindex(qtl_idx)
-            j = qtl_idx[kk]
-            p = _allele_freq_packed_in_deme(pop.H, j, col_start, col_end)
-            s += 2.0 * p * (1.0 - p) * alpha_qtl[kk] * alpha_qtl[kk]
+    cc = _parallel_chunks(n_d, 4)
+    if cc == 1
+        @inbounds for d in 1:n_d
+            sov_buf[d] = _sov_one_deme_packed(pop.H, qtl_idx, alpha_qtl, d, npd)
         end
-        sov_buf[d] = s
+    else
+        Threads.@threads :static for d in 1:n_d
+            @inbounds sov_buf[d] = _sov_one_deme_packed(pop.H, qtl_idx, alpha_qtl, d, npd)
+        end
     end
     return nothing
 end
@@ -207,19 +339,45 @@ function sum_of_var_per_deme!(sov_buf::Vector{Float64},
                                 alpha_qtl::Vector{Float64})
     n_d = layout.n_demes
     npd = layout.N_per_deme
-    @inbounds for d in 1:n_d
-        offset = (d - 1) * npd
-        col_start = 2 * offset + 1
-        col_end = 2 * (offset + npd)
-        s = 0.0
-        for kk in eachindex(qtl_idx)
-            j = qtl_idx[kk]
-            p = _allele_freq_dense_in_deme(pop.H, j, col_start, col_end)
-            s += 2.0 * p * (1.0 - p) * alpha_qtl[kk] * alpha_qtl[kk]
+    cc = _parallel_chunks(n_d, 4)
+    if cc == 1
+        @inbounds for d in 1:n_d
+            sov_buf[d] = _sov_one_deme_dense(pop.H, qtl_idx, alpha_qtl, d, npd)
         end
-        sov_buf[d] = s
+    else
+        Threads.@threads :static for d in 1:n_d
+            @inbounds sov_buf[d] = _sov_one_deme_dense(pop.H, qtl_idx, alpha_qtl, d, npd)
+        end
     end
     return nothing
+end
+
+@inline function _sov_one_deme_packed(H::Matrix{UInt64}, qtl_idx::Vector{Int},
+                                         alpha_qtl::Vector{Float64}, d::Int, npd::Int)
+    offset = (d - 1) * npd
+    col_start = 2 * offset + 1
+    col_end = 2 * (offset + npd)
+    s = 0.0
+    @inbounds for kk in eachindex(qtl_idx)
+        j = qtl_idx[kk]
+        p = _allele_freq_packed_in_deme(H, j, col_start, col_end)
+        s += 2.0 * p * (1.0 - p) * alpha_qtl[kk] * alpha_qtl[kk]
+    end
+    return s
+end
+
+@inline function _sov_one_deme_dense(H::Matrix{UInt8}, qtl_idx::Vector{Int},
+                                        alpha_qtl::Vector{Float64}, d::Int, npd::Int)
+    offset = (d - 1) * npd
+    col_start = 2 * offset + 1
+    col_end = 2 * (offset + npd)
+    s = 0.0
+    @inbounds for kk in eachindex(qtl_idx)
+        j = qtl_idx[kk]
+        p = _allele_freq_dense_in_deme(H, j, col_start, col_end)
+        s += 2.0 * p * (1.0 - p) * alpha_qtl[kk] * alpha_qtl[kk]
+    end
+    return s
 end
 
 """
@@ -277,15 +435,6 @@ without a runtime gather, unlocking SIMD.
     return true
 end
 
-# --- Threading helper -------------------------------------------------------
-# BV fill + matvec are embarrassingly parallel across individuals. Partition
-# the 1:N range into `cc` static chunks. For tiny populations (or 1 thread)
-# the chunked path collapses to a single in-place call.
-@inline function _bv_chunk_count(N::Int)
-    nt = Threads.nthreads()
-    return (nt > 1 && N >= 256) ? nt : 1
-end
-
 """
     fill_genotype_buf_dense!(G, H, qtl_idx, N)
 
@@ -297,11 +446,12 @@ LLVM keeps the loop SIMD-vectorized (vpaddb on 32 bytes per cycle).
 Threaded over individuals when `Threads.nthreads() > 1`.
 """
 function fill_genotype_buf_dense!(G::Matrix{UInt8}, H::Matrix{UInt8},
-                                     qtl_idx::Vector{Int}, N::Integer)
+                                     qtl_idx::Vector{Int}, N::Integer;
+                                     chunk_count::Integer = 0)
     n_qtl = size(G, 1)
     n_qtl == 0 && return nothing
     Nint = Int(N)
-    cc = _bv_chunk_count(Nint)
+    cc = chunk_count > 0 ? Int(chunk_count) : _parallel_chunks(Nint)
     if is_contiguous_qtl_idx(qtl_idx, n_qtl)
         @inbounds offset = qtl_idx[1] - 1
         if cc == 1
@@ -369,11 +519,12 @@ LUT-driven 8-bits-per-store unpack (`_unpack_word_pair_to_G!`) instead of
 per-bit shifts. Threaded over individuals when `Threads.nthreads() > 1`.
 """
 function fill_genotype_buf_packed!(G::Matrix{UInt8}, H::Matrix{UInt64},
-                                      qtl_idx::Vector{Int}, N::Integer)
+                                      qtl_idx::Vector{Int}, N::Integer;
+                                      chunk_count::Integer = 0)
     n_qtl = size(G, 1)
     n_qtl == 0 && return nothing
     Nint = Int(N)
-    cc = _bv_chunk_count(Nint)
+    cc = chunk_count > 0 ? Int(chunk_count) : _parallel_chunks(Nint)
     if is_contiguous_qtl_idx(qtl_idx, n_qtl)
         @inbounds offset = qtl_idx[1] - 1
         if cc == 1
@@ -511,10 +662,11 @@ contiguous Float64 loads from alpha, FMA reduction. Threaded over individuals
 when `Threads.nthreads() > 1`.
 """
 function matvec_bv!(A::Vector{Float64}, G::Matrix{UInt8},
-                     alpha_qtl::Vector{Float64}, N::Integer)
+                     alpha_qtl::Vector{Float64}, N::Integer;
+                     chunk_count::Integer = 0)
     Nint = Int(N)
     n_qtl = size(G, 1)
-    cc = _bv_chunk_count(Nint)
+    cc = chunk_count > 0 ? Int(chunk_count) : _parallel_chunks(Nint)
     if cc == 1
         _matvec_bv_range!(A, G, alpha_qtl, 1, Nint, n_qtl)
     else

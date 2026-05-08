@@ -48,7 +48,10 @@ end
     apply_fitness!(w, A, env, phase, gen_in_phase, layout) -> Nothing
 
 Fill `w[i] = exp(-(A[i] + env[i] - θ_{d(i),t})² / (2 V_S))`.
-For `:neutral` phases `w` is filled with 1.0.
+For `:neutral` phases `w` is filled with 1.0. Threaded across demes when
+`n_demes >= 4`; for panmictic / few-deme runs, falls back to a single-pass
+serial loop (each individual's fitness is independent so no cross-thread
+synchronization is needed even when threaded).
 """
 function apply_fitness!(w::Vector{Float64}, A::Vector{Float64},
                          env::Vector{Float64}, phase::PhaseSelection,
@@ -61,21 +64,29 @@ function apply_fitness!(w::Vector{Float64}, A::Vector{Float64},
     npd = layout.N_per_deme
     n_d = layout.n_demes
     g_in_p = Int(gen_in_phase)
-    @inbounds begin
-        d = 1
-        while d <= n_d
+    cc = _parallel_chunks(n_d, 4)
+    if cc == 1
+        @inbounds for d in 1:n_d
             θ = g_in_p < phase.t_shift ? phase.theta_pre[d] : phase.theta_post[d]
-            offset = (d - 1) * npd
-            k = 1
-            while k <= npd
-                i = offset + k
-                z = A[i] + env[i]
-                diff = z - θ
-                w[i] = exp(-diff * diff * inv2Vs)
-                k += 1
-            end
-            d += 1
+            _apply_fitness_one_deme!(w, A, env, θ, inv2Vs, d, npd)
         end
+    else
+        Threads.@threads :static for d in 1:n_d
+            θ = g_in_p < phase.t_shift ? phase.theta_pre[d] : phase.theta_post[d]
+            _apply_fitness_one_deme!(w, A, env, θ, inv2Vs, d, npd)
+        end
+    end
+    return nothing
+end
+
+@inline function _apply_fitness_one_deme!(w::Vector{Float64}, A::Vector{Float64},
+                                             env::Vector{Float64}, θ::Float64,
+                                             inv2Vs::Float64, d::Int, npd::Int)
+    offset = (d - 1) * npd
+    @inbounds for k in 1:npd
+        i = offset + k
+        diff = A[i] + env[i] - θ
+        w[i] = exp(-diff * diff * inv2Vs)
     end
     return nothing
 end
