@@ -9,6 +9,40 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-05-12
+
+### Fixed
+- **`dc<co>_perm_p_<scope>` is now two-tailed.** Previously reported the
+  one-sided lower-tail p (inherited from the R reference verbatim), which
+  is the **wrong tail** for Δ_cross. The dc test asks whether the L and H
+  tails of the polarized-frequency spectrum show different per-pair B_jk
+  distributions in **either direction**: Bulmer repulsion among rising
+  alleles drives BLL ≪ 0 → δ > 0; coupling LD would drive δ < 0. Both
+  deserve detection.
+
+  New formula:
+  ```
+  perm_p = (1 + #{|null − null_mean| ≥ |obs − null_mean|}) / (n_perm + 1)
+  ```
+  Empirical two-tailed sign-flip permutation p. `B_perm_p` stays
+  one-tailed lower (correct: E[B] < 0 under both stabilizing and
+  directional selection).
+
+  Impact: in the 100-gen `sel_grad = 0.1` directional smoke run, dc20 at
+  `win_10pct` and `win_25pct` now correctly report p = 0.003 and 0.002
+  (Z = +2.86 and +3.17). The previous lower-tail convention reported
+  these as p > 0.99, hiding the signal.
+
+  **Deliberate divergence from the R reference** — documented in
+  README + module docstring.
+
+### Note
+- Δ_cross is already computed at all 6 scopes (4 windows + within +
+  genome), per Q3=(b) when oracle stats shipped in v0.6.0. The previous
+  display only showed within + genome because of how the example
+  pretty-printer was written; the data was always in `OracleResult`
+  matrices and the `.oracle.tsv`.
+
 ## [0.6.2] — 2026-05-12
 
 ### Added
@@ -324,7 +358,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/mtisla/PolygenicSim/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/mtisla/PolygenicSim/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/mtisla/PolygenicSim/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/mtisla/PolygenicSim/compare/v0.5.0...v0.6.0

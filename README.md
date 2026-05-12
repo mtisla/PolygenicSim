@@ -366,6 +366,18 @@ Scopes: user-specified windows (as % of `chr_len_bp`) plus **within-chr** and
 `[20, 50]` %), 13 fields are reported: `nL`, `nH`, `nPLH`, `nPLL`, `nPHH`,
 `BLH`, `BLL`, `BHH`, `delta`, `null_mean`, `null_sd`, `Z`, `perm_p`.
 
+**Test directions:**
+- `B_perm_p` is **one-tailed lower** (`Pr(null ≤ obs)`): tests whether
+  `B` is significantly *more negative* than null. Appropriate because
+  E[B] < 0 under both stabilizing and directional selection (Bulmer effect).
+- `dc<co>_perm_p` is **two-tailed** (symmetric absolute-deviation): tests
+  whether `δ` deviates from the null in either direction. Appropriate
+  because the L and H tails of the polarized-frequency spectrum can be
+  enriched in either direction — Bulmer repulsion among rising alleles
+  drives `BLL ≪ 0` (and so δ > 0); coupling LD would drive δ < 0.
+  Diverges from the R reference (`bulmer/R/stats.R`) which reports the
+  one-tailed lower-tail p for `dc` — that's the wrong tail for the test.
+
 For structured runs (`:twoD_perp` / `:twoD_recent`), the per-deme components
 (`VA_k`, `VG_off_k`, `R_k`) are deme-weighted (`w_k = N_k / N_total`) before
 ratio formation — matches the R reference's deme-weighted-component

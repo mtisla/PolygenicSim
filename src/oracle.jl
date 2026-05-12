@@ -39,6 +39,13 @@ using Printf
 #       BHH = mean(B_HH[lower-tri])
 #       δ   = BLH − 0.5 (BLL + BHH)
 #       Sign-flip null on δ → null_mean, null_sd, Z, perm_p.
+#       perm_p is **two-tailed**: tests whether δ deviates from the null in
+#       either direction (Bulmer repulsion among rising alleles makes BLL
+#       very negative → δ > 0; coupling LD would make δ < 0). This
+#       diverges from the R reference (`bulmer/R/stats.R`) which reports a
+#       one-sided lower-tail p — that convention is correct for B but
+#       wrong-tailed for δ. B itself stays left-tailed (E[B] < 0 under
+#       both stabilizing and directional selection).
 #
 # Scopes: window scopes (`oracle_windows_pct` % of chr_len_bp) + "within"
 # (same chromosome, any distance) + "genome" (any pair, off-diagonal).
@@ -456,7 +463,16 @@ function _delta_cross_one(R_meta::Matrix{T}, α::Vector{T},
     nm  = mean(delta_null)
     nsd = std(delta_null; corrected=true)
     Z   = nsd > 1e-30 ? (delta_obs - nm) / nsd : NaN
-    p_perm = (1 + count(δ -> δ <= delta_obs, delta_null)) / (n_perm + 1)
+    # Two-tailed empirical permutation p-value. The Δ_cross statistic tests
+    # whether the L and H tails of the polarized-frequency spectrum have
+    # *different* per-pair B_jk distributions, in either direction (e.g.,
+    # Bulmer repulsion among rising alleles makes BLL very negative → δ
+    # positive; coupling LD would make δ negative). Tests deviation from
+    # null in either direction via symmetric absolute deviation:
+    #   p_two = (1 + #{|null - null_mean| ≥ |obs - null_mean|}) / (n_perm + 1)
+    abs_dev_obs = abs(delta_obs - nm)
+    p_perm = (1 + count(d -> abs(d - nm) >= abs_dev_obs, delta_null)) /
+                (n_perm + 1)
 
     return (nL = nL, nH = nH, nPLH = nPLH, nPLL = nPLL, nPHH = nPHH,
             BLH = BLH_obs, BLL = BLL_obs, BHH = BHH_obs,
