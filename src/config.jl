@@ -77,10 +77,16 @@ Base.@kwdef struct Config
     output_prefix::String = "polygenicsim"
 
     # diagnostics
-    # n_int controls intermediate summary frequency:
-    #   n_int == 0  ⇒ only a final-generation summary is produced
-    #   n_int >  0  ⇒ a summary is also produced every n_int generations
-    n_int::Int = 0
+    # n_int controls the trajectory-snapshot interval (in generations) for
+    # convergence diagnostics in the summary:
+    #   n_int <  0  ⇒ auto: `max(1, ngen_eq ÷ 200)` — targets ~200 snapshots
+    #                 over the whole run, ≲2% overhead regardless of run length.
+    #   n_int == 0  ⇒ no intermediate snapshots; only the final-generation
+    #                 summary fields. Fastest (zero diagnostic overhead).
+    #   n_int >  0  ⇒ snapshot every n_int generations.
+    # Default is auto; explicitly set to 0 to disable diagnostics entirely
+    # for hot-loop / max-throughput runs.
+    n_int::Int = -1
 
     # backend
     backend::Symbol = :packed                        # :packed | :dense
@@ -245,7 +251,7 @@ function validate(cfg::Config)
     end
     cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))
-    cfg.n_int >= 0 || throw(ArgumentError("n_int must be >= 0"))
+    cfg.n_int >= -1 || throw(ArgumentError("n_int must be >= -1 (-1 = auto)"))
     # Phase 4 invariants (spatial)
     cfg.grid_size >= 1 ||
         throw(ArgumentError("grid_size must be >= 1"))

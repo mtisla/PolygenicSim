@@ -220,7 +220,7 @@ code. Key answers:
 | Q57 | MAF | default `maf_min = 0`; output-side filter would be downstream of the simulator |
 | Q58 | BV coordinate | kernel raw; report demeaned |
 | Q59 | IID indexing | column-major `demeID = x + y · grid_size + 1` (matches bulmer.slim:536) |
-| Q60 | Summary interval | unified into single `n_int` knob: `n_int=0` (default) ⇒ final-gen summary only; `n_int=k>0` ⇒ also log every k gens |
+| Q60 | Summary interval | `n_int` controls trajectory snapshot frequency: default `-1` ⇒ auto = `max(1, ngen_eq÷200)` (~200 snapshots, ≲2% overhead); `0` ⇒ no trajectory; `k>0` ⇒ snapshot every k gens |
 | Q61 | Replication API | user-side loop; no `replicate()` in the package |
 | Q62 | Mutation parameterization | `U` replaced by `Uqtl` (per-gamete QTL-targeting rate) + optional `Uneu`; when `Uneu` is `nothing`, auto-derived as `Uqtl·n_neutral/n_qtl` (uniform per-site rate, matches `bulmer.slim`). `n_neutral = 0` (default) → QTL-only fast path, skips neutral pool entirely. Strict coupling: `Uneu > 0 ⟺ n_neutral > 0`. |
 
