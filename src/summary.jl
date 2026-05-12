@@ -60,7 +60,8 @@ end
 # Every field of Config must appear in exactly one category (verified below).
 # ---------------------------------------------------------------------------
 const _CONFIG_CATEGORIES = (
-    "demographic" => (:N, :Ne, :grid_size, :migration_rate, :cline_amp,
+    "demographic" => (:N, :Ne, :demography, :grid_size, :n_recent,
+                       :migration_rate, :cline_amp,
                        :expansion_factor, :expansion_k_before_end),
     "genomic"     => (:n_chr, :chr_len_bp, :n_qtl, :n_neutral, :xovers_per_chr),
     "mutation"    => (:Uqtl, :Uneu, :init_distribution, :theta_override,

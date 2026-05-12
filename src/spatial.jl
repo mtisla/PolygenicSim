@@ -47,7 +47,9 @@ end
 """
     DemeLayout(cfg) -> DemeLayout
 
-Build the spatial layout from `cfg`. Panmictic ⇒ single deme, no neighbors.
+Build the **structured** spatial layout from `cfg` (the post-onset layout for
+`:twoD_recent`; the start-of-run layout for `:panmictic` and `:twoD_perp`).
+Panmictic ⇒ single deme, no neighbors.
 """
 function DemeLayout(cfg::Config)
     g = cfg.grid_size
@@ -88,6 +90,34 @@ function DemeLayout(cfg::Config)
 
     return DemeLayout(g, n_demes_v, N_per_deme, N_total_v, m,
                        neighbors, n_neighbors, prob_stay, deme_ind_offset)
+end
+
+"""
+    panmictic_layout(N_total) -> DemeLayout
+
+Build a single-deme layout of size `N_total` (no neighbors, no migration).
+Used for the pre-structure phase of `:twoD_recent` and as the initial
+layout for `:panmictic`.
+"""
+function panmictic_layout(N_total::Integer)
+    return DemeLayout(1, 1, Int(N_total), Int(N_total), 0.0,
+                       [Int[]], [0], [1.0], [0])
+end
+
+"""
+    initial_layout(cfg) -> DemeLayout
+
+Layout the simulator starts with at gen 0. For `:panmictic`, equivalent to
+`DemeLayout(cfg)` (one big deme). For `:twoD_perp`, the full structured
+grid. For `:twoD_recent`, a single deme of size `cfg.N × cfg.grid_size²`
+(pre-structure panmictic phase). The layout swaps to `DemeLayout(cfg)` at
+the structure-onset gen.
+"""
+function initial_layout(cfg::Config)
+    if cfg.demography === :twoD_recent
+        return panmictic_layout(cfg.N * cfg.grid_size * cfg.grid_size)
+    end
+    return DemeLayout(cfg)
 end
 
 """
@@ -223,5 +253,5 @@ function deme_ids(layout::DemeLayout)
     return out
 end
 
-export DemeLayout, deme_of, cline_offsets, sample_source_deme,
+export DemeLayout, deme_of, cline_offsets, sample_source_deme, panmictic_layout, initial_layout,
        sample_parent_in_deme, fill_cumulative_per_deme!, deme_ids

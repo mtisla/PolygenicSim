@@ -486,7 +486,7 @@ end
 @testset "Phase 4 — DemeLayout and migration" begin
     cfg = PS.Config(N=10, Ne=10, n_chr=1, chr_len_bp=1000,
                      n_qtl=10, n_neutral=0, Uqtl=0.0, theta_override=0.5,
-                     grid_size=3, migration_rate=0.05,
+                     demography=:twoD_perp, grid_size=3, migration_rate=0.05,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      output_formats=Symbol[])
     layout = PS.DemeLayout(cfg)
@@ -524,10 +524,10 @@ end
 
     # m = 0: each deme drifts independently. With finite small N per deme,
     # demes diverge — pooled F_ST > 0 after several generations.
-    res_iso = PS.simulate(PS.Config(; grid_size=3, migration_rate=0.0,
+    res_iso = PS.simulate(PS.Config(; demography=:twoD_perp, grid_size=3, migration_rate=0.0,
                                        seed=UInt64(0xA1), base...))
     # m = 0.25 (max): heavy mixing approaches panmictic.
-    res_mix = PS.simulate(PS.Config(; grid_size=3, migration_rate=0.25,
+    res_mix = PS.simulate(PS.Config(; demography=:twoD_perp, grid_size=3, migration_rate=0.25,
                                        seed=UInt64(0xA2), base...))
 
     layout_iso = PS.DemeLayout(res_iso.cfg)
@@ -580,7 +580,7 @@ end
     for mode in (:neutral, :stabilizing, :directional)
         cfg = PS.Config(N=50, Ne=50, n_chr=2, chr_len_bp=10_000,
                          n_qtl=100, n_neutral=20, Uqtl=0.02, theta_override=0.5,
-                         grid_size=3, migration_rate=0.05, cline_amp=0.0,
+                         demography=:twoD_perp, grid_size=3, migration_rate=0.05, cline_amp=0.0,
                          vs_over_vp0=15.0,
                          selection_mode=mode,
                          directional_start_from=:msd,
@@ -600,7 +600,7 @@ end
 @testset "Phase 4 — cline produces per-deme phenotype gradient" begin
     cfg = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
                      n_qtl=400, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-                     grid_size=3, migration_rate=0.05, cline_amp=2.0,
+                     demography=:twoD_perp, grid_size=3, migration_rate=0.05, cline_amp=2.0,
                      vs_over_vp0=10.0,
                      selection_mode=:stabilizing, ngen_eq=20, ngen_dir=0,
                      seed=UInt64(0xC100), output_formats=Symbol[])
@@ -677,7 +677,7 @@ end
 @testset "Phase 5 — expansion in stepping-stone metapopulation" begin
     cfg = PS.Config(N=50, Ne=50, n_chr=2, chr_len_bp=10_000,
                      n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-                     grid_size=3, migration_rate=0.05,
+                     demography=:twoD_perp, grid_size=3, migration_rate=0.05,
                      selection_mode=:stabilizing, ngen_eq=8, ngen_dir=0,
                      vs_over_vp0=15.0,
                      expansion_factor=2.0, expansion_k_before_end=3,
@@ -757,7 +757,7 @@ end
     # also be negative under stabilizing selection.
     cfg_2d = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
                         n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-                        grid_size=3, migration_rate=0.05, cline_amp=0.0,
+                        demography=:twoD_perp, grid_size=3, migration_rate=0.05, cline_amp=0.0,
                         vs_over_vp0=10.0,
                         selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
                         seed=UInt64(0xD0C1), n_threads=1,
@@ -771,7 +771,7 @@ end
 @testset "Diagnostics — weighted_avg_demes equals simple mean for equal sizes" begin
     cfg = PS.Config(N=20, Ne=20, n_chr=1, chr_len_bp=1000,
                      n_qtl=10, n_neutral=0, Uqtl=0.0, theta_override=0.5,
-                     grid_size=4, migration_rate=0.0,
+                     demography=:twoD_perp, grid_size=4, migration_rate=0.0,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      output_formats=Symbol[])
     layout = PS.DemeLayout(cfg)
@@ -995,6 +995,113 @@ end
         seed=UInt64(99))
     res_zero = PS.simulate(cfg_zero)
     @test res_zero.final_gen == 0
+end
+
+@testset "Demography — :twoD_recent (recent structure onset)" begin
+    # --- Validation ---------------------------------------------------------
+    # :panmictic requires grid_size==1
+    @test_throws ArgumentError PS.validate(PS.Config(
+        demography=:panmictic, grid_size=3, n_qtl=20, Uqtl=0.0,
+        theta_override=0.3, selection_mode=:neutral, ngen_eq=5,
+        output_formats=Symbol[]))
+    # :twoD_perp requires grid_size>=2
+    @test_throws ArgumentError PS.validate(PS.Config(
+        demography=:twoD_perp, grid_size=1, n_qtl=20, Uqtl=0.0,
+        theta_override=0.3, selection_mode=:neutral, ngen_eq=5,
+        output_formats=Symbol[]))
+    # :twoD_recent requires grid_size>=2
+    @test_throws ArgumentError PS.validate(PS.Config(
+        demography=:twoD_recent, grid_size=1, n_recent=10, n_qtl=20,
+        Uqtl=0.0, theta_override=0.3, selection_mode=:neutral, ngen_eq=20,
+        output_formats=Symbol[]))
+    # :twoD_recent requires n_recent>=1
+    @test_throws ArgumentError PS.validate(PS.Config(
+        demography=:twoD_recent, grid_size=2, n_recent=0, n_qtl=20,
+        Uqtl=0.0, theta_override=0.3, selection_mode=:neutral, ngen_eq=20,
+        output_formats=Symbol[]))
+
+    # --- n_recent > total_gens errors at simulate time ---------------------
+    @test_throws ErrorException PS.simulate(PS.Config(
+        N=20, Ne=100, demography=:twoD_recent, grid_size=2, n_recent=50,
+        n_chr=1, chr_len_bp=10_000, n_qtl=20, n_neutral=0,
+        Uqtl=0.0, theta_override=0.3, h2=0.5,
+        selection_mode=:neutral, ngen_eq=5,
+        output_formats=Symbol[], seed=UInt64(1)))
+
+    # --- Onset semantics: layout swap at total_gens - n_recent + 1 ---------
+    # Run with n_recent=3 over 10 gens. Onset gen = 10 - 3 + 1 = 8.
+    # At gen 7 (before onset): n_demes=1. At gen 8+ (post onset): n_demes=4.
+    cfg = PS.Config(N=10, Ne=40, demography=:twoD_recent, grid_size=2,
+                     n_recent=3,
+                     n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+                     Uqtl=0.0, theta_override=0.5, h2=0.5,
+                     vs_over_vp0=10.0,
+                     migration_rate=0.05,
+                     selection_mode=:stabilizing, ngen_eq=10,
+                     output_formats=Symbol[:summary], output_prefix=tempname(),
+                     seed=UInt64(0xABC), n_threads=1)
+    res = PS.simulate(cfg)
+    @test res.final_gen == 10
+    # Post-onset: deme_id must show grid_size² distinct demes.
+    @test maximum(res.deme_id) == 4
+    @test length(res.deme_id) == 10 * 4  # N × grid_size² (pop conserved)
+
+    # --- n_recent == total_gens: structure from gen 1, equivalent layout to :twoD_perp ---
+    cfg_full = PS.Config(N=10, Ne=40, demography=:twoD_recent, grid_size=2,
+                          n_recent=5,
+                          n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+                          Uqtl=0.0, theta_override=0.5, h2=0.5,
+                          vs_over_vp0=10.0, migration_rate=0.05,
+                          selection_mode=:stabilizing, ngen_eq=5,
+                          output_formats=Symbol[:summary], output_prefix=tempname(),
+                          seed=UInt64(1), n_threads=1)
+    res_full = PS.simulate(cfg_full)
+    @test maximum(res_full.deme_id) == 4
+
+    # --- :twoD_recent + load_from rejects panmictic loaded state -----------
+    cfg_pan_save = PS.Config(N=30, Ne=30, demography=:panmictic,
+                              n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+                              Uqtl=0.0, theta_override=0.5, h2=0.5,
+                              selection_mode=:neutral, ngen_eq=2,
+                              output_formats=Symbol[:native],
+                              output_prefix=tempname(), seed=UInt64(2))
+    res_pan = PS.simulate(cfg_pan_save)
+    pan_psim = res_pan.checkpoint_paths[findfirst(
+        p -> endswith(p, ".psim.zst"), res_pan.checkpoint_paths)]
+
+    @test_throws ErrorException PS.simulate(PS.Config(
+        N=10, Ne=40, demography=:twoD_recent, grid_size=2, n_recent=3,
+        n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5, h2=0.5,
+        vs_over_vp0=10.0, migration_rate=0.05,
+        selection_mode=:stabilizing, ngen_dir=3,
+        load_from=pan_psim,
+        output_formats=Symbol[:summary], output_prefix=tempname(),
+        seed=UInt64(3)))
+
+    # --- :twoD_recent + structured load_from behaves as :twoD_perp ---------
+    cfg_struct_save = PS.Config(N=8, Ne=32, demography=:twoD_perp, grid_size=2,
+                                 migration_rate=0.05,
+                                 n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+                                 Uqtl=0.0, theta_override=0.5, h2=0.5,
+                                 vs_over_vp0=10.0,
+                                 selection_mode=:stabilizing, ngen_eq=2,
+                                 output_formats=Symbol[:native],
+                                 output_prefix=tempname(), seed=UInt64(4))
+    res_struct = PS.simulate(cfg_struct_save)
+    struct_psim = res_struct.checkpoint_paths[findfirst(
+        p -> endswith(p, ".psim.zst"), res_struct.checkpoint_paths)]
+    res_recent_load = PS.simulate(PS.Config(
+        N=8, Ne=32, demography=:twoD_recent, grid_size=2, n_recent=2,
+        migration_rate=0.05,
+        n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5, h2=0.5, vs_over_vp0=10.0,
+        selection_mode=:stabilizing, ngen_dir=3,
+        load_from=struct_psim,
+        output_formats=Symbol[:summary], output_prefix=tempname(),
+        seed=UInt64(5)))
+    @test res_recent_load.final_gen == 3
+    @test maximum(res_recent_load.deme_id) == 4
 end
 
 end # @testset top-level

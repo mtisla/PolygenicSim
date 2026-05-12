@@ -179,11 +179,37 @@ PS.Config(selection_mode = :directional, shift_sd = 2.0, ngen = 50, ...)
 
 ## Spatial structure
 
-Set `grid_size > 1` for a 2D non-toroidal stepping-stone metapopulation.
-Migration follows SLiM convention: per-neighbor backward rate `m`, so total
-emigration from interior demes (4 neighbors) is `4m`, edges `3m`, corners
-`2m`. Optional optimum cline along the y-axis via `cline_amp` (in `σ_P_0`
-units; default `0.0` = uniform optimum across demes).
+Three demography models, selected via `demography`:
+
+- **`:panmictic`** (default) — one well-mixed deme of size `N`. Requires
+  `grid_size = 1`.
+- **`:twoD_perp`** — 2D non-toroidal stepping-stone with `grid_size × grid_size`
+  demes structured from gen 0 onward. Total population = `N × grid_size²`.
+- **`:twoD_recent`** — population is one well-mixed deme of size
+  `N × grid_size²` (so total pop is conserved) until gen
+  `total_gens − n_recent + 1`, then partitions into a
+  `grid_size × grid_size` stepping-stone for the final `n_recent`
+  generations. Default `n_recent = 100`.
+
+For both 2D models, migration follows SLiM convention: per-neighbor
+backward rate `m`, so total emigration from interior demes (4 neighbors)
+is `4m`, edges `3m`, corners `2m`. Optional optimum cline along the y-axis
+via `cline_amp` (in `σ_P_0` units; default `0.0` = uniform optimum across
+demes). The cline only takes effect once the population is structured —
+under `:twoD_recent` it kicks in at onset, not during the panmictic phase.
+
+Under `:twoD_recent`, the structure-onset event swaps the `DemeLayout`
+in-place. The "block partition" of contiguous columns into demes is
+already a uniform-random assignment by exchangeability (offspring during
+the panmictic phase are sampled with no spatial bias), so **no haplotype
+shuffling is needed at onset** — just a layout swap. Total population
+is conserved.
+
+`load_from` is only allowed with `:twoD_recent` if the saved state is
+already structured (i.e., saved with `demography = :twoD_perp` or from
+a post-onset checkpoint of a `:twoD_recent` run). When loaded, the run
+behaves as `:twoD_perp` (`n_recent` is ignored) since the panmictic
+history has already been finalized in the saved state.
 
 For 2D runs, end-of-sim summary stats and convergence diagnostics — Bulmer
 B, V_A, V_P, mean BV, var phenotype, h² — are computed **per deme** and
@@ -257,7 +283,7 @@ PS.simulate(PS.Config(load_plink_prefix = "external", load_demography = :twoD, .
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-302 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
+314 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
 Haldane recombination at d ∈ {0.01, 0.1, 0.5, 1.0} M, cross-chr LD, neutral
 drift, selection regimes), Phase-2 zero-allocation kernels and chunk
 determinism, Phase-4 spatial structure (DemeLayout, m=0 isolation vs m=high
@@ -268,7 +294,9 @@ for 2D, the `Uqtl/Uneu` auto-derivation and validation, the QTL-only fast
 path, a regression test asserting threaded reductions match the
 `Statistics` reference under `JULIA_NUM_THREADS=4`, and the new
 single-knob `ngen` mode (validation against the two-phase knobs and
-shift-from-gen-1 behavior for directional).
+shift-from-gen-1 behavior for directional), and the `:twoD_recent`
+demography (validation, structure-onset gen, panmictic vs structured
+`load_from` interaction).
 
 ## Defaults
 
@@ -290,7 +318,9 @@ Mostly aligned with the bulmer reference pipeline:
 | `effect_scale` | 0.03 |
 | `selection_mode` | `:stabilizing` |
 | `directional_start_from` | `:msd` |
-| `grid_size` | 1 (panmictic) |
+| `demography` | `:panmictic` (must be set explicitly to `:twoD_perp` or `:twoD_recent` when `grid_size > 1`) |
+| `grid_size` | 1 (≥2 required for 2D models) |
+| `n_recent` | 100 (gens of recent structure; `:twoD_recent` only) |
 | `migration_rate` | 0.0 |
 | `cline_amp` | 0.0 |
 | `expansion_factor` | 1.0 |

@@ -41,13 +41,17 @@ Serialize the full state. Always packed-haplotype output (we transcode dense
 to packed on the fly). Writes a `.psim.zst` file.
 """
 function save_native(path::AbstractString, pop::PackedPop, vt::VariantTable,
-                      cfg::Config, deme_id::Vector{Int})
+                      cfg::Config, deme_id::Vector{Int};
+                      layout::Union{DemeLayout,Nothing}=nothing)
+    eff_layout = layout === nothing ? DemeLayout(cfg) : layout
     _save_native_packed(path, pop.H, pop.L, pop.n_blocks, 2 * pop.N,
-                          vt, cfg, deme_id)
+                          vt, cfg, deme_id, eff_layout)
 end
 
 function save_native(path::AbstractString, pop::DensePop, vt::VariantTable,
-                      cfg::Config, deme_id::Vector{Int})
+                      cfg::Config, deme_id::Vector{Int};
+                      layout::Union{DemeLayout,Nothing}=nothing)
+    eff_layout = layout === nothing ? DemeLayout(cfg) : layout
     nb = n_blocks_for(pop.L)
     H_packed = zeros(UInt64, nb, 2 * pop.N)
     @inbounds for k in axes(pop.H, 2)
@@ -59,19 +63,21 @@ function save_native(path::AbstractString, pop::DensePop, vt::VariantTable,
             end
         end
     end
-    _save_native_packed(path, H_packed, pop.L, nb, 2 * pop.N, vt, cfg, deme_id)
+    _save_native_packed(path, H_packed, pop.L, nb, 2 * pop.N, vt, cfg, deme_id, eff_layout)
 end
 
 function _save_native_packed(path::AbstractString, H::Matrix{UInt64},
                                 L::Integer, nb::Integer, twoN::Integer,
                                 vt::VariantTable, cfg::Config,
-                                deme_id::Vector{Int})
+                                deme_id::Vector{Int}, layout::DemeLayout)
     buf = IOBuffer()
     write(buf, NATIVE_MAGIC)
     write(buf, NATIVE_VERSION)
-    n_demes_val = n_demes(cfg)
+    # Use the *effective* layout fields (so :twoD_recent in its pre-structure
+    # phase is correctly serialized as a single-deme panmictic state).
     hdr = NativeHeader(Int32(cfg.n_chr), Int32(cfg.n_qtl), Int32(cfg.n_neutral),
-                         Int32(cfg.N), Int32(n_demes_val), Int32(cfg.grid_size))
+                         Int32(layout.N_per_deme), Int32(layout.n_demes),
+                         Int32(layout.grid_size))
     write(buf, hdr.n_chr)
     write(buf, hdr.n_qtl)
     write(buf, hdr.n_neutral)
@@ -91,7 +97,7 @@ function _save_native_packed(path::AbstractString, H::Matrix{UInt64},
     write(buf, is_qtl_bytes)
     write(buf, vt.alpha)
     write(buf, H)
-    if cfg.grid_size > 1
+    if layout.grid_size > 1
         deme_arr = Int32.(deme_id)
         write(buf, deme_arr)
     end

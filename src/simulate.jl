@@ -46,7 +46,20 @@ function simulate(cfg::Config)
     @assert pop.L == L
 
     # ---- spatial layout -------------------------------------------------
-    layout = DemeLayout(cfg)
+    # `:twoD_recent` starts as a single panmictic deme of size `N × grid_size²`
+    # and swaps to a `grid_size × grid_size` stepping-stone at gen
+    # `total_gens − n_recent + 1`. With `load_from`, the loaded state must
+    # already be structured (Q4) and we behave as `:twoD_perp` (n_recent
+    # ignored).
+    is_loaded = cfg.load_from !== nothing || cfg.load_plink_prefix !== nothing
+    twoD_recent_fresh = (cfg.demography === :twoD_recent) && !is_loaded
+    if cfg.demography === :twoD_recent && is_loaded
+        maximum(deme_id) > 1 ||
+            error("demography=:twoD_recent with load_from: loaded state must be structured (n_demes>1), but loaded state is panmictic. Save eq with demography=:twoD_perp first.")
+        @info "demography=:twoD_recent with structured load_from: behaving as :twoD_perp (n_recent=$(cfg.n_recent) ignored)."
+    end
+    layout = twoD_recent_fresh ? panmictic_layout(cfg.N * cfg.grid_size^2) :
+                                  DemeLayout(cfg)
 
     # ---- VE / V_S computation -------------------------------------------
     scratch = GenScratch(cfg, vt, rng, layout)
@@ -59,7 +72,6 @@ function simulate(cfg::Config)
     Vs = something(cfg.vs, cfg.vs_over_vp0 * V_P0)
 
     # ---- phase plan -----------------------------------------------------
-    is_loaded = cfg.load_from !== nothing || cfg.load_plink_prefix !== nothing
     # Two ways to specify run length (validated mutually exclusive in `validate`):
     #   (a) ngen > 0  — single-knob mode. All gens run as Phase B from gen 1
     #       so :directional gets shift applied immediately; :neutral and
@@ -78,6 +90,14 @@ function simulate(cfg::Config)
     end
     total_gens = ngen_eq_eff + ngen_dir_eff
     phase_A, phase_B = _build_phase_plan(cfg, mean_A0, V_P0, Vs, sigma_E, layout)
+
+    # ---- recent-structure onset gen (Q5 strict validation) --------------
+    structure_onset_gen = 0
+    if twoD_recent_fresh
+        cfg.n_recent <= total_gens ||
+            error("demography=:twoD_recent: n_recent=$(cfg.n_recent) > total_gens=$(total_gens); use :twoD_perp for fully-structured runs.")
+        structure_onset_gen = total_gens - cfg.n_recent + 1
+    end
 
     # ---- checkpoint resolution ------------------------------------------
     checkpoint_gens = _resolve_checkpoints(cfg, total_gens, V_A0, V_P0, Vs)
@@ -107,6 +127,23 @@ function simulate(cfg::Config)
     step! = pop isa PackedPop ? step_generation_packed! : step_generation_dense!
     expand_step! = pop isa PackedPop ? step_generation_packed_expand! : step_generation_dense_expand!
     for gen in 1:total_gens
+        # Apply recent-structure onset BEFORE this gen is stepped. Swap from
+        # the pre-structure panmictic layout to the full grid, rebuild the
+        # phase plan (cline kicks in), and resize per-deme work buffers.
+        if structure_onset_gen > 0 && gen == structure_onset_gen
+            new_layout = DemeLayout(cfg)
+            @assert new_layout.N_total == scratch.layout.N_total "structure onset must preserve N_total"
+            scratch.layout = new_layout
+            @inbounds for i in 1:new_layout.N_total
+                deme_id[i] = deme_of(new_layout, i)
+            end
+            n_demes_new = new_layout.n_demes
+            resize!(mean_buf, n_demes_new); fill!(mean_buf, 0.0)
+            resize!(var_buf,  n_demes_new); fill!(var_buf,  0.0)
+            resize!(sov_buf,  n_demes_new); fill!(sov_buf,  0.0)
+            resize!(B_buf,    n_demes_new); fill!(B_buf,    0.0)
+            phase_A, phase_B = _build_phase_plan(cfg, mean_A0, V_P0, Vs, sigma_E, new_layout)
+        end
         in_phase_A = gen <= ngen_eq_eff
         phase = in_phase_A ? phase_A : phase_B
         gen_in_phase = in_phase_A ? gen : gen - ngen_eq_eff
@@ -241,7 +278,15 @@ end
 function _build_initial_state(cfg::Config, rng::Xoshiro)
     if cfg.load_from !== nothing
         nl = load_native(cfg.load_from)
-        @assert nl.grid_size == cfg.grid_size "loaded grid_size=$(nl.grid_size) != cfg.grid_size=$(cfg.grid_size)"
+        if cfg.demography === :twoD_recent
+            nl.grid_size > 1 ||
+                error("demography=:twoD_recent with load_from: loaded state must be structured (saved grid_size>1), got grid_size=$(nl.grid_size). Save eq with demography=:twoD_perp first.")
+            nl.grid_size == cfg.grid_size ||
+                error("demography=:twoD_recent: loaded grid_size=$(nl.grid_size) != cfg.grid_size=$(cfg.grid_size)")
+        else
+            nl.grid_size == cfg.grid_size ||
+                error("loaded grid_size=$(nl.grid_size) != cfg.grid_size=$(cfg.grid_size)")
+        end
         # The loaded NativeLoad always materializes a PackedPop; for dense backend, transcode.
         if cfg.backend === :packed
             return nl.pop, nl.vt, nl.deme_id
@@ -376,7 +421,7 @@ function _emit_checkpoint(cfg::Config, pop, vt::VariantTable,
     end
     if :native in cfg.output_formats
         nat_path = prefix * ".psim.zst"
-        save_native(nat_path, pop, vt, cfg, deme_id)
+        save_native(nat_path, pop, vt, cfg, deme_id; layout=scratch.layout)
         push!(paths, nat_path)
     end
     return paths

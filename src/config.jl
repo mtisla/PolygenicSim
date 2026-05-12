@@ -62,10 +62,26 @@ Base.@kwdef struct Config
     t_shift::Int = 0                                # gen at which shift fires (relative to start of post-eq phase)
     directional_start_from::Symbol = :msd           # :md | :msd
 
-    # spatial (Phase 4 — accepted by Config now, validated against grid_size==1 in Phase 1)
+    # spatial
+    # `demography` selects the demography model. Must be set explicitly when
+    # `grid_size > 1`.
+    #   :panmictic   — one well-mixed deme of size `N`. Requires grid_size==1.
+    #   :twoD_perp   — 2D non-toroidal stepping-stone with `grid_size × grid_size`
+    #                  demes from gen 0. Total population = `N × grid_size²`.
+    #   :twoD_recent — recent structuring. Population is one well-mixed deme
+    #                  of size `N × grid_size²` until gen `total_gens − n_recent`,
+    #                  then partitions into a `grid_size × grid_size`
+    #                  stepping-stone for the final `n_recent` generations.
+    #                  Total population conserved across the onset.
+    demography::Symbol = :panmictic
     grid_size::Int = 1
     migration_rate::Float64 = 0.0
     cline_amp::Float64 = 0.0
+    # Number of generations of recent structure for `:twoD_recent`. The
+    # structure onset fires at gen `total_gens − n_recent + 1`, so the last
+    # `n_recent` generations of the run are structured. Ignored for
+    # `:panmictic` and `:twoD_perp`.
+    n_recent::Int = 100
 
     # expansion (Phase 5 — accepted, validated against expansion_factor==1.0 in Phase 1)
     expansion_factor::Float64 = 1.0
@@ -309,8 +325,25 @@ function validate(cfg::Config)
     end
     cfg.n_int >= -1 || throw(ArgumentError("n_int must be >= -1 (-1 = auto)"))
     # Phase 4 invariants (spatial)
+    cfg.demography in (:panmictic, :twoD_perp, :twoD_recent) ||
+        throw(ArgumentError("demography must be one of :panmictic, :twoD_perp, :twoD_recent"))
     cfg.grid_size >= 1 ||
         throw(ArgumentError("grid_size must be >= 1"))
+    if cfg.demography === :panmictic
+        cfg.grid_size == 1 ||
+            throw(ArgumentError("demography=:panmictic requires grid_size==1; got grid_size=$(cfg.grid_size). Use :twoD_perp or :twoD_recent for grid_size>1."))
+    else
+        # :twoD_perp or :twoD_recent
+        cfg.grid_size >= 2 ||
+            throw(ArgumentError("demography=$(cfg.demography) requires grid_size>=2"))
+    end
+    if cfg.demography === :twoD_recent
+        cfg.n_recent >= 1 ||
+            throw(ArgumentError("demography=:twoD_recent requires n_recent>=1"))
+        # `n_recent` is also bounded by total_gens; checked in simulate.jl
+        # once total_gens is resolved (depends on ngen/ngen_eq/ngen_dir +
+        # load_from interaction).
+    end
     if cfg.grid_size > 1
         0 <= cfg.migration_rate || throw(ArgumentError("migration_rate must be >= 0"))
         # max emigration = m · (max neighbors = 4) ≤ 1 ⇒ m ≤ 0.25

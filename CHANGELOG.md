@@ -9,6 +9,55 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-12
+
+Adds a third demography model for studying recent population structure.
+
+### Added
+- **`demography::Symbol` Config field** — `:panmictic` | `:twoD_perp` |
+  `:twoD_recent`. Must be set explicitly; previously `grid_size > 1`
+  silently implied 2D structure from gen 0.
+- **`:twoD_recent` demography** — population is one well-mixed deme of
+  size `N × grid_size²` until gen `total_gens − n_recent + 1`, then
+  partitions into a `grid_size × grid_size` stepping-stone for the final
+  `n_recent` generations. Total population is conserved across the
+  onset. Default `n_recent = 100`.
+- `n_recent::Int = 100` Config field (only meaningful for `:twoD_recent`).
+- `panmictic_layout(N_total)` and `initial_layout(cfg)` spatial helpers.
+- `save_native` accepts an optional `layout` kwarg; the saved
+  `.psim.zst` header now reflects the *current* layout's `grid_size`,
+  `n_demes`, and `N_per_deme` (so a pre-onset checkpoint of a
+  `:twoD_recent` run is correctly serialized as panmictic).
+- 12 new tests for `:twoD_recent`: validation (panmictic/perp/recent
+  guard against bad `grid_size`/`n_recent`), `n_recent > total_gens`
+  error, structure-onset layout swap at the expected gen, post-onset
+  `maximum(deme_id) == grid_size²`, and the `load_from` interaction
+  (panmictic saved state rejected; structured saved state accepted as
+  `:twoD_perp` with `n_recent` ignored).
+
+### Changed
+- **BREAKING — `demography` is now mandatory for 2D runs.** Configs that
+  set `grid_size > 1` *must* also set `demography = :twoD_perp` (or
+  `:twoD_recent`). The previous implicit "grid_size > 1 ⇒ 2D" no longer
+  works — `:panmictic` (default) rejects `grid_size > 1` at validate.
+  Existing scripts need:
+  ```julia
+  PS.Config(grid_size=3, ...)              # v0.4.0
+  PS.Config(demography=:twoD_perp, grid_size=3, ...)  # v0.5.0
+  ```
+- **Cline activation timing under `:twoD_recent`.** The optimum cline
+  (`cline_amp`) is rebuilt when structure onset fires; it does not apply
+  during the panmictic phase. This means the optimum stays at `mean_A0`
+  uniformly during the panmictic phase, then per-deme cline offsets are
+  layered on at onset.
+
+### Internal
+- `GenScratch.layout` is reassigned in-place at structure onset; the
+  per-deme buffers in `simulate.jl` (`mean_buf`, `var_buf`, `sov_buf`,
+  `B_buf`) are `resize!`d to the new `n_demes`. Haplotype data is not
+  moved — the "block partition" of column indices into contiguous demes
+  is a uniform-random assignment by exchangeability.
+
 ## [0.4.0] — 2026-05-12
 
 Reverts the v0.3.0 `ngen_eq` → `ngen` rename based on user feedback that
@@ -170,7 +219,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/mtisla/PolygenicSim/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mtisla/PolygenicSim/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mtisla/PolygenicSim/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mtisla/PolygenicSim/compare/v0.1.0...v0.2.0

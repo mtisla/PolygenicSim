@@ -28,7 +28,7 @@ base = (
     theta_override = 0.5,
     h2          = 0.5,
     vs_over_vp0 = 20.0,
-    grid_size   = 5,                       # 5×5 = 25 demes, 5000 inds
+    demography=:twoD_perp, grid_size=5,                       # 5×5 = 25 demes, 5000 inds
     migration_rate = 0.05,                 # per-neighbor (SLiM convention)
     cline_amp   = 0.0,                     # default: uniform optimum across demes;
                                            # set to e.g. 1.0 for ±1·σ_P_0 y-axis cline

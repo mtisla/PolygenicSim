@@ -54,7 +54,7 @@ cfg_struct_eq = PS.Config(
     theta_override = 0.5,
     h2          = 0.5,
     vs_over_vp0 = 20.0,
-    grid_size   = 3,
+    demography=:twoD_perp, grid_size=3,
     migration_rate = 0.05,
     selection_mode = :stabilizing,
     ngen_eq     = 15,
