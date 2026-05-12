@@ -867,4 +867,65 @@ end
     @test pop.L == 400  # no neutral block
 end
 
+@testset "Threading — reductions race-free against Statistics reference" begin
+    # Regression test for a closure-capture race in `population_mean_var`,
+    # `sum_of_per_locus_var`, and `polymorphic_count`. Variables assigned
+    # inside a `Threads.@threads` body become function-locals captured by
+    # the macro's closure — multiple threads racing on the same accumulator
+    # produced non-deterministic and silently wrong results. The fix pushes
+    # the inner accumulator into a helper function (own activation record).
+    #
+    # Catching the regression at JULIA_NUM_THREADS=1 isn't possible (the
+    # race only manifests with >1 thread); these tests use sizes well above
+    # the `_parallel_chunks` threshold (1024 for vectors) so the threaded
+    # path is engaged whenever the test harness runs with >1 threads.
+
+    using Statistics: var, mean, std
+    Random.seed!(20260512)
+
+    # --- population_mean_var ---
+    A = randn(5000) .+ 1.5
+    ref_mean = mean(A)
+    ref_var = var(A; corrected=true)
+    m1, v1 = PS.population_mean_var(A)
+    @test isapprox(m1, ref_mean; atol=1e-10)
+    @test isapprox(v1, ref_var;  atol=1e-9)
+    # Determinism: repeated calls must return the same value (no race).
+    for _ in 1:5
+        m2, v2 = PS.population_mean_var(A)
+        @test m2 == m1
+        @test v2 == v1
+    end
+    # Tiny vector hits the single-threaded fallback — same answer.
+    Asmall = randn(100) .* 2 .- 3
+    ms, vs = PS.population_mean_var(Asmall)
+    @test isapprox(ms, mean(Asmall); atol=1e-12)
+    @test isapprox(vs, var(Asmall; corrected=true); atol=1e-12)
+
+    # --- sum_of_per_locus_var ---
+    p = clamp.(rand(8000) .* 0.5 .+ 0.25, 0.0, 1.0)
+    alpha = randn(8000) .* 0.03
+    ref_sov = sum(2 * p[j] * (1 - p[j]) * alpha[j]^2 for j in eachindex(p))
+    s1 = PS.sum_of_per_locus_var(p, alpha)
+    @test isapprox(s1, ref_sov; atol=1e-10)
+    for _ in 1:5
+        s2 = PS.sum_of_per_locus_var(p, alpha)
+        @test s2 == s1
+    end
+
+    # --- polymorphic_count ---
+    # Mix monomorphic 0/1 and polymorphic values to make the count
+    # non-trivial.
+    q = rand(8000)
+    q[1:200] .= 0.0       # 200 monomorphic-zero
+    q[201:500] .= 1.0     # 300 monomorphic-one
+    ref_n = count(x -> 1e-12 < x < 1 - 1e-12, q)
+    n1 = PS.polymorphic_count(q)
+    @test n1 == ref_n
+    for _ in 1:5
+        n2 = PS.polymorphic_count(q)
+        @test n2 == n1
+    end
+end
+
 end # @testset top-level
