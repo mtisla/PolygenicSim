@@ -9,6 +9,19 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-12
+
+### Changed
+- **`oracle_memory_path_threshold` default 5000 → 10000.** The previous
+  5000 estimate undercounted peak memory (the real cost is ~3·p² doubles
+  for D_buf + Dm_buf + R_meta, plus N·p for X — about 3 GB at p=10000),
+  but 3 GB sits well within modern workstation RAM. 10000 is a more
+  realistic threshold for "fast path should be fine"; tune up on
+  32+GB hosts, down on memory-constrained machines.
+- `@info` message when `p_qtl > threshold` now honestly notes the
+  memory-path branch is a stub (falls through to the fast path) rather
+  than promising a different algorithm.
+
 ## [0.6.0] — 2026-05-12
 
 Adds in-process oracle statistics — Bulmer **B** and **Δ_cross** direction
@@ -280,7 +293,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/mtisla/PolygenicSim/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/mtisla/PolygenicSim/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mtisla/PolygenicSim/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mtisla/PolygenicSim/compare/v0.3.0...v0.4.0

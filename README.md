@@ -378,7 +378,7 @@ Configuration knobs:
 | `oracle_windows_pct` | `[5.0, 10.0, 25.0, 50.0]` | Window widths as % of `chr_len_bp` |
 | `oracle_n_perm` | `1000` | Sign-flip permutations |
 | `oracle_cutoffs` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%) |
-| `oracle_memory_path_threshold` | `5000` | Switch to per-chr matrix-free path when `p_qtl >` this |
+| `oracle_memory_path_threshold` | `10000` | Switch to per-chr matrix-free path when `p_qtl >` this. Peak fast-path memory ≈ 3·p² doubles + N·p (e.g. ~3 GB at p=10000) |
 
 Standalone post-hoc API:
 ```julia
@@ -391,8 +391,11 @@ PS.write_oracle_tsv("recompute", oracle)
 ```
 
 Expected cost (Julia BLAS, 8-thread): ~2 s for `p_qtl = 2000`,
-~30 s for `p_qtl = 5000` (panmictic or up to ~25 demes). Above `p_qtl ≈ 5000`
-the memory-path threshold kicks in.
+~30 s for `p_qtl = 5000` (panmictic or up to ~25 demes), and ~3 minutes
+at `p_qtl = 10000`. Peak fast-path memory is ~3·p² doubles
+(three p×p matrices: covariance, masked copy, deme-weighted correlation)
+plus the N×p genotype matrix — about 3 GB at p=10000 on a 5000-individual
+run, comfortably within modern workstation RAM.
 
 ## Versioning
 

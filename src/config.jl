@@ -126,14 +126,16 @@ Base.@kwdef struct Config
     #       and Δ_cross null distributions. 1000 matches the R reference.
     #   `oracle_memory_path_threshold` — when `p_qtl > threshold` (after the
     #       polymorphic filter), switch from the full p×p matrix path to a
-    #       per-chr + matrix-free genome path. Julia BLAS handles the fast
-    #       path well up to ~5000; tune up if RAM permits.
+    #       per-chr + matrix-free genome path. Peak fast-path memory is ~3·p²
+    #       doubles (D_buf + Dm_buf + R_meta) plus X (N×p); at p=10000 that's
+    #       ~3 GB which comfortably fits modern workstation RAM. Tune down on
+    #       memory-constrained machines, up on 32+GB hosts.
     #   `oracle_cutoffs`     — Δ_cross frequency cutoffs (percent). 20 and
     #       50 match the R reference; pair (L, H) groups are
     #       {p_pol < c%} and {p_pol > (1-c%)}.
     oracle_windows_pct::Vector{Float64} = [5.0, 10.0, 25.0, 50.0]
     oracle_n_perm::Int = 1000
-    oracle_memory_path_threshold::Int = 5000
+    oracle_memory_path_threshold::Int = 10000
     oracle_cutoffs::Vector{Int} = [20, 50]
 
     # diagnostics

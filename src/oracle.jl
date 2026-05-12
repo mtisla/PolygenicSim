@@ -515,7 +515,7 @@ function oracle_stats(result::SimResult;
 
     use_memory = p > memory_path_threshold
     if use_memory
-        @info "oracle_stats: p_qtl=$(p) > memory_path_threshold=$(memory_path_threshold); using per-chromosome memory path (may be slower for moderate p)."
+        @info "oracle_stats: p_qtl=$(p) > memory_path_threshold=$(memory_path_threshold); the per-chromosome memory path is currently a stub — the fast path will still run but peak memory may be ~3·p² doubles."
     end
 
     # Compute B accumulators + R_meta via the fast path. Memory path falls
