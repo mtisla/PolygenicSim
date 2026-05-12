@@ -9,6 +9,28 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-12
+
+### Changed
+- **BREAKING — generations param renamed**: `ngen_eq` → `ngen`. The new
+  name reflects what the parameter actually is: the universal "number of
+  generations to simulate", applicable to **all** selection regimes
+  (`:neutral`, `:stabilizing`, `:directional`). For directional runs,
+  `ngen_dir` still extends the simulation past the shift, so total
+  generations = `ngen + ngen_dir`. When `load_from` is set, `ngen` is
+  ignored and only `ngen_dir` runs.
+- Internal local `ngen_eq_eff` renamed to `ngen_eff`.
+
+### Added
+- README "Generations" section with a regime-vs-gen-count table.
+- `ngen` and `ngen_dir` rows in the defaults table.
+
+### Migration
+Scripts written against v0.2.0 need a global `ngen_eq` → `ngen` rename:
+```bash
+perl -i -pe 's/\bngen_eq\b/ngen/g' yourscript.jl
+```
+
 ## [0.2.0] — 2026-05-12
 
 Iterative refinement of Phases 1, 2, 4, 5 with breaking config-API changes
@@ -126,6 +148,7 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mtisla/PolygenicSim/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mtisla/PolygenicSim/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mtisla/PolygenicSim/releases/tag/v0.1.0

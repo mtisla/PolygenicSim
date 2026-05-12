@@ -39,7 +39,7 @@ cfg = PS.Config(
     h2          = 0.5,
     vs_over_vp0 = 20.0,                 # V_S / V_P_0; ∞ = neutral
     selection_mode = :stabilizing,
-    ngen_eq        = 25,
+    ngen           = 25,                # generations to simulate (all regimes)
     output_formats = Symbol[:plink, :summary],
     output_prefix  = "stab_run",
     seed           = UInt64(42),
@@ -61,7 +61,7 @@ from the saved state:
 ```julia
 # 1. Run + save eq (stabilizing or :md/:msd settling)
 PS.simulate(PS.Config(
-    selection_mode = :stabilizing, ngen_eq = 25,
+    selection_mode = :stabilizing, ngen = 25,
     output_formats = Symbol[:native, :summary],
     output_prefix = "eq", seed = UInt64(1),
     # ... rest of cfg
@@ -138,11 +138,26 @@ So BIM coordinates emitted in PLINK output carry **genetic** meaning —
 window-based downstream tools (PLINK clumping, BayesR window posteriors,
 LD-window heritability methods) see realistic LD decay over bp distance.
 
+## Generations
+
+A single knob, `ngen`, controls the number of generations to simulate
+and applies to **all selection regimes**:
+
+| Regime           | Total generations simulated         |
+|------------------|-------------------------------------|
+| `:neutral`       | `ngen`                              |
+| `:stabilizing`   | `ngen`                              |
+| `:directional`   | `ngen` settling + `ngen_dir` post-shift |
+
+For directional runs, `ngen_dir` extends the simulation past the shift
+event. When `load_from` is set the loaded state IS the settling-phase
+output, so `ngen` is ignored and only `ngen_dir` runs.
+
 ## Selection regimes
 
 - `:neutral` — V_S = ∞; fitness uniform; pure mutation–drift dynamics.
 - `:stabilizing` — V_S finite; θ fixed at the gen-0 mean breeding value (per deme); Bulmer effect develops.
-- `:directional` — V_S finite; θ shifts by `shift_sd · σ_P_0` (or `sel_grad · V_S`) at gen `t_shift`. Two-phase: `ngen_eq` settling at `:md` or `:msd`, then `ngen_dir` post-shift. When `load_from` is set, the loaded state is the eq and `ngen_eq` is skipped.
+- `:directional` — V_S finite; θ shifts by `shift_sd · σ_P_0` (or `sel_grad · V_S`) at gen `t_shift`. Two-phase: `ngen` settling at `:md` or `:msd`, then `ngen_dir` post-shift. When `load_from` is set, the loaded state is the settled eq and `ngen` is skipped (only `ngen_dir` runs).
 
 ## Spatial structure
 
@@ -181,7 +196,7 @@ For fixed seed and matching `n_threads`, both backends produce **bit-identical**
 
 - **PLINK 1 trio** (`{prefix}_gen{t}.bed/bim/fam`) plus a sibling `{prefix}_gen{t}.effects.tsv` with per-variant effect sizes. IIDs are `p{deme}_{i}` (1-indexed) so loaders can recover deme assignments.
 - **Native restart** (`{prefix}_gen{t}.psim.zst`) — phase-preserving full state with bit-packed haplotypes, variant table, effects, and deme assignments. zstd-compressed (level 3).
-- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, plus a convergence-diagnostics block and intermediate trajectory log of (gen, B, V_A, mean_p, var_p). Snapshot frequency is controlled by `n_int`: the default `-1` auto-resolves to `max(1, ngen_eq ÷ 100)` so you get ~100 trajectory points regardless of run length (≲1% overhead); set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k` generations explicitly.
+- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, plus a convergence-diagnostics block and intermediate trajectory log of (gen, B, V_A, mean_p, var_p). Snapshot frequency is controlled by `n_int`: the default `-1` auto-resolves to `max(1, ngen ÷ 100)` so you get ~100 trajectory points regardless of run length (≲1% overhead); set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k` generations explicitly.
 
 ## Equilibrium diagnostics
 
@@ -263,6 +278,8 @@ Mostly aligned with the bulmer reference pipeline:
 | `output_formats` | `[:plink]` |
 | `init_distribution` | `:beta_mutation_drift` |
 | `maf_min` | 0.0 |
+| `ngen` | 0 (number of generations to simulate; all regimes) |
+| `ngen_dir` | 0 (additional post-shift gens for `:directional` only) |
 
 All overridable via the `Config(; ...)` keyword constructor.
 

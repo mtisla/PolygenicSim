@@ -72,7 +72,13 @@ Base.@kwdef struct Config
     expansion_k_before_end::Int = 0
 
     # phases
-    ngen_eq::Int = 0
+    # `ngen` is the universal "number of generations to simulate" knob —
+    # applies to :neutral, :stabilizing, and :directional regimes. For
+    # :directional, the run is two-phase: `ngen` settling generations
+    # followed by `ngen_dir` post-shift generations (total = ngen + ngen_dir).
+    # When `load_from` is set the loaded state IS the settling phase, so
+    # `ngen` is ignored and only `ngen_dir` runs.
+    ngen::Int = 0
     ngen_dir::Int = 0
 
     # checkpoints — Vector{Int} (absolute gens) or Vector{Float64} (multiples of t½)
@@ -85,7 +91,7 @@ Base.@kwdef struct Config
     # diagnostics
     # n_int controls the trajectory-snapshot interval (in generations) for
     # convergence diagnostics in the summary:
-    #   n_int <  0  ⇒ auto: `max(1, ngen_eq ÷ 100)` — targets ~100 snapshots
+    #   n_int <  0  ⇒ auto: `max(1, ngen ÷ 100)` — targets ~100 snapshots
     #                 over the whole run, ≲1% overhead regardless of run
     #                 length. Tail-window diagnostics (last_10 / prior_10
     #                 mean comparison) are unchanged by snapshot count once
@@ -282,7 +288,7 @@ function validate(cfg::Config)
         f in (:plink, :native, :summary) ||
             throw(ArgumentError("invalid output format: $f"))
     end
-    cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
+    cfg.ngen >= 0 || throw(ArgumentError("ngen must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))
     cfg.n_int >= -1 || throw(ArgumentError("n_int must be >= -1 (-1 = auto)"))
     # Phase 4 invariants (spatial)

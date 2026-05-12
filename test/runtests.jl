@@ -14,7 +14,7 @@ const PS = PolygenicSim
 @testset "Test 1+13 — Beta(θ,θ) init AF" begin
     cfg = PS.Config(N=500, Ne=500, n_chr=1, chr_len_bp=200_000,
                      n_qtl=2_000, n_neutral=0, Uqtl=0.02,
-                     selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
+                     selection_mode=:neutral, ngen=0, ngen_dir=0,
                      seed=UInt64(42), output_formats=Symbol[])
     PS.validate(cfg)
     rng = PS.make_master_rng(cfg)
@@ -35,7 +35,7 @@ end
     cfg = PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=100_000,
                      n_qtl=500, n_neutral=200, Uqtl=0.02,
                      theta_override=0.5, maf_min=0.05,
-                     selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
+                     selection_mode=:neutral, ngen=0, ngen_dir=0,
                      seed=UInt64(7), output_formats=Symbol[])
     rng = PS.make_master_rng(cfg)
     vt, p_init = PS.init_variant_table(rng, cfg)
@@ -68,7 +68,7 @@ end
     cfg = PS.Config(N=500, Ne=500, n_chr=1, chr_len_bp=10_000,
                      xovers_per_chr=0.0, n_qtl=100, n_neutral=0, Uqtl=0.0,
                      theta_override=0.5,
-                     selection_mode=:neutral, ngen_eq=1, ngen_dir=0,
+                     selection_mode=:neutral, ngen=1, ngen_dir=0,
                      seed=UInt64(11), output_formats=Symbol[])
     rng = PS.make_master_rng(cfg)
     vt, _ = PS.init_variant_table(rng, cfg)
@@ -108,7 +108,7 @@ end
         cfg = PS.Config(N=2, Ne=2, n_chr=1, chr_len_bp=1_000_000,
                          xovers_per_chr=d_M,
                          n_qtl=2, n_neutral=0, Uqtl=0.0,
-                         selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
+                         selection_mode=:neutral, ngen=0, ngen_dir=0,
                          seed=seed, output_formats=Symbol[])
         L = 2
         # 2 markers on chr 1 — bp positions are only for cosmetics now.
@@ -156,7 +156,7 @@ end
     cfg = PS.Config(N=1000, Ne=1000, n_chr=4, chr_len_bp=100_000,
                      n_qtl=80, n_neutral=20, Uqtl=0.02,
                      theta_override=0.5,
-                     selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
+                     selection_mode=:neutral, ngen=0, ngen_dir=0,
                      seed=UInt64(31), output_formats=Symbol[])
     rng = PS.make_master_rng(cfg)
     vt, p_init = PS.init_variant_table(rng, cfg)
@@ -218,7 +218,7 @@ end
     base = (N=N, Ne=N, n_chr=20, chr_len_bp=100_000, xovers_per_chr=1.0,
              n_qtl=4_000, n_neutral=0, Uqtl=0.0,
              theta_override=10.0,
-             selection_mode=:neutral, ngen_eq=T, ngen_dir=0,
+             selection_mode=:neutral, ngen=T, ngen_dir=0,
              seed=UInt64(2024), output_formats=Symbol[])
     cfg = PS.Config(; base...)
     rng = PS.make_master_rng(cfg)
@@ -250,7 +250,7 @@ end
                                  theta_override=0.5,
                                  vs_over_vp0=10.0,
                                  selection_mode=:stabilizing,
-                                 ngen_eq=20, ngen_dir=0,
+                                 ngen=20, ngen_dir=0,
                                  seed=UInt64(3), n_threads=1,
                                  output_formats=Symbol[:summary],
                                  output_prefix=tempname()))
@@ -269,7 +269,7 @@ end
                vs_over_vp0=10.0,
                selection_mode=:directional,
                directional_start_from=:msd,
-               ngen_eq=10, ngen_dir=20,
+               ngen=10, ngen_dir=20,
                t_shift=0, seed=UInt64(101),
                output_formats=Symbol[])
     res_stat  = PS.simulate(PS.Config(; shift_sd=0.0, common...))
@@ -293,7 +293,7 @@ end
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
              n_qtl=200, n_neutral=50, Uqtl=0.02, theta_override=0.5,
              vs_over_vp0=20.0, selection_mode=:stabilizing,
-             ngen_eq=8, ngen_dir=0, seed=UInt64(777),
+             ngen=8, ngen_dir=0, seed=UInt64(777),
              output_formats=Symbol[])
     cfg_d = PS.Config(; backend=:dense,  base...)
     cfg_p = PS.Config(; backend=:packed, base...)
@@ -334,7 +334,7 @@ end
                              vs_over_vp0=20.0,
                              selection_mode=mode,
                              directional_start_from=:msd,
-                             ngen_eq=mode === :directional ? 3 : 5,
+                             ngen=mode === :directional ? 3 : 5,
                              ngen_dir=mode === :directional ? 5 : 0,
                              shift_sd=mode === :directional ? 1.0 : 0.0,
                              t_shift=0,
@@ -342,7 +342,7 @@ end
                              seed=UInt64(2 + (mode === :neutral ? 0 : (mode === :stabilizing ? 1 : 2))),
                              output_formats=Symbol[])
             res = PS.simulate(cfg)
-            @test res.final_gen == cfg.ngen_eq + cfg.ngen_dir
+            @test res.final_gen == cfg.ngen + cfg.ngen_dir
             @test length(res.vt) == cfg.n_qtl + cfg.n_neutral
         end
     end
@@ -357,7 +357,7 @@ end
     cfg = PS.Config(N=120, Ne=120, n_chr=2, chr_len_bp=10_000,
                      n_qtl=100, n_neutral=50, Uqtl=0.02,
                      theta_override=0.5,
-                     selection_mode=:stabilizing, ngen_eq=3, ngen_dir=0,
+                     selection_mode=:stabilizing, ngen=3, ngen_dir=0,
                      seed=UInt64(909),
                      output_formats=Symbol[:plink, :native],
                      output_prefix=prefix)
@@ -413,7 +413,7 @@ end
     cfg = PS.Config(N=200, Ne=200, n_chr=3, chr_len_bp=50_000,
                      n_qtl=300, n_neutral=100, Uqtl=0.02, theta_override=0.5,
                      vs_over_vp0=20.0,
-                     selection_mode=:stabilizing, ngen_eq=2, ngen_dir=0,
+                     selection_mode=:stabilizing, ngen=2, ngen_dir=0,
                      n_threads=1,                    # force chunk_count=1 for deterministic measurement
                      seed=UInt64(7), output_formats=Symbol[])
     rng = PS.make_master_rng(cfg)
@@ -468,7 +468,7 @@ end
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
              n_qtl=200, n_neutral=50, Uqtl=0.02, theta_override=0.5,
              vs_over_vp0=10.0, selection_mode=:stabilizing,
-             ngen_eq=4, ngen_dir=0, seed=UInt64(0xCC),
+             ngen=4, ngen_dir=0, seed=UInt64(0xCC),
              output_formats=Symbol[])
     # Two runs with chunk_count=4: must be bit-identical.
     a = PS.simulate(PS.Config(; n_threads=4, base...))
@@ -487,7 +487,7 @@ end
     cfg = PS.Config(N=10, Ne=10, n_chr=1, chr_len_bp=1000,
                      n_qtl=10, n_neutral=0, Uqtl=0.0, theta_override=0.5,
                      grid_size=3, migration_rate=0.05,
-                     selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
+                     selection_mode=:neutral, ngen=0, ngen_dir=0,
                      output_formats=Symbol[])
     layout = PS.DemeLayout(cfg)
     @test layout.grid_size == 3
@@ -519,7 +519,7 @@ end
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
              n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
              vs_over_vp0=20.0, selection_mode=:stabilizing,
-             ngen_eq=10, ngen_dir=0,
+             ngen=10, ngen_dir=0,
              output_formats=Symbol[])
 
     # m = 0: each deme drifts independently. With finite small N per deme,
@@ -584,14 +584,14 @@ end
                          vs_over_vp0=15.0,
                          selection_mode=mode,
                          directional_start_from=:msd,
-                         ngen_eq=mode === :directional ? 4 : 6,
+                         ngen=mode === :directional ? 4 : 6,
                          ngen_dir=mode === :directional ? 6 : 0,
                          shift_sd=mode === :directional ? 1.5 : 0.0,
                          t_shift=0,
                          seed=UInt64(0xB000 + UInt64(mode === :neutral ? 0 : (mode === :stabilizing ? 1 : 2))),
                          output_formats=Symbol[])
         res = PS.simulate(cfg)
-        @test res.final_gen == cfg.ngen_eq + cfg.ngen_dir
+        @test res.final_gen == cfg.ngen + cfg.ngen_dir
         @test length(res.deme_id) == cfg.N * cfg.grid_size^2
         @test maximum(res.deme_id) == cfg.grid_size^2
     end
@@ -602,7 +602,7 @@ end
                      n_qtl=400, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                      grid_size=3, migration_rate=0.05, cline_amp=2.0,
                      vs_over_vp0=10.0,
-                     selection_mode=:stabilizing, ngen_eq=20, ngen_dir=0,
+                     selection_mode=:stabilizing, ngen=20, ngen_dir=0,
                      seed=UInt64(0xC100), output_formats=Symbol[])
     res = PS.simulate(cfg)
     layout = PS.DemeLayout(cfg)
@@ -633,7 +633,7 @@ end
 @testset "Phase 5 — expansion sets new population size" begin
     base = (N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
              n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-             selection_mode=:neutral, ngen_eq=6, ngen_dir=0,
+             selection_mode=:neutral, ngen=6, ngen_dir=0,
              output_formats=Symbol[])
     res = PS.simulate(PS.Config(; expansion_factor=3.0,
                                   expansion_k_before_end=2,
@@ -652,7 +652,7 @@ end
     # so the post-expansion drift window is zero — AFs should match closely.
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=10_000,
              n_qtl=400, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-             selection_mode=:neutral, ngen_eq=6, ngen_dir=0,
+             selection_mode=:neutral, ngen=6, ngen_dir=0,
              output_formats=Symbol[])
     res_no = PS.simulate(PS.Config(; expansion_factor=1.0,
                                        base..., seed=UInt64(0xE2A0)))
@@ -678,7 +678,7 @@ end
     cfg = PS.Config(N=50, Ne=50, n_chr=2, chr_len_bp=10_000,
                      n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                      grid_size=3, migration_rate=0.05,
-                     selection_mode=:stabilizing, ngen_eq=8, ngen_dir=0,
+                     selection_mode=:stabilizing, ngen=8, ngen_dir=0,
                      vs_over_vp0=15.0,
                      expansion_factor=2.0, expansion_k_before_end=3,
                      seed=UInt64(0xE300), output_formats=Symbol[])
@@ -698,7 +698,7 @@ end
     prefix = joinpath(tmp, "exp")
     cfg = PS.Config(N=80, Ne=80, n_chr=1, chr_len_bp=20_000,
                      n_qtl=200, n_neutral=50, Uqtl=0.02, theta_override=0.5,
-                     selection_mode=:neutral, ngen_eq=8, ngen_dir=0,
+                     selection_mode=:neutral, ngen=8, ngen_dir=0,
                      expansion_factor=3.0, expansion_k_before_end=3,
                      checkpoints = Int[3, 8],   # before (gen 3) and after (gen 8) expansion at gen 5
                      seed=UInt64(0xE400),
@@ -717,7 +717,7 @@ end
 @testset "Phase 5 — fractional expansion factor" begin
     cfg = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                      n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-                     selection_mode=:neutral, ngen_eq=4, ngen_dir=0,
+                     selection_mode=:neutral, ngen=4, ngen_dir=0,
                      expansion_factor=1.5,            # fractional
                      expansion_k_before_end=1,
                      seed=UInt64(0xE5F1), output_formats=Symbol[])
@@ -727,7 +727,7 @@ end
 
     cfg2 = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                       n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
-                      selection_mode=:neutral, ngen_eq=4, ngen_dir=0,
+                      selection_mode=:neutral, ngen=4, ngen_dir=0,
                       expansion_factor=2.7,
                       expansion_k_before_end=1,
                       seed=UInt64(0xE5F2), output_formats=Symbol[])
@@ -745,7 +745,7 @@ end
     cfg_pan = PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=50_000,
                          n_qtl=300, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                          vs_over_vp0=10.0,
-                         selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
+                         selection_mode=:stabilizing, ngen=10, ngen_dir=0,
                          seed=UInt64(0xD0C0), n_threads=1,
                          output_formats=Symbol[:summary],
                          output_prefix=tempname())
@@ -759,7 +759,7 @@ end
                         n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                         grid_size=3, migration_rate=0.05, cline_amp=0.0,
                         vs_over_vp0=10.0,
-                        selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
+                        selection_mode=:stabilizing, ngen=10, ngen_dir=0,
                         seed=UInt64(0xD0C1), n_threads=1,
                         output_formats=Symbol[:summary],
                         output_prefix=tempname())
@@ -772,7 +772,7 @@ end
     cfg = PS.Config(N=20, Ne=20, n_chr=1, chr_len_bp=1000,
                      n_qtl=10, n_neutral=0, Uqtl=0.0, theta_override=0.5,
                      grid_size=4, migration_rate=0.0,
-                     selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
+                     selection_mode=:neutral, ngen=0, ngen_dir=0,
                      output_formats=Symbol[])
     layout = PS.DemeLayout(cfg)
     v = [0.5, 1.0, 1.5, 2.0]
@@ -783,7 +783,7 @@ end
     # Auto-derived Uneu under the uniform-per-site rule.
     cfg = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                      n_qtl=100, n_neutral=200, Uqtl=0.01,
-                     selection_mode=:neutral, ngen_eq=0,
+                     selection_mode=:neutral, ngen=0,
                      output_formats=Symbol[])
     @test PS.effective_Uneu(cfg) ≈ 0.02
     @test PS.total_U(cfg) ≈ 0.03
@@ -793,7 +793,7 @@ end
     # n_neutral = 0 → auto-Uneu = 0, total = Uqtl.
     cfg2 = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                       n_qtl=100, n_neutral=0, Uqtl=0.02,
-                      selection_mode=:neutral, ngen_eq=0,
+                      selection_mode=:neutral, ngen=0,
                       output_formats=Symbol[])
     @test PS.effective_Uneu(cfg2) == 0.0
     @test PS.total_U(cfg2) ≈ 0.02
@@ -802,7 +802,7 @@ end
     # Explicit Uneu override.
     cfg3 = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                       n_qtl=100, n_neutral=200, Uqtl=0.01, Uneu=0.5,
-                      selection_mode=:neutral, ngen_eq=0,
+                      selection_mode=:neutral, ngen=0,
                       output_formats=Symbol[])
     @test PS.effective_Uneu(cfg3) ≈ 0.5
     @test PS.theta_qtl(cfg3) != PS.theta_neu(cfg3)  # non-uniform per-site rates
@@ -811,21 +811,21 @@ end
     @test_throws ArgumentError PS.validate(
         PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                    n_qtl=100, n_neutral=0, Uqtl=0.01, Uneu=0.1,
-                   selection_mode=:neutral, ngen_eq=0,
+                   selection_mode=:neutral, ngen=0,
                    output_formats=Symbol[]))
 
     # Validation: n_neutral > 0 with Uneu = 0 (explicit) → error.
     @test_throws ArgumentError PS.validate(
         PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                    n_qtl=100, n_neutral=200, Uqtl=0.01, Uneu=0.0,
-                   selection_mode=:neutral, ngen_eq=0,
+                   selection_mode=:neutral, ngen=0,
                    output_formats=Symbol[]))
 
     # Validation: Uqtl > 0 with n_qtl = 0 → error.
     @test_throws ArgumentError PS.validate(
         PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                    n_qtl=0, n_neutral=200, Uqtl=0.01, Uneu=0.1,
-                   selection_mode=:neutral, ngen_eq=0,
+                   selection_mode=:neutral, ngen=0,
                    output_formats=Symbol[]))
 end
 
@@ -834,7 +834,7 @@ end
     cfg = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
                      n_qtl=400, n_neutral=0, Uqtl=0.02,
                      theta_override=0.5,
-                     selection_mode=:stabilizing, ngen_eq=3, ngen_dir=0,
+                     selection_mode=:stabilizing, ngen=3, ngen_dir=0,
                      n_threads=1,
                      seed=UInt64(0xC0DE), output_formats=Symbol[])
     rng = PS.make_master_rng(cfg)
@@ -850,7 +850,7 @@ end
     mA0, vA0 = PS.population_mean_var(scratch.A)
     V_E = vA0 * (1 - cfg.h2) / cfg.h2; Vs = cfg.vs_over_vp0 * (vA0 + V_E)
     phase = PS.PhaseSelection(false, Vs, sqrt(V_E), [mA0], [mA0], typemax(Int))
-    for g in 1:cfg.ngen_eq
+    for g in 1:cfg.ngen
         PS.step_generation_packed!(pop, vt, cfg, phase, scratch, rng, g)
     end
     @test pop.L == 400  # no neutral block

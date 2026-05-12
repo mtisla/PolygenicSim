@@ -68,7 +68,7 @@ const _CONFIG_CATEGORIES = (
     "effects"     => (:effect_distribution, :effect_scale, :maf_min),
     "selection"   => (:selection_mode, :vs_over_vp0, :vs, :h2,
                        :shift_sd, :sel_grad, :t_shift, :directional_start_from),
-    "phases"      => (:ngen_eq, :ngen_dir),
+    "phases"      => (:ngen, :ngen_dir),
     "runtime"     => (:backend, :seed, :n_threads, :n_int),
     "output"      => (:output_formats, :output_prefix, :checkpoints),
     "loading"     => (:load_from, :load_plink_prefix, :load_demography),
