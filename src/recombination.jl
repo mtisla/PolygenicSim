@@ -70,12 +70,22 @@ end
 Populate `scratch.break_idx` with sorted, *cumulative* (across chromosomes)
 break variant indices for one gamete.
 
-Per chromosome `c`, draws `K_c ~ Poisson(cfg.xovers_per_chr)` crossovers
-and places each at a uniformly-chosen variant boundary in
-`[chr_start[c]+1, chr_end[c]]`. Sampling is with replacement: duplicate
-break positions in the same inter-marker interval cancel correctly inside
-the gamete kernel (two source toggles = identity), matching the biological
-parity of multiple crossovers in the same interval.
+Per chromosome `c`:
+  K_c ~ Poisson(cfg.xovers_per_chr)            # Morgan-length input
+  for each crossover:
+    xover_bp ~ Uniform(1, cfg.chr_len_bp)      # bp-space sampling
+    break_idx = first variant index with bp >= xover_bp
+
+The bp-space sampling is what makes LD between two markers a function of
+their bp distance — exactly the SLiM / msprime model. With variants placed
+at uniform random bp positions, the expected per-bp recombination rate
+between markers is `xovers_per_chr / chr_len_bp`, so LD decays
+approximately as `(1 - exp(-2·d·recomb_per_bp))/2` over bp distance `d`.
+
+Sampling is with replacement in bp space: with `chr_len_bp` typically
+≥ 100K and K_c ~ O(1), duplicate bp positions are vanishingly rare, and
+when they do occur they map to the same `break_idx` and cancel in the
+gamete kernel (two source toggles = identity).
 
 Steady-state: zero allocations once `break_idx` has been sized.
 """
@@ -83,23 +93,20 @@ function sample_breakpoints!(scratch::RecombScratch, rng::Xoshiro,
                               vt::VariantTable, cfg::Config)
     empty!(scratch.break_idx)
     n_chr = cfg.n_chr
+    chr_len_bp = cfg.chr_len_bp
     poisson_M = Poisson(cfg.xovers_per_chr)
     @inbounds for c in 1:n_chr
         j_lo = Int(vt.chr_start[c])
         j_hi = Int(vt.chr_end[c])
-        # Skip chromosomes with fewer than 2 variants — no inter-marker
-        # interval, so crossovers can't change the gamete.
-        (j_lo == 0 || j_lo >= j_hi) && continue
+        # Skip chromosomes with no variants — nothing to break.
+        j_lo == 0 && continue
         K_c = rand(rng, poisson_M)
         K_c == 0 && continue
-        range_lo = j_lo + 1
-        range_hi = j_hi
-        # Place each crossover uniformly in [j_lo+1, j_hi]. Sample with
-        # replacement; duplicates cancel in the gamete kernel.
-        k = 1
-        while k <= K_c
-            push!(scratch.break_idx, Int32(rand(rng, range_lo:range_hi)))
-            k += 1
+        bp_view = view(vt.bp, j_lo:j_hi)
+        for k in 1:K_c
+            xover_bp = Int32(rand(rng, 1:chr_len_bp))
+            local_idx = searchsortedfirst(bp_view, xover_bp)
+            push!(scratch.break_idx, Int32(j_lo + local_idx - 1))
         end
     end
     # Cumulative sort so the gamete kernel can binary-search the per-chr range.
