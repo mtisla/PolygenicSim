@@ -171,15 +171,15 @@ function write_summary(prefix::AbstractString, s::SimSummary)
                                     ("var_p",   vp_series))
                 st = _conv_stats(series)
                 if st === nothing
-                    println(io, "  ", name, ": insufficient samples (n=", length(series), ")")
+                    println(io, "  ", name, ": insufficient trajectory snapshots (",
+                            length(series), ")")
                 else
-                    println(io, "  ", name, ":")
-                    println(io, "    n_samples            = ", st.n)
-                    println(io, "    last_$(st.n_tail) mean         = ", round(st.mean; digits=6))
-                    println(io, "    last_$(st.n_tail) std          = ", round(st.std; digits=6))
+                    println(io, "  ", name, ":   (", st.n, " trajectory snapshots logged)")
+                    println(io, "    last_$(st.n_tail)_mean        = ", round(st.mean; digits=6))
+                    println(io, "    last_$(st.n_tail)_std         = ", round(st.std; digits=6))
                     if !isnan(st.prior_mean)
-                        println(io, "    prior_$(st.n_tail) mean        = ", round(st.prior_mean; digits=6))
-                        println(io, "    |Δ| rel half-change  = ",
+                        println(io, "    prior_$(st.n_tail)_mean       = ", round(st.prior_mean; digits=6))
+                        println(io, "    |Δ| rel half-change   = ",
                                 round(100 * st.rel_half_change; digits=2), " %")
                     end
                 end
