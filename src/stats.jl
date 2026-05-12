@@ -18,21 +18,35 @@
 Two-pass mean/variance over a length-N vector. Threaded over individuals when
 `Threads.nthreads() > 1` and N is large.
 """
+# Helpers — give each chunk its own scope so accumulators aren't shared
+# across threads (function-local variables assigned inside `Threads.@threads`
+# bodies are captured by the macro's closure, which produces a data race if
+# accessed from multiple threads).
+@inline function _partial_sum(A::Vector{Float64}, i_lo::Int, i_hi::Int)
+    s = 0.0
+    @inbounds for i in i_lo:i_hi
+        s += A[i]
+    end
+    return s
+end
+
+@inline function _partial_sumsq(A::Vector{Float64}, m::Float64, i_lo::Int, i_hi::Int)
+    v = 0.0
+    @inbounds for i in i_lo:i_hi
+        d = A[i] - m
+        v += d * d
+    end
+    return v
+end
+
 function population_mean_var(A::Vector{Float64})
     n = length(A)
     n == 0 && return (0.0, 0.0)
     cc = _parallel_chunks(n, 1024)
     if cc == 1
-        s = 0.0
-        @inbounds for x in A
-            s += x
-        end
+        s = _partial_sum(A, 1, n)
         m = s / n
-        v = 0.0
-        @inbounds for x in A
-            d = x - m
-            v += d * d
-        end
+        v = _partial_sumsq(A, m, 1, n)
         return (m, n > 1 ? v / (n - 1) : 0.0)
     end
     chunk = cld(n, cc)
@@ -40,29 +54,16 @@ function population_mean_var(A::Vector{Float64})
     Threads.@threads :static for k in 1:cc
         i_lo = (k - 1) * chunk + 1
         i_hi = min(k * chunk, n)
-        s = 0.0
-        @inbounds for i in i_lo:i_hi
-            s += A[i]
-        end
-        sums[k] = s
+        sums[k] = _partial_sum(A, i_lo, i_hi)
     end
     m = sum(sums) / n
     sumsq = zeros(Float64, cc)
     Threads.@threads :static for k in 1:cc
         i_lo = (k - 1) * chunk + 1
         i_hi = min(k * chunk, n)
-        v = 0.0
-        @inbounds for i in i_lo:i_hi
-            d = A[i] - m
-            v += d * d
-        end
-        sumsq[k] = v
+        sumsq[k] = _partial_sumsq(A, m, i_lo, i_hi)
     end
-    v = 0.0
-    @inbounds for x in sumsq
-        v += x
-    end
-    return (m, n > 1 ? v / (n - 1) : 0.0)
+    return (m, n > 1 ? sum(sumsq) / (n - 1) : 0.0)
 end
 
 """
@@ -119,32 +120,29 @@ end
 `Σ_j 2 p_j (1−p_j) α_j²` — the additive variance under HWE/LE summed across
 QTL sites (neutral sites contribute 0 because α = 0). Threaded across loci.
 """
+@inline function _partial_2pq_alpha2(p::Vector{Float64}, alpha::Vector{Float64},
+                                        j_lo::Int, j_hi::Int)
+    s = 0.0
+    @inbounds for j in j_lo:j_hi
+        s += 2.0 * p[j] * (1.0 - p[j]) * alpha[j] * alpha[j]
+    end
+    return s
+end
+
 function sum_of_per_locus_var(p::Vector{Float64}, alpha::Vector{Float64})
     L = length(p)
     cc = _parallel_chunks(L, 1024)
     if cc == 1
-        s = 0.0
-        @inbounds for j in eachindex(p)
-            s += 2.0 * p[j] * (1.0 - p[j]) * alpha[j] * alpha[j]
-        end
-        return s
+        return _partial_2pq_alpha2(p, alpha, 1, L)
     end
     chunk = cld(L, cc)
     sums = zeros(Float64, cc)
     Threads.@threads :static for k in 1:cc
         j_lo = (k - 1) * chunk + 1
         j_hi = min(k * chunk, L)
-        s = 0.0
-        @inbounds for j in j_lo:j_hi
-            s += 2.0 * p[j] * (1.0 - p[j]) * alpha[j] * alpha[j]
-        end
-        sums[k] = s
+        sums[k] = _partial_2pq_alpha2(p, alpha, j_lo, j_hi)
     end
-    s = 0.0
-    @inbounds for x in sums
-        s += x
-    end
-    return s
+    return sum(sums)
 end
 
 """
@@ -163,31 +161,30 @@ end
 
 Count of loci with `tol < p < 1 - tol`. Threaded across loci.
 """
+@inline function _partial_polymorphic_count(p::Vector{Float64}, tol::Float64,
+                                                j_lo::Int, j_hi::Int)
+    c = 0
+    @inbounds for j in j_lo:j_hi
+        v = p[j]
+        if v > tol && v < 1 - tol
+            c += 1
+        end
+    end
+    return c
+end
+
 function polymorphic_count(p::Vector{Float64}; tol::Float64=1e-12)
     L = length(p)
     cc = _parallel_chunks(L, 1024)
     if cc == 1
-        n = 0
-        @inbounds for v in p
-            if v > tol && v < 1 - tol
-                n += 1
-            end
-        end
-        return n
+        return _partial_polymorphic_count(p, tol, 1, L)
     end
     chunk = cld(L, cc)
     counts = zeros(Int, cc)
     Threads.@threads :static for k in 1:cc
         j_lo = (k - 1) * chunk + 1
         j_hi = min(k * chunk, L)
-        c = 0
-        @inbounds for j in j_lo:j_hi
-            v = p[j]
-            if v > tol && v < 1 - tol
-                c += 1
-            end
-        end
-        counts[k] = c
+        counts[k] = _partial_polymorphic_count(p, tol, j_lo, j_hi)
     end
     return sum(counts)
 end
