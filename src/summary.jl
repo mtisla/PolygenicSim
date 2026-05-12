@@ -31,7 +31,8 @@ struct SimSummary
     bulmer_B::Float64
     var_pheno::Float64
     h2_realized::Float64
-    convergence_log::Vector{NamedTuple{(:gen, :B, :mean_p, :var_p),Tuple{Int,Float64,Float64,Float64}}}
+    convergence_log::Vector{NamedTuple{(:gen, :B, :var_A, :mean_p, :var_p),
+                                          Tuple{Int,Float64,Float64,Float64,Float64}}}
     p_final::Vector{Float64}
     alpha_final::Vector{Float64}
     is_qtl_final::BitVector
@@ -97,6 +98,39 @@ end
     return string(v)
 end
 
+# ---------------------------------------------------------------------------
+# Convergence diagnostics computed from `convergence_log`. Returns a NamedTuple
+# (n, n_tail, mean, std, prior_mean, rel_half_change) per scalar quantity, OR
+# `nothing` if there are too few trajectory samples to compute aggregates.
+# ---------------------------------------------------------------------------
+function _conv_stats(values::AbstractVector{Float64})
+    n = length(values)
+    n < 2 && return nothing
+    n_tail = min(10, n)
+    tail = values[(end - n_tail + 1):end]
+    m_tail = sum(tail) / n_tail
+    v_tail = 0.0
+    for x in tail
+        v_tail += (x - m_tail)^2
+    end
+    sd_tail = n_tail > 1 ? sqrt(v_tail / (n_tail - 1)) : 0.0
+    # Relative |Δ| between the first and second halves of the last 2·n_tail
+    # samples — a coarse "has it settled" check.
+    rel_change = NaN
+    prior_mean = NaN
+    n_window = min(2 * n_tail, n)
+    if n_window >= 4
+        half = n_window ÷ 2
+        prior = values[(end - n_window + 1):(end - half)]
+        recent = values[(end - half + 1):end]
+        prior_mean = sum(prior) / length(prior)
+        recent_mean = sum(recent) / length(recent)
+        rel_change = abs(recent_mean - prior_mean) / max(abs(recent_mean), 1e-12)
+    end
+    return (n=n, n_tail=n_tail, mean=m_tail, std=sd_tail,
+            prior_mean=prior_mean, rel_half_change=rel_change)
+end
+
 """
     write_summary(prefix, summary)
 
@@ -124,12 +158,38 @@ function write_summary(prefix::AbstractString, s::SimSummary)
             println(io, "  ", rpad(k, 26), " = ", v isa Float64 ? round(v; digits=6) : v)
         end
         println(io)
-        # Convergence trajectory (only if `n_int > 0` and rows were captured)
+        # Convergence diagnostics + trajectory (when `n_int > 0`).
         if !isempty(s.convergence_log)
+            B_series   = [r.B     for r in s.convergence_log]
+            vA_series  = [r.var_A for r in s.convergence_log]
+            mp_series  = [r.mean_p for r in s.convergence_log]
+            vp_series  = [r.var_p  for r in s.convergence_log]
+            println(io, "[convergence]")
+            for (name, series) in (("Bulmer_B", B_series),
+                                    ("V_A",     vA_series),
+                                    ("mean_p",  mp_series),
+                                    ("var_p",   vp_series))
+                st = _conv_stats(series)
+                if st === nothing
+                    println(io, "  ", name, ": insufficient samples (n=", length(series), ")")
+                else
+                    println(io, "  ", name, ":")
+                    println(io, "    n_samples            = ", st.n)
+                    println(io, "    last_$(st.n_tail) mean         = ", round(st.mean; digits=6))
+                    println(io, "    last_$(st.n_tail) std          = ", round(st.std; digits=6))
+                    if !isnan(st.prior_mean)
+                        println(io, "    prior_$(st.n_tail) mean        = ", round(st.prior_mean; digits=6))
+                        println(io, "    |Δ| rel half-change  = ",
+                                round(100 * st.rel_half_change; digits=2), " %")
+                    end
+                end
+            end
+            println(io)
             println(io, "[trajectory]")
-            println(io, "  gen\tB\tmean_p\tvar_p")
+            println(io, "  gen\tB\tV_A\tmean_p\tvar_p")
             for r in s.convergence_log
-                println(io, "  ", r.gen, "\t", r.B, "\t", r.mean_p, "\t", r.var_p)
+                println(io, "  ", r.gen, "\t", r.B, "\t", r.var_A, "\t",
+                        r.mean_p, "\t", r.var_p)
             end
         end
     end
@@ -146,9 +206,32 @@ function write_summary(prefix::AbstractString, s::SimSummary)
         for (k, v) in _realized_fields(s)
             println(io, "realized.", k, "\t", v)
         end
-        # Convergence trajectory as `trajectory.<metric>.<gen>` rows.
+        # Convergence aggregate stats (`convergence.<metric>.<stat>`).
+        if !isempty(s.convergence_log)
+            B_series  = [r.B     for r in s.convergence_log]
+            vA_series = [r.var_A for r in s.convergence_log]
+            mp_series = [r.mean_p for r in s.convergence_log]
+            vp_series = [r.var_p  for r in s.convergence_log]
+            for (name, series) in (("Bulmer_B", B_series),
+                                    ("V_A",     vA_series),
+                                    ("mean_p",  mp_series),
+                                    ("var_p",   vp_series))
+                st = _conv_stats(series)
+                st === nothing && continue
+                println(io, "convergence.", name, ".n_samples\t", st.n)
+                println(io, "convergence.", name, ".tail_mean\t", st.mean)
+                println(io, "convergence.", name, ".tail_std\t", st.std)
+                println(io, "convergence.", name, ".tail_n\t", st.n_tail)
+                if !isnan(st.prior_mean)
+                    println(io, "convergence.", name, ".prior_mean\t", st.prior_mean)
+                    println(io, "convergence.", name, ".rel_half_change\t", st.rel_half_change)
+                end
+            end
+        end
+        # Per-gen trajectory rows: `trajectory.<metric>.gen<N>`.
         for r in s.convergence_log
-            println(io, "trajectory.B.gen",      r.gen, "\t", r.B)
+            println(io, "trajectory.B.gen",     r.gen, "\t", r.B)
+            println(io, "trajectory.V_A.gen",   r.gen, "\t", r.var_A)
             println(io, "trajectory.mean_p.gen", r.gen, "\t", r.mean_p)
             println(io, "trajectory.var_p.gen",  r.gen, "\t", r.var_p)
         end

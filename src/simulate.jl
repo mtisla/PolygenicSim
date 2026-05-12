@@ -75,7 +75,8 @@ function simulate(cfg::Config)
 
     # ---- summary trajectory buffer --------------------------------------
     # n_int == 0 ⇒ only a final-gen summary; n_int > 0 ⇒ also every n_int gens.
-    conv_buffer = NamedTuple{(:gen, :B, :mean_p, :var_p),Tuple{Int,Float64,Float64,Float64}}[]
+    conv_buffer = NamedTuple{(:gen, :B, :var_A, :mean_p, :var_p),
+                                Tuple{Int,Float64,Float64,Float64,Float64}}[]
     n_int = cfg.n_int
     p_buf = zeros(Float64, L)
     # Per-deme work buffers (resized after expansion).
@@ -117,7 +118,8 @@ function simulate(cfg::Config)
             breeding_value_stats_per_deme!(mean_buf, var_buf, scratch.A, scratch.layout)
             sum_of_var_per_deme!(sov_buf, pop, scratch.layout, scratch.qtl_idx, scratch.alpha_qtl)
             bulmer_per_deme!(B_buf, var_buf, sov_buf)
-            B  = weighted_avg_demes(B_buf, scratch.layout)
+            B    = weighted_avg_demes(B_buf, scratch.layout)
+            vA_d = weighted_avg_demes(var_buf, scratch.layout)
             # Allele-freq stats are reported pooled across the metapop (locus-level
             # quantities). We keep the original definition so the convergence trace
             # is comparable to single-deme runs.
@@ -128,7 +130,7 @@ function simulate(cfg::Config)
                 vp += (x - mp)^2
             end
             vp /= max(1, L - 1)
-            push!(conv_buffer, (gen=gen, B=B, mean_p=mp, var_p=vp))
+            push!(conv_buffer, (gen=gen, B=B, var_A=vA_d, mean_p=mp, var_p=vp))
         end
         if gen in checkpoint_set
             cp_paths = _emit_checkpoint(cfg, pop, vt, scratch, deme_id, gen)
