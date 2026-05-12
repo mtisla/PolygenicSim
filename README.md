@@ -378,6 +378,29 @@ Scopes: user-specified windows (as % of `chr_len_bp`) plus **within-chr** and
   Diverges from the R reference (`bulmer/R/stats.R`) which reports the
   one-tailed lower-tail p for `dc` — that's the wrong tail for the test.
 
+**`rho_pearson` — direction-aware sign-flip test.** Per scope, computes
+the Pearson correlation between the studentized per-locus marginal
+Bulmer effect and the logit polarized allele frequency:
+
+```
+B_j         = α_j · Σ_{k ≠ j, mask[j,k]} R_meta[j,k] · α_k
+B_std_j     = (B_j_obs − mean_b B_j_null_b) / sd_b B_j_null_b
+rho_pearson = cor(B_std_j, logit(p_pol_j))         (per scope)
+```
+
+The studentization stabilizes variance across loci with different α². The
+SIGN of ρ encodes the direction of selection:
+
+- **ρ > 0**: positive directional selection (mean phenotype rising).
+- **ρ < 0**: negative directional selection.
+
+`rho_pearson_perm_p` is two-tailed (same absolute-deviation convention as
+`dc<co>_perm_p`). Smoke run: at `sel_grad = +0.1`, ρ is positive across
+all 6 scopes, confirming the sign-aware behavior. Power is typically
+lower than `dc<co>` for tail-concentrated signals (as in Hayward-Sella
+regime), but `rho_pearson` is the right tool when you need the sign of
+selection rather than just the magnitude of the LD signature.
+
 For structured runs (`:twoD_perp` / `:twoD_recent`), the per-deme components
 (`VA_k`, `VG_off_k`, `R_k`) are deme-weighted (`w_k = N_k / N_total`) before
 ratio formation — matches the R reference's deme-weighted-component

@@ -480,104 +480,148 @@ function _delta_cross_one(R_meta::Matrix{T}, α::Vector{T},
             Z = Z, perm_p = p_perm)
 end
 
-# rho_B_logitp — continuous Pearson correlation of pair-level B_jk against
-# logit(p_pol_j). Sign-flip null is efficient because under perm:
-#   B_jk → s_j · s_k · B_jk
-# logit(p_pol_j) is invariant. So Σ y², mean(y), var(y), and Σ B_jk² are all
-# invariant; only Σ B_jk and Σ B_jk · y_j shift. These can be computed for
-# all n_perm sign vectors at once via a single (C · S) gemm.
-function _rho_B_logitp_one(R_meta::Matrix{T}, α::Vector{T},
-                              p_pool::Vector{Float64}, raw_signs::Matrix{T},
-                              mask::BitMatrix) where {T<:AbstractFloat}
+# rho_pearson — Pearson correlation of the studentized per-locus marginal
+# Bulmer effect against logit(p_pol_j). Direction-aware: sign(ρ) > 0 under
+# positive directional selection, < 0 under negative directional selection.
+#
+# Math (per scope):
+#   R_masked[j,k] = R_meta[j,k] if (j ≠ k AND mask[j,k]) else 0
+#   B_j_obs       = α_j · Σ_k R_masked[j,k] · α_k       (length p)
+#   a_perm_b      = raw_signs[:,b] .* α                  (per perm)
+#   B_j_null_b    = a_perm_b[j] · Σ_k R_masked[j,k] · a_perm_b[k]
+#   B_std_j       = (B_j_obs − mean_b B_j_null_b) / sd_b B_j_null_b
+#   logit_p_j     = log(p_pol_j / (1 − p_pol_j)),  p_pol clamped to [.005,.995]
+#   rho_pearson   = cor(B_std_j, logit_p_j) over valid loci (sd > 0).
+#
+# Permutation null: studentize each B_j_null_b column the same way, take
+# cor(B_std_null_b, logit_p) → empirical null distribution of ρ. Two-tailed
+# p via the v0.6.3 dc convention: |null − null_mean| ≥ |obs − null_mean|.
+function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
+                            p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                            mask::BitMatrix) where {T<:AbstractFloat}
     p = length(α)
-    eps_clamp = 1.0e-3   # logit-clamp away from 0 and 1
-    logitp = Vector{Float64}(undef, p)
+    n_perm = size(raw_signs, 2)
+    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN)
+
+    # 1. Build R_masked = R_meta with diag zero and off-diagonals masked.
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    # 2. a_perm = raw_signs .* α  (p × n_perm)
+    a_perm = Matrix{T}(undef, p, n_perm)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_perm[j, b] = raw_signs[j, b] * α[j]
+    end
+
+    # 3. Compute R_a (length p) and R_aperm (p × n_perm) via BLAS gemv/gemm.
+    R_a    = R_masked * α                    # length p
+    R_aperm = R_masked * a_perm              # p × n_perm gemm
+
+    # 4. B_j_obs and B_j_null
+    Bj_obs = Vector{Float64}(undef, p)
+    Bj_null = Matrix{Float64}(undef, p, n_perm)
+    @inbounds for j in 1:p
+        Bj_obs[j] = Float64(α[j]) * Float64(R_a[j])
+    end
+    @inbounds for b in 1:n_perm, j in 1:p
+        Bj_null[j, b] = Float64(a_perm[j, b]) * Float64(R_aperm[j, b])
+    end
+
+    # 5. Studentize against empirical sign-flip null (per locus).
+    Bj_mean = Vector{Float64}(undef, p)
+    Bj_sd   = Vector{Float64}(undef, p)
+    @inbounds for j in 1:p
+        s = 0.0
+        for b in 1:n_perm
+            s += Bj_null[j, b]
+        end
+        m = s / n_perm
+        Bj_mean[j] = m
+        ss = 0.0
+        for b in 1:n_perm
+            d = Bj_null[j, b] - m
+            ss += d * d
+        end
+        Bj_sd[j] = sqrt(ss / (n_perm - 1))
+    end
+
+    # 6. Polarized logit p, clamped.
+    logit_p = Vector{Float64}(undef, p)
     @inbounds for j in 1:p
         pj = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
-        pj = clamp(pj, eps_clamp, 1.0 - eps_clamp)
-        logitp[j] = log(pj / (1.0 - pj))
+        pj = clamp(pj, 0.005, 0.995)
+        logit_p[j] = log(pj / (1.0 - pj))
     end
-    # Build C[j,k] = α_j · R_meta[j,k] · α_k · mask[j,k]; diag(C) = 0.
-    C = Matrix{T}(undef, p, p)
-    scope_count = zeros(Int, p)
-    n_pairs = 0
-    sum_C2 = 0.0
-    sum_C  = 0.0
-    sum_C_y = 0.0
-    @inbounds for k in 1:p
-        for j in 1:p
-            if j != k && mask[j, k]
-                v = α[j] * R_meta[j, k] * α[k]
-                C[j, k] = v
-                vd = Float64(v)
-                sum_C   += vd
-                sum_C2  += vd * vd
-                sum_C_y += vd * logitp[j]
-                scope_count[j] += 1
-                n_pairs += 1
-            else
-                C[j, k] = zero(T)
-            end
-        end
-    end
-    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN,
-               perm_p = NaN, n_pairs = n_pairs)
-    n_pairs < 3 && return nan_out
 
-    # mean_y and var_y depend on the scope-restricted distribution of y_pair
-    # = logitp[j_pair]; each j contributes scope_count[j] times.
-    sum_y_scoped = 0.0
-    sum_y2_scoped = 0.0
+    # 7. Filter to loci with usable sd and finite logit. Build B_std_obs and
+    #    B_std_null on the valid subset.
+    valid = Int[]
     @inbounds for j in 1:p
-        cnt = scope_count[j]
-        sum_y_scoped  += logitp[j] * cnt
-        sum_y2_scoped += logitp[j]^2 * cnt
-    end
-    mean_y = sum_y_scoped / n_pairs
-    var_y  = sum_y2_scoped / n_pairs - mean_y^2
-    var_y < 1e-30 && return nan_out
-
-    # Observed correlation
-    mean_x_obs = sum_C / n_pairs
-    var_x_obs  = sum_C2 / n_pairs - mean_x_obs^2
-    cov_xy_obs = sum_C_y / n_pairs - mean_x_obs * mean_y
-    rho_obs = (var_x_obs > 1e-30) ?
-              cov_xy_obs / sqrt(var_x_obs * var_y) : NaN
-
-    # Permutation null. C · S gives the per-perm row sums Σ_k C[j,k] · s_k.
-    n_perm = size(raw_signs, 2)
-    CS = Matrix{T}(undef, p, n_perm)
-    mul!(CS, C, raw_signs)
-    rho_null = Vector{Float64}(undef, n_perm)
-    @inbounds for b in 1:n_perm
-        # Σ s_j s_k C_jk     = Σ_j s_j · CS[j, b]
-        # Σ s_j s_k C_jk y_j = Σ_j s_j · CS[j, b] · y_j
-        sum_C_perm = zero(T)
-        sum_Cy_perm = 0.0
-        @simd for j in 1:p
-            sj_csjb = raw_signs[j, b] * CS[j, b]
-            sum_C_perm  += sj_csjb
-            sum_Cy_perm += logitp[j] * Float64(sj_csjb)
+        if Bj_sd[j] >= 1e-15 && isfinite(logit_p[j]) && isfinite(Bj_obs[j])
+            push!(valid, j)
         end
-        mean_x_perm = Float64(sum_C_perm) / n_pairs
-        cov_perm    = sum_Cy_perm / n_pairs - mean_x_perm * mean_y
-        var_x_perm  = sum_C2 / n_pairs - mean_x_perm^2
-        rho_null[b] = (var_x_perm > 1e-30) ?
-                       cov_perm / sqrt(var_x_perm * var_y) : NaN
+    end
+    n_v = length(valid)
+    n_v < 5 && return nan_out
+
+    B_std_obs = Vector{Float64}(undef, n_v)
+    logit_p_v = Vector{Float64}(undef, n_v)
+    @inbounds for vi in 1:n_v
+        j = valid[vi]
+        B_std_obs[vi] = (Bj_obs[j] - Bj_mean[j]) / Bj_sd[j]
+        logit_p_v[vi] = logit_p[j]
     end
 
-    valid = filter(!isnan, rho_null)
-    if isnan(rho_obs) || isempty(valid)
-        return nan_out
+    # Pre-center logit_p for fast correlation.
+    mean_y = mean(logit_p_v)
+    ly = logit_p_v .- mean_y
+    norm_ly = sqrt(sum(abs2, ly))
+    norm_ly < 1e-30 && return nan_out
+
+    # 8. Observed rho
+    mean_x = mean(B_std_obs)
+    bx = B_std_obs .- mean_x
+    norm_bx = sqrt(sum(abs2, bx))
+    rho_obs = norm_bx > 1e-30 ? dot(bx, ly) / (norm_bx * norm_ly) : NaN
+
+    # 9. Null rho per perm: cor(B_std_null_b, logit_p) on valid loci.
+    rho_null = Vector{Float64}(undef, n_perm)
+    bxb = Vector{Float64}(undef, n_v)
+    @inbounds for b in 1:n_perm
+        # Build standardized null vector on valid loci
+        s = 0.0
+        for vi in 1:n_v
+            j = valid[vi]
+            v = (Bj_null[j, b] - Bj_mean[j]) / Bj_sd[j]
+            bxb[vi] = v
+            s += v
+        end
+        mxb = s / n_v
+        nb  = 0.0
+        cv  = 0.0
+        for vi in 1:n_v
+            d = bxb[vi] - mxb
+            nb += d * d
+            cv += d * ly[vi]
+        end
+        norm_b = sqrt(nb)
+        rho_null[b] = norm_b > 1e-30 ? cv / (norm_b * norm_ly) : NaN
     end
-    null_mean = mean(valid)
-    null_sd   = length(valid) > 1 ? std(valid; corrected=true) : 0.0
+
+    valid_null = filter(!isnan, rho_null)
+    isnan(rho_obs) && return nan_out
+    isempty(valid_null) && return nan_out
+
+    null_mean = mean(valid_null)
+    null_sd   = length(valid_null) > 1 ? std(valid_null; corrected=true) : 0.0
     Z = null_sd > 1e-30 ? (rho_obs - null_mean) / null_sd : NaN
     abs_dev_obs = abs(rho_obs - null_mean)
     perm_p = (1 + count(r -> !isnan(r) && abs(r - null_mean) >= abs_dev_obs,
                           rho_null)) / (n_perm + 1)
     return (rho = rho_obs, null_mean = null_mean, null_sd = null_sd,
-            Z = Z, perm_p = perm_p, n_pairs = n_pairs)
+            Z = Z, perm_p = perm_p)
 end
 
 """
@@ -640,7 +684,7 @@ function oracle_stats(result::SimResult;
             fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut),
             fill(NaN, n_scopes), fill(NaN, n_scopes),
             fill(NaN, n_scopes), fill(NaN, n_scopes),
-            fill(NaN, n_scopes), zeros(Int, n_scopes))
+            fill(NaN, n_scopes))
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -690,12 +734,11 @@ function oracle_stats(result::SimResult;
     dc_Z         = fill(NaN, n_scopes, n_cut)
     dc_perm_p    = fill(NaN, n_scopes, n_cut)
 
-    rho_obs   = fill(NaN, n_scopes)
-    rho_nm    = fill(NaN, n_scopes)
-    rho_nsd   = fill(NaN, n_scopes)
-    rho_Z     = fill(NaN, n_scopes)
-    rho_pp    = fill(NaN, n_scopes)
-    rho_np    = zeros(Int, n_scopes)
+    rho_obs = fill(NaN, n_scopes)
+    rho_nm  = fill(NaN, n_scopes)
+    rho_nsd = fill(NaN, n_scopes)
+    rho_Z   = fill(NaN, n_scopes)
+    rho_pp  = fill(NaN, n_scopes)
 
     if !failed
         for (ci, co) in enumerate(cutoffs)
@@ -716,15 +759,14 @@ function oracle_stats(result::SimResult;
                 dc_perm_p[s, ci]    = r.perm_p
             end
         end
-        # ρ_B_logitp — continuous correlation test (one per scope).
+        # rho_pearson — per-locus marginal Bulmer effect × logit p, per scope.
         for s in 1:n_scopes
-            r = _rho_B_logitp_one(R_meta, α, p_pool, raw_signs, masks[s])
+            r = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s])
             rho_obs[s] = r.rho
             rho_nm[s]  = r.null_mean
             rho_nsd[s] = r.null_sd
             rho_Z[s]   = r.Z
             rho_pp[s]  = r.perm_p
-            rho_np[s]  = r.n_pairs
         end
     end
 
@@ -734,7 +776,7 @@ function oracle_stats(result::SimResult;
                          dc_nL, dc_nH, dc_nPLH, dc_nPLL, dc_nPHH,
                          dc_BLH, dc_BLL, dc_BHH, dc_delta,
                          dc_null_mean, dc_null_sd, dc_Z, dc_perm_p,
-                         rho_obs, rho_nm, rho_nsd, rho_Z, rho_pp, rho_np)
+                         rho_obs, rho_nm, rho_nsd, rho_Z, rho_pp)
 end
 
 """
@@ -777,16 +819,18 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult)
                 end
             end
         end
-        # rho_B_logitp — one set per scope.
-        rho_fields = (("rho",       oracle.rho_B_logitp),
-                       ("null_mean", oracle.rho_B_logitp_null_mean),
-                       ("null_sd",   oracle.rho_B_logitp_null_sd),
-                       ("Z",         oracle.rho_B_logitp_Z),
-                       ("perm_p",    oracle.rho_B_logitp_perm_p),
-                       ("n_pairs",   oracle.rho_B_logitp_n_pairs))
+        # rho_pearson — one set per scope. Sign-aware direction test:
+        # ρ > 0 → positive directional, ρ < 0 → negative directional.
+        rho_fields = (("",          oracle.rho_pearson),
+                       ("null_mean", oracle.rho_pearson_null_mean),
+                       ("null_sd",   oracle.rho_pearson_null_sd),
+                       ("Z",         oracle.rho_pearson_Z),
+                       ("perm_p",    oracle.rho_pearson_perm_p))
         for (s, name) in enumerate(oracle.scope_names)
             for (fname, fvec) in rho_fields
-                println(io, "rho_B_logitp_", fname, "_", name, "\t", fvec[s])
+                key = isempty(fname) ? "rho_pearson_$(name)" :
+                                          "rho_pearson_$(fname)_$(name)"
+                println(io, key, "\t", fvec[s])
             end
         end
     end

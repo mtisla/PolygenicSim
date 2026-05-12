@@ -1178,6 +1178,19 @@ end
     @test res2D.oracle.n_total == 40 * 4
     @test all(isfinite, res2D.oracle.B)
 
+    # --- rho_pearson direction-aware test --------------------------------
+    # cor(B_std_j, logit(p_pol_j)) per scope; sign indicates direction of
+    # selection. Smoke run only — verify field structure + value bounds.
+    @test length(or.rho_pearson) == length(or.scope_names)
+    @test length(or.rho_pearson_perm_p) == length(or.scope_names)
+    # Within +/- 1 (Pearson bounds).
+    @test all(r -> !isfinite(r) || -1.01 < r < 1.01, or.rho_pearson)
+    # perm_p in (0, 1].
+    @test all(p -> !isfinite(p) || 0 < p <= 1, or.rho_pearson_perm_p)
+    # TSV side-effect: rho_pearson_<scope> appears.
+    @test any(l -> startswith(l, "rho_pearson_within\t"), lines)
+    @test any(l -> startswith(l, "rho_pearson_perm_p_within\t"), lines)
+
     # --- Float32 precision agreement with Float64 -----------------------
     cfg_f32 = PS.Config(
         N=200, Ne=200, n_chr=2, chr_len_bp=50_000,

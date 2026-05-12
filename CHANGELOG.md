@@ -9,6 +9,53 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-12
+
+Replace the pair-level `rho_B_logitp` with a direction-aware per-locus
+`rho_pearson`. **Breaking** struct/TSV change.
+
+### Removed (BREAKING)
+- `rho_B_logitp_*` fields from `OracleResult` and the `.oracle.tsv`.
+  These were a single-release experiment (v0.6.4) at pair-level
+  correlation; replaced by the per-locus formulation below.
+
+### Added
+- **`rho_pearson`** — Pearson correlation of the studentized per-locus
+  marginal Bulmer effect against logit polarized allele frequency, one
+  per scope:
+  ```
+  B_j         = α_j · Σ_{k ≠ j, mask[j,k]} R_meta[j,k] · α_k
+  B_std_j     = (B_j_obs − mean_b B_j_null_b) / sd_b B_j_null_b
+  rho_pearson = cor(B_std_j, logit(p_pol_j))
+  ```
+  Sign-aware: **ρ > 0 indicates positive directional selection**, ρ < 0
+  indicates negative directional selection. Studentization stabilizes
+  variance across loci with different α². Two-tailed `rho_pearson_perm_p`
+  (same v0.6.3 absolute-deviation convention as `dc<co>_perm_p`).
+- 5 new fields per scope: `rho_pearson`, `rho_pearson_null_mean`,
+  `rho_pearson_null_sd`, `rho_pearson_Z`, `rho_pearson_perm_p`. TSV
+  keys: `rho_pearson_<field>_<scope>` (omitting `<field>` for the
+  observed ρ itself: `rho_pearson_<scope>`).
+- 6 new tests asserting field shape, bounds (ρ ∈ (−1, 1)), perm_p ∈ (0, 1],
+  TSV side-effect.
+
+### Empirical (100-gen sel_grad=+0.1 directional smoke run)
+ρ is positive across all 6 scopes (sign correct), Z ranging +0.16 to
++1.81, best perm_p ≈ 0.08 at `win_50pct`. The discretized `dc20` test
+still has more power for this Hayward-Sella-type signal (best p ≈ 0.002
+at `win_25pct`), but `rho_pearson` is the right tool when you need
+**sign of selection**, not just magnitude of the LD signature.
+
+### Algorithm cost
+~1 extra BLAS gemm per scope (R_masked · a_perm). Same O(p² · n_perm)
+order as `dc`. Per-perm correlation reuses pre-centered logit(p) vector;
+all standardization happens inside the `_rho_pearson_one` helper.
+
+### Note: matches the R reference
+Ported from `compute_direction_stats` in `bulmer/R/stats.R` — only
+`rho_pearson` is implemented (the other three R stats `rho_spearman`,
+`rho_shape`, `delta_B_q20` are left for a future addition if needed).
+
 ## [0.6.4] — 2026-05-12
 
 ### Added
@@ -398,7 +445,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/mtisla/PolygenicSim/compare/v0.6.4...v0.7.0
 [0.6.4]: https://github.com/mtisla/PolygenicSim/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/mtisla/PolygenicSim/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/mtisla/PolygenicSim/compare/v0.6.1...v0.6.2

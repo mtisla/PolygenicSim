@@ -43,17 +43,18 @@ struct OracleResult
     dc_null_sd::Matrix{Float64}
     dc_Z::Matrix{Float64}
     dc_perm_p::Matrix{Float64}
-    # rho_B_logitp — continuous Pearson correlation of pair-level B_jk against
-    # logit(p_pol_j) across all in-scope ordered pairs. One per scope.
-    # Two-tailed sign-flip perm_p. Captures the monotone B-vs-frequency
-    # relationship predicted by directional-selection theory without
-    # discretizing into L/H bins.
-    rho_B_logitp::Vector{Float64}            # length n_scopes
-    rho_B_logitp_null_mean::Vector{Float64}
-    rho_B_logitp_null_sd::Vector{Float64}
-    rho_B_logitp_Z::Vector{Float64}
-    rho_B_logitp_perm_p::Vector{Float64}
-    rho_B_logitp_n_pairs::Vector{Int}
+    # rho_pearson — Pearson correlation of the studentized per-locus marginal
+    # Bulmer effect B_std_j against logit(p_pol_j), one per scope.
+    #   B_j         = α_j · Σ_{k ≠ j, mask[j,k]} R_meta[j,k] · α_k
+    #   B_std_j     = (B_j_obs − mean_b(B_j_null_b)) / sd_b(B_j_null_b)
+    #   rho_pearson = cor(B_std_j, logit(p_pol_j))
+    # Sign carries direction: positive ρ under positive directional selection,
+    # negative ρ under negative directional selection.
+    rho_pearson::Vector{Float64}            # length n_scopes
+    rho_pearson_null_mean::Vector{Float64}
+    rho_pearson_null_sd::Vector{Float64}
+    rho_pearson_Z::Vector{Float64}
+    rho_pearson_perm_p::Vector{Float64}
 end
 
 export OracleResult
