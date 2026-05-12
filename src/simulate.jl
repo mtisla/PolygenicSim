@@ -74,11 +74,11 @@ function simulate(cfg::Config)
     paths = String[]
 
     # ---- summary trajectory buffer --------------------------------------
-    # Resolve n_int sentinel: -1 → auto (target ~200 snapshots = max(1, ngen÷200))
+    # Resolve n_int sentinel: -1 → auto (target ~100 snapshots = max(1, ngen÷100))
     # 0 ⇒ no snapshots (fastest); >0 ⇒ snapshot every n_int gens.
     conv_buffer = NamedTuple{(:gen, :B, :var_A, :mean_p, :var_p),
                                 Tuple{Int,Float64,Float64,Float64,Float64}}[]
-    n_int = cfg.n_int < 0 ? max(1, ngen_eq_eff ÷ 200) : cfg.n_int
+    n_int = cfg.n_int < 0 ? max(1, ngen_eq_eff ÷ 100) : cfg.n_int
     p_buf = zeros(Float64, L)
     # Per-deme work buffers (resized after expansion).
     mean_buf = zeros(Float64, layout.n_demes)

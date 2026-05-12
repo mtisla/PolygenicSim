@@ -79,8 +79,11 @@ Base.@kwdef struct Config
     # diagnostics
     # n_int controls the trajectory-snapshot interval (in generations) for
     # convergence diagnostics in the summary:
-    #   n_int <  0  ⇒ auto: `max(1, ngen_eq ÷ 200)` — targets ~200 snapshots
-    #                 over the whole run, ≲2% overhead regardless of run length.
+    #   n_int <  0  ⇒ auto: `max(1, ngen_eq ÷ 100)` — targets ~100 snapshots
+    #                 over the whole run, ≲1% overhead regardless of run
+    #                 length. Tail-window diagnostics (last_10 / prior_10
+    #                 mean comparison) are unchanged by snapshot count once
+    #                 the count exceeds 20.
     #   n_int == 0  ⇒ no intermediate snapshots; only the final-generation
     #                 summary fields. Fastest (zero diagnostic overhead).
     #   n_int >  0  ⇒ snapshot every n_int generations.
