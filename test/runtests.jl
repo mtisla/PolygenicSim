@@ -1178,6 +1178,37 @@ end
     @test res2D.oracle.n_total == 40 * 4
     @test all(isfinite, res2D.oracle.B)
 
+    # --- Float32 precision agreement with Float64 -----------------------
+    cfg_f32 = PS.Config(
+        N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+        n_qtl=100, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5, h2=0.5,
+        vs_over_vp0=10.0, selection_mode=:stabilizing,
+        ngen_eq=10,
+        output_formats=Symbol[:oracle],
+        output_prefix=tempname(),
+        oracle_n_perm=50,
+        oracle_windows_pct=[10.0, 25.0],
+        oracle_precision=:Float32,
+        seed=UInt64(42), n_threads=1)
+    res_f32 = PS.simulate(cfg_f32)
+    @test res_f32.oracle !== nothing
+    # B should agree with the Float64 run on the same seed/config to ~1e-3 absolute.
+    # (sgemm has lower precision but the deterministic structure matches.)
+    for s in eachindex(or.B)
+        @test isapprox(or.B[s], res_f32.oracle.B[s]; atol=1e-3)
+    end
+    # Standalone API override: switch precision after the fact.
+    or_f32_alt = PS.oracle_stats(res; n_perm=50, windows_pct=[10.0, 25.0],
+                                   precision=:Float32, seed=UInt64(42))
+    for s in eachindex(or.B)
+        @test isapprox(or.B[s], or_f32_alt.B[s]; atol=1e-3)
+    end
+    # Invalid precision rejected.
+    @test_throws ArgumentError PS.validate(PS.Config(
+        n_qtl=20, Uqtl=0.0, theta_override=0.3, selection_mode=:neutral,
+        ngen_eq=1, output_formats=Symbol[], oracle_precision=:Float16))
+
     # When :oracle is absent, the field is nothing (no auto-compute).
     cfg_noor = PS.Config(
         N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,

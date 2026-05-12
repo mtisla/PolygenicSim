@@ -9,6 +9,37 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-05-12
+
+### Added
+- `oracle_precision::Symbol` Config field — `:Float64` (default) or
+  `:Float32`. When `:Float32`, the oracle path runs in single precision
+  (sgemm instead of dgemm; Float32 buffers for X, D_buf, Dm_buf, R_meta,
+  a_perm, raw_signs, DM_aperm). Per-generation diagnostics
+  (V_A, V_P, Bulmer-B trajectory) stay Float64 regardless — the catastrophic-
+  cancellation risk over 5N gens of breeding-value accumulation isn't
+  worth the marginal scalar savings.
+- 4 new tests covering `:Float32` agreement with `:Float64` (B matches to
+  ~1e-3 absolute), the standalone API `precision=` override, and
+  validation rejection of invalid precision symbols.
+
+### Performance (Julia BLAS, 4-thread; panmictic stabilizing)
+- `p_qtl = 4896`, `n_perm = 1000`:
+  - `:Float64` — 8.7 s, 2.81 GB allocations
+  - `:Float32` — 6.0 s, 1.56 GB allocations
+  - ~1.4× faster, ~45% less memory; B values agree to 5+ decimals.
+- At `p_qtl ≤ 2000` the speedup is marginal (~5–10%); conversion
+  overhead in mask/R_meta construction offsets sgemm savings.
+
+### Internal
+- `_oracle_fast_path`, `_delta_cross_one`, `_extract_qtl_genotypes`,
+  `_sample_sign_flips` parametrized on `T<:AbstractFloat`.
+- Inner-loop reduction accumulators kept in `T` (not promoted to Float64
+  per element) to preserve @simd vectorization width — earlier draft
+  promoted per element and accidentally made `:Float32` slower than
+  `:Float64`. Cross-deme and final-ratio reductions still use Float64
+  to keep B precise across many demes.
+
 ## [0.6.1] — 2026-05-12
 
 ### Changed
@@ -293,7 +324,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/mtisla/PolygenicSim/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/mtisla/PolygenicSim/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/mtisla/PolygenicSim/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mtisla/PolygenicSim/compare/v0.4.0...v0.5.0

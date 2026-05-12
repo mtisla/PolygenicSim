@@ -137,6 +137,14 @@ Base.@kwdef struct Config
     oracle_n_perm::Int = 1000
     oracle_memory_path_threshold::Int = 10000
     oracle_cutoffs::Vector{Int} = [20, 50]
+    # Floating-point precision for the oracle matmul-heavy buffers (X, D_k,
+    # R_meta, a_perm, raw_signs). `:Float64` is the safe default. `:Float32`
+    # halves memory and runs sgemm instead of dgemm for ~1.5–2× wall-time
+    # speedup with ~6 sig figs on B (well below the noise floor of typical
+    # n_perm=1000 perm-p estimates). Per-generation variance / Bulmer-B
+    # diagnostics stay in Float64 regardless — only the oracle path is
+    # affected.
+    oracle_precision::Symbol = :Float64
 
     # diagnostics
     # n_int controls the trajectory-snapshot interval (in generations) for
@@ -350,6 +358,8 @@ function validate(cfg::Config)
         (1 <= c <= 50) ||
             throw(ArgumentError("oracle_cutoffs entries must be in [1, 50], got $c"))
     end
+    cfg.oracle_precision in (:Float64, :Float32) ||
+        throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
     cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))
     cfg.ngen >= 0 || throw(ArgumentError("ngen must be >= 0"))

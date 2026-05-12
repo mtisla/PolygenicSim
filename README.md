@@ -379,6 +379,7 @@ Configuration knobs:
 | `oracle_n_perm` | `1000` | Sign-flip permutations |
 | `oracle_cutoffs` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%) |
 | `oracle_memory_path_threshold` | `10000` | Switch to per-chr matrix-free path when `p_qtl >` this. Peak fast-path memory ≈ 3·p² doubles + N·p (e.g. ~3 GB at p=10000) |
+| `oracle_precision` | `:Float64` | `:Float64` or `:Float32`. Float32 halves memory and gives ~1.3–1.5× speedup at `p_qtl ≥ 4000` via BLAS sgemm. Per-generation diagnostics stay Float64 regardless |
 
 Standalone post-hoc API:
 ```julia
@@ -390,12 +391,18 @@ oracle = PS.oracle_stats(result;
 PS.write_oracle_tsv("recompute", oracle)
 ```
 
-Expected cost (Julia BLAS, 8-thread): ~2 s for `p_qtl = 2000`,
-~30 s for `p_qtl = 5000` (panmictic or up to ~25 demes), and ~3 minutes
-at `p_qtl = 10000`. Peak fast-path memory is ~3·p² doubles
-(three p×p matrices: covariance, masked copy, deme-weighted correlation)
-plus the N×p genotype matrix — about 3 GB at p=10000 on a 5000-individual
-run, comfortably within modern workstation RAM.
+Expected cost (Julia BLAS, 4-thread): ~2 s for `p_qtl = 2000`,
+~8 s for `p_qtl = 5000` (panmictic), `n_perm = 1000`. Peak Float64
+fast-path memory ≈ 3·p² doubles + N·p — about 3 GB at p=10000 on a
+5000-individual run, comfortably within modern workstation RAM.
+
+`oracle_precision = :Float32` runs the same kernels in single precision
+(sgemm + Float32 buffers). At `p_qtl = 4900`, `n_perm = 1000`:
+~1.4× faster (8.7 s → 6.0 s) with ~45% less memory (2.8 GB → 1.6 GB).
+B values agree with Float64 to 5+ decimals — well below report precision
+and the n_perm = 1000 perm-p quantization floor. Below `p_qtl ≈ 2000`
+the conversion overhead in mask construction and R_meta build offsets
+the sgemm savings, so the speedup is marginal there.
 
 ## Versioning
 

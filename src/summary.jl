@@ -74,7 +74,8 @@ const _CONFIG_CATEGORIES = (
     "output"      => (:output_formats, :output_prefix, :checkpoints),
     "loading"     => (:load_from, :load_plink_prefix, :load_demography),
     "oracle"      => (:oracle_windows_pct, :oracle_n_perm,
-                       :oracle_memory_path_threshold, :oracle_cutoffs),
+                       :oracle_memory_path_threshold, :oracle_cutoffs,
+                       :oracle_precision),
 )
 
 # Compile-time sanity check: every Config field appears in some category.

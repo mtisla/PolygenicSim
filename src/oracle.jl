@@ -67,8 +67,8 @@ end
 # Extract a (N_total × p_qtl) Float64 dosage matrix from a packed haplotype
 # pop, restricted to polymorphic-QTL sites with α ≠ 0. Returns (X, qtl_keep)
 # where `qtl_keep` is the global-variant-index list (1-indexed) of kept sites.
-function _extract_qtl_genotypes(pop::PackedPop, vt::VariantTable;
-                                  p_buf::Vector{Float64})
+function _extract_qtl_genotypes(::Type{T}, pop::PackedPop, vt::VariantTable;
+                                  p_buf::Vector{Float64}) where {T<:AbstractFloat}
     L = pop.L
     N_total = pop.N
     @assert length(p_buf) == L
@@ -82,9 +82,9 @@ function _extract_qtl_genotypes(pop::PackedPop, vt::VariantTable;
     end
     p_qtl = length(qtl_keep)
     if p_qtl == 0
-        return (Matrix{Float64}(undef, N_total, 0), qtl_keep)
+        return (Matrix{T}(undef, N_total, 0), qtl_keep)
     end
-    X = Matrix{Float64}(undef, N_total, p_qtl)
+    X = Matrix{T}(undef, N_total, p_qtl)
     H = pop.H
     @inbounds for jj in 1:p_qtl
         j = qtl_keep[jj]
@@ -93,15 +93,15 @@ function _extract_qtl_genotypes(pop::PackedPop, vt::VariantTable;
         for i in 1:N_total
             h1 = (H[w, 2i - 1] & bit) != 0
             h2 = (H[w, 2i]     & bit) != 0
-            X[i, jj] = Float64((h1 ? 1 : 0) + (h2 ? 1 : 0))
+            X[i, jj] = T((h1 ? 1 : 0) + (h2 ? 1 : 0))
         end
     end
     return (X, qtl_keep)
 end
 
 # Same for dense backend.
-function _extract_qtl_genotypes(pop::DensePop, vt::VariantTable;
-                                  p_buf::Vector{Float64})
+function _extract_qtl_genotypes(::Type{T}, pop::DensePop, vt::VariantTable;
+                                  p_buf::Vector{Float64}) where {T<:AbstractFloat}
     L = pop.L
     N_total = pop.N
     @assert length(p_buf) == L
@@ -114,14 +114,14 @@ function _extract_qtl_genotypes(pop::DensePop, vt::VariantTable;
     end
     p_qtl = length(qtl_keep)
     if p_qtl == 0
-        return (Matrix{Float64}(undef, N_total, 0), qtl_keep)
+        return (Matrix{T}(undef, N_total, 0), qtl_keep)
     end
-    X = Matrix{Float64}(undef, N_total, p_qtl)
+    X = Matrix{T}(undef, N_total, p_qtl)
     H = pop.H
     @inbounds for jj in 1:p_qtl
         j = qtl_keep[jj]
         for i in 1:N_total
-            X[i, jj] = Float64(H[j, 2i - 1] + H[j, 2i])
+            X[i, jj] = T(H[j, 2i - 1] + H[j, 2i])
         end
     end
     return (X, qtl_keep)
@@ -170,71 +170,76 @@ function _build_scope_masks(windows_pct::Vector{Float64},
 end
 
 # Apply a BitMatrix mask to a matrix in-place: D[j,k] *= mask[j,k].
-@inline function _apply_mask!(D::Matrix{Float64}, mask::BitMatrix)
+@inline function _apply_mask!(D::AbstractMatrix{T}, mask::BitMatrix) where {T}
     @inbounds for k in axes(D, 2), j in axes(D, 1)
         if !mask[j, k]
-            D[j, k] = 0.0
+            D[j, k] = zero(T)
         end
     end
     return D
 end
 
 # Compute α' D_masked α where D_masked is D with `mask` applied (in-place).
-# After this call, D is modified — caller must re-fill D for the next scope.
-@inline function _alpha_D_alpha(D::Matrix{Float64}, α::Vector{Float64})
+# Inner accumulation in T to keep @simd vectorization at 2× width for
+# Float32 (Float64-promoting inside the hot loop kills the sgemm savings).
+# Cast to Float64 happens at the function return only.
+@inline function _alpha_D_alpha(D::AbstractMatrix{T}, α::AbstractVector{T}) where {T}
     p = length(α)
-    s = 0.0
+    s = zero(T)
     @inbounds for k in 1:p
         ak = α[k]
-        ak == 0.0 && continue
-        col_sum = 0.0
+        ak == zero(T) && continue
+        col_sum = zero(T)
         @simd for j in 1:p
             col_sum += α[j] * D[j, k]
         end
         s += ak * col_sum
     end
-    return s
+    return Float64(s)
 end
 
 # Sample a sign-flip matrix of size (p × n_perm) seeded by `seed`.
-function _sample_sign_flips(p::Int, n_perm::Int, seed::UInt64)
+function _sample_sign_flips(::Type{T}, p::Int, n_perm::Int, seed::UInt64) where {T<:AbstractFloat}
     rng = Xoshiro(seed)
-    s = Matrix{Float64}(undef, p, n_perm)
+    s = Matrix{T}(undef, p, n_perm)
+    one_t  = one(T)
+    mone_t = -one_t
     @inbounds for k in 1:n_perm, j in 1:p
-        s[j, k] = rand(rng, Bool) ? 1.0 : -1.0
+        s[j, k] = rand(rng, Bool) ? one_t : mone_t
     end
     return s
 end
 
-# Fast path: full p×p D_k per deme, all scopes via BitMatrix masking. Returns
-# (VA_meta, VG_off_meta::Vector, VG_off_null_meta::Matrix, R_meta::Matrix).
-function _oracle_fast_path(X::Matrix{Float64}, α::Vector{Float64},
+# Fast path: full p×p D_k per deme, all scopes via BitMatrix masking. The
+# heavy buffers (X, D_buf, Dm_buf, R_meta, a_perm, DM_aperm, raw_signs)
+# carry element type T (Float32 or Float64); cross-deme accumulators stay
+# in Float64 to keep the ratio B = VG_off/VA precise even with sgemm.
+function _oracle_fast_path(::Type{T}, X::Matrix{T}, α::Vector{T},
                               p_freq_pool::Vector{Float64},
                               chr::Vector{Int}, bp::Vector{Int},
                               chr_len_bp::Int, deme_labels::Vector{Int},
                               windows_pct::Vector{Float64},
-                              n_perm::Int, seed::UInt64)
+                              n_perm::Int, seed::UInt64) where {T<:AbstractFloat}
     N_total, p = size(X)
     n_scopes = length(windows_pct) + 2
     masks = _build_scope_masks(windows_pct, chr, bp, chr_len_bp)
 
-    raw_signs = _sample_sign_flips(p, n_perm, seed)   # p × n_perm
-    a_perm    = raw_signs .* α                         # p × n_perm
+    raw_signs = _sample_sign_flips(T, p, n_perm, seed)   # p × n_perm (T)
+    a_perm    = raw_signs .* α                            # p × n_perm (T)
 
     VA_acc          = 0.0
     VG_off_acc      = zeros(Float64, n_scopes)
     VG_off_null_acc = zeros(Float64, n_perm, n_scopes)
-    R_meta          = zeros(Float64, p, p)
+    R_meta          = zeros(T, p, p)
     total_w         = 0.0
 
     unique_demes = sort(unique(deme_labels))
-    α_abs_sq = α .^ 2
+    α_abs_sq = Float64.(α) .^ 2          # promote for VA accumulation
 
     # Per-deme scratch.
-    X_k_buf = Matrix{Float64}(undef, 0, 0)
-    D_buf   = Matrix{Float64}(undef, p, p)
-    Dm_buf  = Matrix{Float64}(undef, p, p)
-    DM_aperm = Matrix{Float64}(undef, p, n_perm)
+    D_buf   = Matrix{T}(undef, p, p)
+    Dm_buf  = Matrix{T}(undef, p, p)
+    DM_aperm = Matrix{T}(undef, p, n_perm)
     cmeans  = zeros(Float64, p)
     sd_safe = zeros(Float64, p)
 
@@ -244,33 +249,34 @@ function _oracle_fast_path(X::Matrix{Float64}, α::Vector{Float64},
         N_k < 3 && continue
         w_k = N_k / N_total
 
-        # Center X_k (allocate fresh sized N_k × p; reuse via length match).
+        # Center X_k (subset rows; the slice is a fresh Matrix{T}).
         X_k = X[rows_k, :]
         for j in 1:p
             s = 0.0
             @simd for i in 1:N_k
-                s += X_k[i, j]
+                s += Float64(X_k[i, j])
             end
             cmeans[j] = s / N_k
         end
         for j in 1:p
-            μ = cmeans[j]
+            μ = T(cmeans[j])
             @simd for i in 1:N_k
                 X_k[i, j] -= μ
             end
         end
         n1k = N_k - 1
+        n1k_T = T(n1k)
 
-        # D_k = X_k' X_k / (n1k). Use BLAS gemm via mul!.
+        # D_k = X_k' X_k / (n1k). BLAS gemm: sgemm for T=Float32, dgemm for T=Float64.
         mul!(D_buf, transpose(X_k), X_k)
         @inbounds for j in eachindex(D_buf)
-            D_buf[j] /= n1k
+            D_buf[j] /= n1k_T
         end
 
         # Per-locus variance is diag(D_k); VA_k = Σ diag · α²
         VA_k = 0.0
         @inbounds for j in 1:p
-            lv = D_buf[j, j]
+            lv = Float64(D_buf[j, j])
             VA_k += lv * α_abs_sq[j]
             sd_safe[j] = lv > 1e-30 ? sqrt(lv) : 0.0
         end
@@ -279,55 +285,59 @@ function _oracle_fast_path(X::Matrix{Float64}, α::Vector{Float64},
 
         # Zero the diagonal — we don't want diag terms in VG_off.
         @inbounds for j in 1:p
-            D_buf[j, j] = 0.0
+            D_buf[j, j] = zero(T)
         end
 
         # R_meta accumulator (per-deme correlation matrix, deme-weighted avg).
+        w_k_T = T(w_k)
         @inbounds for k_ in 1:p, j in 1:p
             sdj = sd_safe[j]; sdk = sd_safe[k_]
-            r = (sdj > 0 && sdk > 0) ? D_buf[j, k_] / (sdj * sdk) : 0.0
-            R_meta[j, k_] += w_k * r
+            r = (sdj > 0 && sdk > 0) ? Float64(D_buf[j, k_]) / (sdj * sdk) : 0.0
+            R_meta[j, k_] += T(w_k * r)
         end
 
         for s in 1:n_scopes
             mask = masks[s]
             # Dm = D_buf .* mask (out-of-place into Dm_buf)
             @inbounds for kk in 1:p, jj in 1:p
-                Dm_buf[jj, kk] = mask[jj, kk] ? D_buf[jj, kk] : 0.0
+                Dm_buf[jj, kk] = mask[jj, kk] ? D_buf[jj, kk] : zero(T)
             end
-            # α' Dm α
+            # α' Dm α (accumulator in Float64 — see _alpha_D_alpha)
             VG_off_acc[s] += w_k * _alpha_D_alpha(Dm_buf, α)
-            # DM_aperm = Dm * a_perm  (p × n_perm)
+            # DM_aperm = Dm * a_perm  (p × n_perm). gemm in T precision.
             mul!(DM_aperm, Dm_buf, a_perm)
             # null[b, s] += w_k · sum_j a_perm[j, b] · DM_aperm[j, b]
+            # Accumulate in T to preserve @simd vectorization width.
             @inbounds for b in 1:n_perm
-                acc = 0.0
+                acc = zero(T)
                 @simd for j in 1:p
                     acc += a_perm[j, b] * DM_aperm[j, b]
                 end
-                VG_off_null_acc[b, s] += w_k * acc
+                VG_off_null_acc[b, s] += w_k * Float64(acc)
             end
         end
     end
 
     if total_w < 1e-10
         return (0.0, fill(NaN, n_scopes), fill(NaN, n_perm, n_scopes),
-                zeros(Float64, p, p), raw_signs, true)
+                zeros(T, p, p), raw_signs, true)
     end
 
     VA_meta          = VA_acc / total_w
     VG_off_meta      = VG_off_acc      ./ total_w
     VG_off_null_meta = VG_off_null_acc ./ total_w
-    R_meta         ./= total_w
+    R_meta         ./= T(total_w)
     is_failed = VA_meta < 1e-30
     return (VA_meta, VG_off_meta, VG_off_null_meta, R_meta,
             raw_signs, is_failed)
 end
 
-# Δ_cross at one (scope, cutoff). Operates on the deme-weighted R_meta.
-function _delta_cross_one(R_meta::Matrix{Float64}, α::Vector{Float64},
-                            p_pool::Vector{Float64}, raw_signs::Matrix{Float64},
-                            mask::BitMatrix, cutoff::Int)
+# Δ_cross at one (scope, cutoff). Operates on the deme-weighted R_meta in
+# element type T (Float32 or Float64). All scalar outputs are returned as
+# Float64 for storage uniformity in OracleResult.
+function _delta_cross_one(R_meta::Matrix{T}, α::Vector{T},
+                            p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                            mask::BitMatrix, cutoff::Int) where {T<:AbstractFloat}
     p = length(α)
     c = cutoff / 100.0
     # Polarize freq
@@ -351,44 +361,45 @@ function _delta_cross_one(R_meta::Matrix{Float64}, α::Vector{Float64},
     (nL < 2 || nH < 2) && return nan_out
 
     # Build B_mat[j,k] = α_j R_jk α_k · mask[j,k]. We only need the LL, HH, LH
-    # blocks — build only those instead of the full p×p.
+    # blocks — build only those instead of the full p×p. Submatrices in T
+    # so the per-perm matmul stays in T precision.
     n_perm = size(raw_signs, 2)
     sum_LH = 0.0; sum_LL = 0.0; sum_HH = 0.0
     nPLH = nL * nH
     nPLL = nL * (nL - 1) ÷ 2
     nPHH = nH * (nH - 1) ÷ 2
 
-    B_LH = Matrix{Float64}(undef, nL, nH)
+    B_LH = Matrix{T}(undef, nL, nH)
     @inbounds for k in 1:nH
         gk = H_idx[k]; ak = α[gk]
         for j in 1:nL
             gj = L_idx[j]; aj = α[gj]
-            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : 0.0)
+            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : zero(T))
             B_LH[j, k] = v
-            sum_LH += v
+            sum_LH += Float64(v)
         end
     end
-    B_LL = Matrix{Float64}(undef, nL, nL)
+    B_LL = Matrix{T}(undef, nL, nL)
     @inbounds for k in 1:nL
         gk = L_idx[k]; ak = α[gk]
         for j in 1:nL
             gj = L_idx[j]; aj = α[gj]
-            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : 0.0)
+            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : zero(T))
             B_LL[j, k] = v
             if j > k
-                sum_LL += v
+                sum_LL += Float64(v)
             end
         end
     end
-    B_HH = Matrix{Float64}(undef, nH, nH)
+    B_HH = Matrix{T}(undef, nH, nH)
     @inbounds for k in 1:nH
         gk = H_idx[k]; ak = α[gk]
         for j in 1:nH
             gj = H_idx[j]; aj = α[gj]
-            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : 0.0)
+            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : zero(T))
             B_HH[j, k] = v
             if j > k
-                sum_HH += v
+                sum_HH += Float64(v)
             end
         end
     end
@@ -398,44 +409,44 @@ function _delta_cross_one(R_meta::Matrix{Float64}, α::Vector{Float64},
     BHH_obs = nPHH > 0 ? sum_HH / nPHH : 0.0
     delta_obs = BLH_obs - 0.5 * (BLL_obs + BHH_obs)
 
-    # Permutation null
-    s_L = raw_signs[L_idx, :]    # nL × n_perm
-    s_H = raw_signs[H_idx, :]    # nH × n_perm
+    # Permutation null — matmuls in T, dot-products in Float64.
+    s_L = raw_signs[L_idx, :]    # nL × n_perm (T)
+    s_H = raw_signs[H_idx, :]    # nH × n_perm (T)
     BLH_null = Vector{Float64}(undef, n_perm)
-    tmp = Matrix{Float64}(undef, nL, n_perm)
+    tmp = Matrix{T}(undef, nL, n_perm)
     mul!(tmp, B_LH, s_H)         # tmp = B_LH * s_H, nL × n_perm
     @inbounds for b in 1:n_perm
-        acc = 0.0
+        acc = zero(T)
         @simd for j in 1:nL
             acc += s_L[j, b] * tmp[j, b]
         end
-        BLH_null[b] = acc / nPLH
+        BLH_null[b] = Float64(acc) / nPLH
     end
     BLL_null = if nPLL > 0
-        tmpL = Matrix{Float64}(undef, nL, n_perm)
+        tmpL = Matrix{T}(undef, nL, n_perm)
         mul!(tmpL, B_LL, s_L)
         v = Vector{Float64}(undef, n_perm)
         @inbounds for b in 1:n_perm
-            acc = 0.0
+            acc = zero(T)
             @simd for j in 1:nL
                 acc += s_L[j, b] * tmpL[j, b]
             end
-            v[b] = 0.5 * acc / nPLL
+            v[b] = 0.5 * Float64(acc) / nPLL
         end
         v
     else
         zeros(Float64, n_perm)
     end
     BHH_null = if nPHH > 0
-        tmpH = Matrix{Float64}(undef, nH, n_perm)
+        tmpH = Matrix{T}(undef, nH, n_perm)
         mul!(tmpH, B_HH, s_H)
         v = Vector{Float64}(undef, n_perm)
         @inbounds for b in 1:n_perm
-            acc = 0.0
+            acc = zero(T)
             @simd for j in 1:nH
                 acc += s_H[j, b] * tmpH[j, b]
             end
-            v[b] = 0.5 * acc / nPHH
+            v[b] = 0.5 * Float64(acc) / nPHH
         end
         v
     else
@@ -477,15 +488,20 @@ function oracle_stats(result::SimResult;
                        n_perm::Int                  = result.cfg.oracle_n_perm,
                        cutoffs::Vector{Int}         = result.cfg.oracle_cutoffs,
                        memory_path_threshold::Int   = result.cfg.oracle_memory_path_threshold,
-                       seed::UInt64                 = result.cfg.seed)
+                       seed::UInt64                 = result.cfg.seed,
+                       precision::Symbol            = result.cfg.oracle_precision)
     cfg = result.cfg
     pop = result.pop
     vt  = result.vt
     deme_labels = result.deme_id
     chr_len_bp = cfg.chr_len_bp
 
+    T = precision === :Float32 ? Float32 :
+        precision === :Float64 ? Float64 :
+        error("oracle_stats: precision must be :Float64 or :Float32, got $precision")
+
     p_buf = zeros(Float64, length(vt))
-    X, qtl_keep = _extract_qtl_genotypes(pop, vt; p_buf=p_buf)
+    X, qtl_keep = _extract_qtl_genotypes(T, pop, vt; p_buf=p_buf)
     p = length(qtl_keep)
     N_total = pop.N
 
@@ -508,14 +524,14 @@ function oracle_stats(result::SimResult;
             fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut))
     end
 
-    α    = vt.alpha[qtl_keep]
+    α    = T.(vt.alpha[qtl_keep])
     chr  = Int[Int(vt.chr[j]) for j in qtl_keep]
     bp   = Int[Int(vt.bp[j])  for j in qtl_keep]
     p_pool = Float64[p_buf[j] for j in qtl_keep]
 
     use_memory = p > memory_path_threshold
     if use_memory
-        @info "oracle_stats: p_qtl=$(p) > memory_path_threshold=$(memory_path_threshold); the per-chromosome memory path is currently a stub — the fast path will still run but peak memory may be ~3·p² doubles."
+        @info "oracle_stats: p_qtl=$(p) > memory_path_threshold=$(memory_path_threshold); the per-chromosome memory path is currently a stub — the fast path will still run but peak memory may be ~3·p² T-words (≈$(round(3 * p^2 * sizeof(T) / 1e9, digits=2)) GB at T=$(T))."
     end
 
     # Compute B accumulators + R_meta via the fast path. Memory path falls
@@ -523,7 +539,7 @@ function oracle_stats(result::SimResult;
     # implementation is left as a follow-up since default configs sit well
     # under the threshold.
     VA_meta, VG_off_meta, VG_off_null_meta, R_meta, raw_signs, failed =
-        _oracle_fast_path(X, α, p_pool, chr, bp, chr_len_bp, deme_labels,
+        _oracle_fast_path(T, X, α, p_pool, chr, bp, chr_len_bp, deme_labels,
                             windows_pct, n_perm, seed)
 
     B = Vector{Float64}(undef, n_scopes)
