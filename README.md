@@ -34,7 +34,8 @@ cfg = PS.Config(
     chr_len_bp  = 200_000,
     n_qtl       = 1_000,
     n_neutral   = 1_000,
-    U           = 0.02,                 # per-gamete mutation rate
+    Uqtl        = 0.02,                 # per-gamete QTL-targeting mutation rate
+                                        # (Uneu auto-derived as Uqtl·n_neutral/n_qtl)
     h2          = 0.5,
     vs_over_vp0 = 20.0,                 # V_S / V_P_0; ∞ = neutral
     selection_mode = :stabilizing,
@@ -97,6 +98,26 @@ Run any example with:
 ```
 julia --project=. --threads=4 examples/panmictic.jl
 ```
+
+## Mutation rates
+
+Mutation is parameterized per site class to match `bulmer.slim`:
+
+- `Uqtl` — per-gamete rate of QTL-targeting mutations (default `0.02`).
+- `Uneu` — per-gamete rate of neutral-targeting mutations. When left `nothing`
+  (the default), it is auto-derived as `Uqtl · n_neutral / n_qtl`, which
+  gives a uniform per-site mutation rate across QTL and neutral sites (the
+  SLiM-equivalent per-bp uniform model; algebraically equal to SLiM's
+  `Uneu = Uqtl · fneu / (1 − fneu)` with `fneu = n_neutral / L`).
+
+**QTL-only fast path.** Setting `n_neutral = 0` (the default) skips the
+neutral block entirely: no neutral memory, no neutral mutation step, no
+neutral init draw. Useful for fast iteration on selection dynamics.
+
+**Coupling.** `Uneu > 0` requires `n_neutral > 0`, and `n_neutral > 0`
+requires `Uneu > 0` (the auto-derived value satisfies this automatically).
+Monomorphic / frozen-init neutrals are not supported — they don't help LD
+or GWAS analysis, so the configuration is rejected at `validate`.
 
 ## Selection regimes
 
@@ -180,7 +201,8 @@ Mostly aligned with the bulmer reference pipeline:
 | `chr_len_bp` | 1,000,000 |
 | `r` | 1e-6 (1 Morgan/chr) |
 | `n_qtl`, `n_neutral` | 1000, 0 |
-| `U` | 0.02 (haploid gamete rate) |
+| `Uqtl` | 0.02 (haploid gamete rate of QTL-targeting mutations) |
+| `Uneu` | `nothing` (auto: `Uqtl·n_neutral/n_qtl` — uniform per-site rate, matches `bulmer.slim`) |
 | `h2` | 0.5 |
 | `vs_over_vp0` | 20.0 |
 | `effect_distribution` | `:signed_exponential` |

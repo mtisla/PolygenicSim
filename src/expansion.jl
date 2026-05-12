@@ -121,25 +121,11 @@ function step_generation_packed_expand!(pop::PackedPop, vt::VariantTable,
         end
     end
 
-    # Mutate the new buffer (uses NEW total slots)
-    L = pop.L
-    twoN_new = 2 * new_total
-    total_slots = twoN_new * L
-    M = rand(rng, Binomial(total_slots, mu_per_site(cfg)))
-    if M > 0
-        empty!(scratch.mscratch.idx)
-        _fill_unique_random_int!(scratch.mscratch.idx, rng, total_slots, M)
-        kk = 1
-        @inbounds while kk <= M
-            s = scratch.mscratch.idx[kk]
-            col = (s - 1) ÷ L + 1
-            var = (s - 1) % L + 1
-            w = ((var - 1) >> 6) + 1
-            b = (var - 1) & 63
-            new_H_buf[w, col] ⊻= (UInt64(1) << b)
-            kk += 1
-        end
-    end
+    # Mutate the new buffer (uses NEW total slots, two-pool kernel).
+    _apply_mutations_packed!(new_H_buf, 2 * new_total,
+                              scratch.qtl_idx, mu_per_qtl_site(cfg),
+                              scratch.neutral_idx, mu_per_neutral_site(cfg),
+                              rng, scratch.mscratch)
 
     _finalize_expansion!(pop, scratch, new_H_buf, new_layout, n_blocks, UInt64(0))
     return nothing
@@ -202,22 +188,11 @@ function step_generation_dense_expand!(pop::DensePop, vt::VariantTable,
         end
     end
 
-    # Mutate the new buffer
-    twoN_new = 2 * new_total
-    total_slots = twoN_new * L
-    M = rand(rng, Binomial(total_slots, mu_per_site(cfg)))
-    if M > 0
-        empty!(scratch.mscratch.idx)
-        _fill_unique_random_int!(scratch.mscratch.idx, rng, total_slots, M)
-        kk = 1
-        @inbounds while kk <= M
-            s = scratch.mscratch.idx[kk]
-            col = (s - 1) ÷ L + 1
-            var = (s - 1) % L + 1
-            new_H_buf[var, col] ⊻= UInt8(1)
-            kk += 1
-        end
-    end
+    # Mutate the new buffer (two-pool kernel).
+    _apply_mutations_dense!(new_H_buf, 2 * new_total,
+                             scratch.qtl_idx, mu_per_qtl_site(cfg),
+                             scratch.neutral_idx, mu_per_neutral_site(cfg),
+                             rng, scratch.mscratch)
 
     _finalize_expansion!(pop, scratch, new_H_buf, new_layout, L, UInt8(0))
     return nothing

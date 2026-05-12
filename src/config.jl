@@ -17,7 +17,19 @@ Base.@kwdef struct Config
     r::Float64 = 1e-6                              # per-bp recombination rate
 
     # mutation
-    U::Float64 = 0.02                              # haploid gamete-level rate; per-site = U / L
+    # Per-gamete mutation rates, split by site class (matches `bulmer.slim`):
+    #   Uqtl — QTL-targeting per-gamete rate. Default 0.02 mirrors
+    #          bulmer.slim's QTL load assumption.
+    #   Uneu — neutral-targeting per-gamete rate. When `nothing` (default),
+    #          auto-derived as `Uqtl · n_neutral / n_qtl` so the per-site
+    #          mutation rate is uniform across QTL and neutral sites (matches
+    #          SLiM's per-bp uniform mutation model; equivalent to setting
+    #          `fneu = n_neutral / L`). Set explicitly only to model
+    #          non-uniform mutation pressure across site classes.
+    # Tight coupling: Uneu > 0 ⟺ n_neutral > 0. To disable neutrals entirely
+    # (fast QTL-only mode), leave `n_neutral = 0` (the default).
+    Uqtl::Float64 = 0.02
+    Uneu::Union{Float64,Nothing} = nothing
 
     # init
     init_distribution::Symbol = :beta_mutation_drift
@@ -105,27 +117,81 @@ Total population size across all demes.
 n_total(cfg::Config) = cfg.N * n_demes(cfg)
 
 """
+    effective_Uneu(cfg) -> Float64
+
+Resolves the neutral-targeting per-gamete mutation rate. If `cfg.Uneu` is set,
+returns it directly. Otherwise auto-derives `Uqtl · n_neutral / n_qtl` so the
+per-site rate is uniform across QTL and neutral sites (the SLiM-equivalent
+per-bp uniform model). Returns 0.0 when `n_qtl == 0`.
+"""
+@inline function effective_Uneu(cfg::Config)
+    cfg.Uneu !== nothing && return cfg.Uneu::Float64
+    cfg.n_qtl == 0 && return 0.0
+    return cfg.Uqtl * cfg.n_neutral / cfg.n_qtl
+end
+
+"""
+    total_U(cfg) -> Float64
+
+Total per-gamete mutation rate = `Uqtl + effective_Uneu(cfg)`.
+"""
+@inline total_U(cfg::Config) = cfg.Uqtl + effective_Uneu(cfg)
+
+"""
+    mu_per_qtl_site(cfg) -> Float64
+
+Per-QTL-site per-generation symmetric flip rate: `Uqtl / n_qtl`. Zero when
+`n_qtl == 0`.
+"""
+@inline mu_per_qtl_site(cfg::Config) = cfg.n_qtl > 0 ? cfg.Uqtl / cfg.n_qtl : 0.0
+
+"""
+    mu_per_neutral_site(cfg) -> Float64
+
+Per-neutral-site per-generation symmetric flip rate: `effective_Uneu(cfg) / n_neutral`.
+Zero when `n_neutral == 0`.
+"""
+@inline mu_per_neutral_site(cfg::Config) =
+    cfg.n_neutral > 0 ? effective_Uneu(cfg) / cfg.n_neutral : 0.0
+
+"""
+    theta_qtl(cfg) -> Float64
+
+Mutation parameter for Beta(θ, θ) init at QTL sites. If `theta_override` is
+set, returns that; else `4 · Ne · mu_per_qtl_site(cfg)`.
+"""
+function theta_qtl(cfg::Config)
+    cfg.theta_override !== nothing && return cfg.theta_override::Float64
+    return 4.0 * cfg.Ne * mu_per_qtl_site(cfg)
+end
+
+"""
+    theta_neu(cfg) -> Float64
+
+Mutation parameter for Beta(θ, θ) init at neutral sites. If `theta_override`
+is set, returns that; else `4 · Ne · mu_per_neutral_site(cfg)`.
+"""
+function theta_neu(cfg::Config)
+    cfg.theta_override !== nothing && return cfg.theta_override::Float64
+    return 4.0 * cfg.Ne * mu_per_neutral_site(cfg)
+end
+
+"""
     theta(cfg) -> Float64
 
-Mutation parameter for Beta(θ, θ) symmetric initialization. If `theta_override`
-is set, returns that; else `4 · Ne · μ_per_site` where `μ_per_site = U / L`.
+Back-compat shim returning `theta_qtl(cfg)`. Under the auto-derived `Uneu`,
+`theta_qtl == theta_neu`, so this gives the single-θ view callers expect.
 """
-function theta(cfg::Config)
-    if cfg.theta_override !== nothing
-        return cfg.theta_override
-    end
-    L = n_variants(cfg)
-    μ_site = cfg.U / L
-    return 4.0 * cfg.Ne * μ_site
-end
+theta(cfg::Config) = theta_qtl(cfg)
 
 """
     mu_per_site(cfg) -> Float64
 
-Per-site per-generation symmetric flip rate, derived from the haploid-gamete rate
-`U` so that total expected flips per gamete per generation = `U`.
+Back-compat shim returning `mu_per_qtl_site(cfg)` — the uniform per-site rate
+under the auto-derived `Uneu`. Use `mu_per_qtl_site` / `mu_per_neutral_site`
+when an explicit `Uneu` may differ from the auto-derived value.
 """
-mu_per_site(cfg::Config) = cfg.U / n_variants(cfg)
+mu_per_site(cfg::Config) = mu_per_qtl_site(cfg)
 
 """
     validate(cfg) -> Nothing
@@ -144,7 +210,21 @@ function validate(cfg::Config)
     n_variants(cfg) <= cfg.n_chr * cfg.chr_len_bp ||
         throw(ArgumentError("n_qtl + n_neutral exceeds total bp ($(cfg.n_chr * cfg.chr_len_bp))"))
     0 <= cfg.r <= 1 || throw(ArgumentError("r must be in [0, 1]"))
-    cfg.U >= 0 || throw(ArgumentError("U must be >= 0"))
+    cfg.Uqtl >= 0 || throw(ArgumentError("Uqtl must be >= 0"))
+    cfg.Uneu === nothing || cfg.Uneu::Float64 >= 0 ||
+        throw(ArgumentError("Uneu must be >= 0 when set"))
+    if cfg.Uqtl > 0 && cfg.n_qtl == 0
+        throw(ArgumentError("Uqtl > 0 requires n_qtl > 0"))
+    end
+    let Une = effective_Uneu(cfg)
+        if cfg.n_neutral > 0 && Une == 0
+            throw(ArgumentError("n_neutral > 0 requires Uneu > 0 " *
+                "(monomorphic / unevolved neutrals are not useful; set n_neutral=0 to disable)"))
+        end
+        if Une > 0 && cfg.n_neutral == 0
+            throw(ArgumentError("Uneu > 0 requires n_neutral > 0"))
+        end
+    end
     0 <= cfg.maf_min < 0.5 || throw(ArgumentError("maf_min must be in [0, 0.5)"))
     cfg.effect_scale > 0 || throw(ArgumentError("effect_scale must be > 0"))
     0 < cfg.h2 < 1 || throw(ArgumentError("h2 must be in (0, 1)"))
@@ -202,4 +282,6 @@ Decide how many static chunks to split a length-N parallel-for into. Returns
     return (nt > 1 && N >= min_size) ? nt : 1
 end
 
-export Config, n_variants, n_demes, n_total, theta, mu_per_site, validate
+export Config, n_variants, n_demes, n_total, theta, theta_qtl, theta_neu,
+       mu_per_site, mu_per_qtl_site, mu_per_neutral_site,
+       effective_Uneu, total_U, validate

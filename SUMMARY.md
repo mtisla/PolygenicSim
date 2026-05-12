@@ -222,6 +222,7 @@ code. Key answers:
 | Q59 | IID indexing | column-major `demeID = x + y · grid_size + 1` (matches bulmer.slim:536) |
 | Q60 | Summary interval | unified into single `n_int` knob: `n_int=0` (default) ⇒ final-gen summary only; `n_int=k>0` ⇒ also log every k gens |
 | Q61 | Replication API | user-side loop; no `replicate()` in the package |
+| Q62 | Mutation parameterization | `U` replaced by `Uqtl` (per-gamete QTL-targeting rate) + optional `Uneu`; when `Uneu` is `nothing`, auto-derived as `Uqtl·n_neutral/n_qtl` (uniform per-site rate, matches `bulmer.slim`). `n_neutral = 0` (default) → QTL-only fast path, skips neutral pool entirely. Strict coupling: `Uneu > 0 ⟺ n_neutral > 0`. |
 
 ## File layout
 

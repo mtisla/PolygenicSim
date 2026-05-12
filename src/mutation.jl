@@ -48,55 +48,108 @@ function _fill_unique_random_int!(buf::Vector{Int}, rng::Xoshiro,
     return nothing
 end
 
-"""
-    mutate_dense!(pop, μ_per_site, rng, mscratch) -> Int
+# ---------------------------------------------------------------------------
+# Two-pool mutation
+# ---------------------------------------------------------------------------
+# Mutations are sampled separately for the QTL pool and the neutral pool, each
+# using its own per-site rate. Either pool is skipped when its rate or site
+# count is zero — this is how the QTL-only fast path saves time when
+# `n_neutral == 0` or `Uneu == 0`.
+#
+# Within a pool of `n_sites` sites, `M ~ Binomial(2N · n_sites, μ_site)` unique
+# flat indices are drawn from `1..(2N · n_sites)`, then translated:
+#   col       = (s - 1) ÷ n_sites + 1
+#   var_local = (s - 1) % n_sites + 1
+#   j         = site_idx[var_local]   (global variant index)
+# and the bit at variant `j`, column `col` is XOR-flipped.
+# ---------------------------------------------------------------------------
 
-Apply recurrent symmetric mutation to `pop.H_buf`. Steady-state zero-alloc
-provided `mscratch.idx` capacity is large enough.
-"""
-function mutate_dense!(pop::DensePop, μ_per_site::Float64, rng::Xoshiro,
-                        mscratch::MutationScratch)
-    L = pop.L
-    twoN = 2 * pop.N
-    total_slots = twoN * L
-    M = rand(rng, Binomial(total_slots, μ_per_site))
-    M == 0 && return 0
-    empty!(mscratch.idx)
-    _fill_unique_random_int!(mscratch.idx, rng, total_slots, M)
-    kk = 1
-    @inbounds while kk <= M
-        s = mscratch.idx[kk]
-        col = (s - 1) ÷ L + 1
-        var = (s - 1) % L + 1
-        pop.H_buf[var, col] ⊻= UInt8(1)
-        kk += 1
-    end
-    return M
+@inline function _apply_mutations_packed!(H::Matrix{UInt64}, twoN::Int,
+                                             qtl_idx::Vector{Int}, mu_qtl::Float64,
+                                             neutral_idx::Vector{Int}, mu_neu::Float64,
+                                             rng::Xoshiro, mscratch::MutationScratch)
+    n1 = _mutate_pool_packed!(H, twoN, qtl_idx, mu_qtl, rng, mscratch)
+    n2 = _mutate_pool_packed!(H, twoN, neutral_idx, mu_neu, rng, mscratch)
+    return n1 + n2
 end
 
-"""
-    mutate_packed!(pop, μ_per_site, rng, mscratch) -> Int
-
-Same as `mutate_dense!` but on the packed offspring buffer.
-"""
-function mutate_packed!(pop::PackedPop, μ_per_site::Float64, rng::Xoshiro,
-                         mscratch::MutationScratch)
-    L = pop.L
-    twoN = 2 * pop.N
-    total_slots = twoN * L
-    M = rand(rng, Binomial(total_slots, μ_per_site))
+@inline function _mutate_pool_packed!(H::Matrix{UInt64}, twoN::Int,
+                                         site_idx::Vector{Int}, mu_site::Float64,
+                                         rng::Xoshiro, mscratch::MutationScratch)
+    n_sites = length(site_idx)
+    (n_sites == 0 || mu_site == 0) && return 0
+    total_slots = twoN * n_sites
+    M = rand(rng, Binomial(total_slots, mu_site))
     M == 0 && return 0
     empty!(mscratch.idx)
     _fill_unique_random_int!(mscratch.idx, rng, total_slots, M)
     @inbounds for kk in 1:M
         s = mscratch.idx[kk]
-        col = (s - 1) ÷ L + 1
-        var = (s - 1) % L + 1
-        w = ((var - 1) >> 6) + 1
-        b = (var - 1) & 63
-        pop.H_buf[w, col] ⊻= (UInt64(1) << b)
+        col = (s - 1) ÷ n_sites + 1
+        var_local = (s - 1) % n_sites + 1
+        j = site_idx[var_local]
+        w = ((j - 1) >> 6) + 1
+        b = (j - 1) & 63
+        H[w, col] ⊻= (UInt64(1) << b)
     end
     return M
 end
 
-export MutationScratch, mutate_dense!, mutate_packed!
+@inline function _apply_mutations_dense!(H::Matrix{UInt8}, twoN::Int,
+                                            qtl_idx::Vector{Int}, mu_qtl::Float64,
+                                            neutral_idx::Vector{Int}, mu_neu::Float64,
+                                            rng::Xoshiro, mscratch::MutationScratch)
+    n1 = _mutate_pool_dense!(H, twoN, qtl_idx, mu_qtl, rng, mscratch)
+    n2 = _mutate_pool_dense!(H, twoN, neutral_idx, mu_neu, rng, mscratch)
+    return n1 + n2
+end
+
+@inline function _mutate_pool_dense!(H::Matrix{UInt8}, twoN::Int,
+                                        site_idx::Vector{Int}, mu_site::Float64,
+                                        rng::Xoshiro, mscratch::MutationScratch)
+    n_sites = length(site_idx)
+    (n_sites == 0 || mu_site == 0) && return 0
+    total_slots = twoN * n_sites
+    M = rand(rng, Binomial(total_slots, mu_site))
+    M == 0 && return 0
+    empty!(mscratch.idx)
+    _fill_unique_random_int!(mscratch.idx, rng, total_slots, M)
+    @inbounds for kk in 1:M
+        s = mscratch.idx[kk]
+        col = (s - 1) ÷ n_sites + 1
+        var_local = (s - 1) % n_sites + 1
+        j = site_idx[var_local]
+        H[j, col] ⊻= UInt8(1)
+    end
+    return M
+end
+
+"""
+    mutate_dense!(pop, cfg, scratch, rng) -> Int
+
+Apply recurrent symmetric mutation to `pop.H_buf` using per-class rates
+derived from `cfg`. `scratch` is a `GenScratch` (loaded later in the
+module; type annotation dropped to avoid a forward reference). Returns the
+total number of flips applied.
+"""
+function mutate_dense!(pop::DensePop, cfg::Config, scratch, rng::Xoshiro)
+    return _apply_mutations_dense!(pop.H_buf, 2 * pop.N,
+                                    scratch.qtl_idx, mu_per_qtl_site(cfg),
+                                    scratch.neutral_idx, mu_per_neutral_site(cfg),
+                                    rng, scratch.mscratch)
+end
+
+"""
+    mutate_packed!(pop, cfg, scratch, rng) -> Int
+
+Same as `mutate_dense!` but on the packed offspring buffer.
+"""
+function mutate_packed!(pop::PackedPop, cfg::Config, scratch, rng::Xoshiro)
+    return _apply_mutations_packed!(pop.H_buf, 2 * pop.N,
+                                     scratch.qtl_idx, mu_per_qtl_site(cfg),
+                                     scratch.neutral_idx, mu_per_neutral_site(cfg),
+                                     rng, scratch.mscratch)
+end
+
+export MutationScratch, mutate_dense!, mutate_packed!,
+       _apply_mutations_packed!, _apply_mutations_dense!

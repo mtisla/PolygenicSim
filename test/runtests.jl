@@ -13,7 +13,7 @@ const PS = PolygenicSim
 # ---------------------------------------------------------------------------
 @testset "Test 1+13 — Beta(θ,θ) init AF" begin
     cfg = PS.Config(N=500, Ne=500, n_chr=1, chr_len_bp=200_000,
-                     n_qtl=2_000, n_neutral=0, U=0.02,
+                     n_qtl=2_000, n_neutral=0, Uqtl=0.02,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      seed=UInt64(42), output_formats=Symbol[])
     PS.validate(cfg)
@@ -33,7 +33,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Test 2 — V_A: sum 2pq α² ≈ var(A)" begin
     cfg = PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=100_000,
-                     n_qtl=500, n_neutral=200, U=0.02,
+                     n_qtl=500, n_neutral=200, Uqtl=0.02,
                      theta_override=0.5, maf_min=0.05,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      seed=UInt64(7), output_formats=Symbol[])
@@ -66,7 +66,7 @@ end
     # U=0 ⇒ θ=0 ⇒ invalid Beta(0,0); supply theta_override just for the init
     # draw of vt — we overwrite the haplotype state below anyway.
     cfg = PS.Config(N=500, Ne=500, n_chr=1, chr_len_bp=10_000,
-                     r=0.0, n_qtl=100, n_neutral=0, U=0.0,
+                     r=0.0, n_qtl=100, n_neutral=0, Uqtl=0.0,
                      theta_override=0.5,
                      selection_mode=:neutral, ngen_eq=1, ngen_dir=0,
                      seed=UInt64(11), output_formats=Symbol[])
@@ -107,7 +107,7 @@ end
         chr_len_bp = 1_000_000
         r_per_bp = 1.0 / chr_len_bp
         cfg = PS.Config(N=2, Ne=2, n_chr=1, chr_len_bp=chr_len_bp, r=r_per_bp,
-                         n_qtl=2, n_neutral=0, U=0.0,
+                         n_qtl=2, n_neutral=0, Uqtl=0.0,
                          selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                          seed=seed, output_formats=Symbol[])
         L = 2
@@ -165,7 +165,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Test 5 — Cross-chr LD ≈ 0 at gen 0" begin
     cfg = PS.Config(N=1000, Ne=1000, n_chr=4, chr_len_bp=100_000,
-                     n_qtl=80, n_neutral=20, U=0.02,
+                     n_qtl=80, n_neutral=20, Uqtl=0.02,
                      theta_override=0.5,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      seed=UInt64(31), output_formats=Symbol[])
@@ -227,7 +227,7 @@ end
     # independence across sites.
     N = 250; T = 30
     base = (N=N, Ne=N, n_chr=20, chr_len_bp=100_000, r=1e-5,
-             n_qtl=4_000, n_neutral=0, U=0.0,
+             n_qtl=4_000, n_neutral=0, Uqtl=0.0,
              theta_override=10.0,
              selection_mode=:neutral, ngen_eq=T, ngen_dir=0,
              seed=UInt64(2024), output_formats=Symbol[])
@@ -257,7 +257,7 @@ end
     # Pin n_threads=1 so the random sample path is independent of
     # JULIA_NUM_THREADS — the calibrated seed expects single-chunk RNG.
     res = PS.simulate(PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=200_000,
-                                 n_qtl=500, n_neutral=0, U=0.02,
+                                 n_qtl=500, n_neutral=0, Uqtl=0.02,
                                  theta_override=0.5,
                                  vs_over_vp0=10.0,
                                  selection_mode=:stabilizing,
@@ -276,7 +276,7 @@ end
     # Compare two runs with identical seed; one with shift_sd=0 (stabilizing-only),
     # one with shift_sd=+2. The directional run's final mean BV must be greater.
     common = (N=500, Ne=500, n_chr=2, chr_len_bp=200_000,
-               n_qtl=500, n_neutral=0, U=0.02, theta_override=0.5,
+               n_qtl=500, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                vs_over_vp0=10.0,
                selection_mode=:directional,
                directional_start_from=:msd,
@@ -302,7 +302,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Test 9 — dense ≡ packed (bit-identical)" begin
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
-             n_qtl=200, n_neutral=50, U=0.02, theta_override=0.5,
+             n_qtl=200, n_neutral=50, Uqtl=0.02, theta_override=0.5,
              vs_over_vp0=20.0, selection_mode=:stabilizing,
              ngen_eq=8, ngen_dir=0, seed=UInt64(777),
              output_formats=Symbol[])
@@ -340,7 +340,7 @@ end
     for backend in (:dense, :packed)
         for mode in (:neutral, :stabilizing, :directional)
             cfg = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=20_000,
-                             n_qtl=100, n_neutral=0, U=0.02,
+                             n_qtl=100, n_neutral=0, Uqtl=0.02,
                              theta_override=0.5,
                              vs_over_vp0=20.0,
                              selection_mode=mode,
@@ -366,7 +366,7 @@ end
     tmp = mktempdir()
     prefix = joinpath(tmp, "rt")
     cfg = PS.Config(N=120, Ne=120, n_chr=2, chr_len_bp=10_000,
-                     n_qtl=100, n_neutral=50, U=0.02,
+                     n_qtl=100, n_neutral=50, Uqtl=0.02,
                      theta_override=0.5,
                      selection_mode=:stabilizing, ngen_eq=3, ngen_dir=0,
                      seed=UInt64(909),
@@ -422,7 +422,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Phase 2 — zero-alloc kernels" begin
     cfg = PS.Config(N=200, Ne=200, n_chr=3, chr_len_bp=50_000,
-                     n_qtl=300, n_neutral=100, U=0.02, theta_override=0.5,
+                     n_qtl=300, n_neutral=100, Uqtl=0.02, theta_override=0.5,
                      vs_over_vp0=20.0,
                      selection_mode=:stabilizing, ngen_eq=2, ngen_dir=0,
                      n_threads=1,                    # force chunk_count=1 for deterministic measurement
@@ -452,8 +452,8 @@ end
     g = zeros(UInt64, pop.n_blocks)
     @noinline measure_gamete(g, H, p, vt, cfg, rng, sb) =
         @allocated PS.gamete_packed!(g, H, p, vt, cfg, rng, sb)
-    @noinline measure_mut(pop, μ, rng, ms) =
-        @allocated PS.mutate_packed!(pop, μ, rng, ms)
+    @noinline measure_mut(pop, cfg, scratch, rng) =
+        @allocated PS.mutate_packed!(pop, cfg, scratch, rng)
     @noinline measure_fit(w, A, env, ph, gp, lay) =
         @allocated PS.apply_fitness!(w, A, env, ph, gp, lay)
     @noinline measure_sp(rng, cumw) =
@@ -461,12 +461,12 @@ end
 
     # warm
     measure_gamete(g, pop.H, 1, vt, cfg, rng, scratch.chunk_recomb[1])
-    measure_mut(pop, PS.mu_per_site(cfg), rng, scratch.mscratch)
+    measure_mut(pop, cfg, scratch, rng)
     measure_fit(scratch.w, scratch.A, scratch.env, phase, 1, scratch.layout)
     measure_sp(rng, scratch.cumw)
 
     @test measure_gamete(g, pop.H, 1, vt, cfg, rng, scratch.chunk_recomb[1]) == 0
-    @test measure_mut(pop, PS.mu_per_site(cfg), rng, scratch.mscratch) == 0
+    @test measure_mut(pop, cfg, scratch, rng) == 0
     @test measure_fit(scratch.w, scratch.A, scratch.env, phase, 1, scratch.layout) == 0
     @test measure_sp(rng, scratch.cumw) == 0
 end
@@ -477,7 +477,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Phase 2 — chunk-count determinism" begin
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
-             n_qtl=200, n_neutral=50, U=0.02, theta_override=0.5,
+             n_qtl=200, n_neutral=50, Uqtl=0.02, theta_override=0.5,
              vs_over_vp0=10.0, selection_mode=:stabilizing,
              ngen_eq=4, ngen_dir=0, seed=UInt64(0xCC),
              output_formats=Symbol[])
@@ -496,7 +496,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Phase 4 — DemeLayout and migration" begin
     cfg = PS.Config(N=10, Ne=10, n_chr=1, chr_len_bp=1000,
-                     n_qtl=10, n_neutral=0, U=0.0, theta_override=0.5,
+                     n_qtl=10, n_neutral=0, Uqtl=0.0, theta_override=0.5,
                      grid_size=3, migration_rate=0.05,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      output_formats=Symbol[])
@@ -528,7 +528,7 @@ end
 
 @testset "Phase 4 — m=0 isolates demes; m=0.25 ≈ panmictic asymptote" begin
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
-             n_qtl=200, n_neutral=0, U=0.02, theta_override=0.5,
+             n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
              vs_over_vp0=20.0, selection_mode=:stabilizing,
              ngen_eq=10, ngen_dir=0,
              output_formats=Symbol[])
@@ -590,7 +590,7 @@ end
 @testset "Phase 4 — stepping stone end-to-end (3 selection modes)" begin
     for mode in (:neutral, :stabilizing, :directional)
         cfg = PS.Config(N=50, Ne=50, n_chr=2, chr_len_bp=10_000,
-                         n_qtl=100, n_neutral=20, U=0.02, theta_override=0.5,
+                         n_qtl=100, n_neutral=20, Uqtl=0.02, theta_override=0.5,
                          grid_size=3, migration_rate=0.05, cline_amp=0.0,
                          vs_over_vp0=15.0,
                          selection_mode=mode,
@@ -610,7 +610,7 @@ end
 
 @testset "Phase 4 — cline produces per-deme phenotype gradient" begin
     cfg = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
-                     n_qtl=400, n_neutral=0, U=0.02, theta_override=0.5,
+                     n_qtl=400, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                      grid_size=3, migration_rate=0.05, cline_amp=2.0,
                      vs_over_vp0=10.0,
                      selection_mode=:stabilizing, ngen_eq=20, ngen_dir=0,
@@ -643,7 +643,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Phase 5 — expansion sets new population size" begin
     base = (N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
-             n_qtl=200, n_neutral=0, U=0.02, theta_override=0.5,
+             n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
              selection_mode=:neutral, ngen_eq=6, ngen_dir=0,
              output_formats=Symbol[])
     res = PS.simulate(PS.Config(; expansion_factor=3.0,
@@ -662,7 +662,7 @@ end
     # and pre-expansion trajectory. Expansion fires at the *very last* gen
     # so the post-expansion drift window is zero — AFs should match closely.
     base = (N=200, Ne=200, n_chr=2, chr_len_bp=10_000,
-             n_qtl=400, n_neutral=0, U=0.02, theta_override=0.5,
+             n_qtl=400, n_neutral=0, Uqtl=0.02, theta_override=0.5,
              selection_mode=:neutral, ngen_eq=6, ngen_dir=0,
              output_formats=Symbol[])
     res_no = PS.simulate(PS.Config(; expansion_factor=1.0,
@@ -687,7 +687,7 @@ end
 
 @testset "Phase 5 — expansion in stepping-stone metapopulation" begin
     cfg = PS.Config(N=50, Ne=50, n_chr=2, chr_len_bp=10_000,
-                     n_qtl=100, n_neutral=0, U=0.02, theta_override=0.5,
+                     n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                      grid_size=3, migration_rate=0.05,
                      selection_mode=:stabilizing, ngen_eq=8, ngen_dir=0,
                      vs_over_vp0=15.0,
@@ -708,7 +708,7 @@ end
     tmp = mktempdir()
     prefix = joinpath(tmp, "exp")
     cfg = PS.Config(N=80, Ne=80, n_chr=1, chr_len_bp=20_000,
-                     n_qtl=200, n_neutral=50, U=0.02, theta_override=0.5,
+                     n_qtl=200, n_neutral=50, Uqtl=0.02, theta_override=0.5,
                      selection_mode=:neutral, ngen_eq=8, ngen_dir=0,
                      expansion_factor=3.0, expansion_k_before_end=3,
                      checkpoints = Int[3, 8],   # before (gen 3) and after (gen 8) expansion at gen 5
@@ -727,7 +727,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "Phase 5 — fractional expansion factor" begin
     cfg = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
-                     n_qtl=100, n_neutral=0, U=0.02, theta_override=0.5,
+                     n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                      selection_mode=:neutral, ngen_eq=4, ngen_dir=0,
                      expansion_factor=1.5,            # fractional
                      expansion_k_before_end=1,
@@ -737,7 +737,7 @@ end
     @test res.pop.N == 150
 
     cfg2 = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
-                      n_qtl=100, n_neutral=0, U=0.02, theta_override=0.5,
+                      n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                       selection_mode=:neutral, ngen_eq=4, ngen_dir=0,
                       expansion_factor=2.7,
                       expansion_k_before_end=1,
@@ -754,7 +754,7 @@ end
     # Pin n_threads=1 in both runs so seeds aren't sensitive to JULIA_NUM_THREADS.
     # In a panmictic run, weighted-avg B equals pooled B (single deme).
     cfg_pan = PS.Config(N=400, Ne=400, n_chr=2, chr_len_bp=50_000,
-                         n_qtl=300, n_neutral=0, U=0.02, theta_override=0.5,
+                         n_qtl=300, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                          vs_over_vp0=10.0,
                          selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
                          seed=UInt64(0xD0C0), n_threads=1,
@@ -767,7 +767,7 @@ end
     # In a 2D run with cline=0 (uniform optimum), the within-deme B should
     # also be negative under stabilizing selection.
     cfg_2d = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
-                        n_qtl=200, n_neutral=0, U=0.02, theta_override=0.5,
+                        n_qtl=200, n_neutral=0, Uqtl=0.02, theta_override=0.5,
                         grid_size=3, migration_rate=0.05, cline_amp=0.0,
                         vs_over_vp0=10.0,
                         selection_mode=:stabilizing, ngen_eq=10, ngen_dir=0,
@@ -781,13 +781,90 @@ end
 
 @testset "Diagnostics — weighted_avg_demes equals simple mean for equal sizes" begin
     cfg = PS.Config(N=20, Ne=20, n_chr=1, chr_len_bp=1000,
-                     n_qtl=10, n_neutral=0, U=0.0, theta_override=0.5,
+                     n_qtl=10, n_neutral=0, Uqtl=0.0, theta_override=0.5,
                      grid_size=4, migration_rate=0.0,
                      selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                      output_formats=Symbol[])
     layout = PS.DemeLayout(cfg)
     v = [0.5, 1.0, 1.5, 2.0]
     @test PS.weighted_avg_demes(v, layout) ≈ mean(v)
+end
+
+@testset "Mutation — Uqtl/Uneu auto-derivation and validation" begin
+    # Auto-derived Uneu under the uniform-per-site rule.
+    cfg = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
+                     n_qtl=100, n_neutral=200, Uqtl=0.01,
+                     selection_mode=:neutral, ngen_eq=0,
+                     output_formats=Symbol[])
+    @test PS.effective_Uneu(cfg) ≈ 0.02
+    @test PS.total_U(cfg) ≈ 0.03
+    @test PS.mu_per_qtl_site(cfg) ≈ PS.mu_per_neutral_site(cfg)
+    @test PS.theta_qtl(cfg) ≈ PS.theta_neu(cfg)
+
+    # n_neutral = 0 → auto-Uneu = 0, total = Uqtl.
+    cfg2 = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
+                      n_qtl=100, n_neutral=0, Uqtl=0.02,
+                      selection_mode=:neutral, ngen_eq=0,
+                      output_formats=Symbol[])
+    @test PS.effective_Uneu(cfg2) == 0.0
+    @test PS.total_U(cfg2) ≈ 0.02
+    @test PS.mu_per_neutral_site(cfg2) == 0.0
+
+    # Explicit Uneu override.
+    cfg3 = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
+                      n_qtl=100, n_neutral=200, Uqtl=0.01, Uneu=0.5,
+                      selection_mode=:neutral, ngen_eq=0,
+                      output_formats=Symbol[])
+    @test PS.effective_Uneu(cfg3) ≈ 0.5
+    @test PS.theta_qtl(cfg3) != PS.theta_neu(cfg3)  # non-uniform per-site rates
+
+    # Validation: Uneu > 0 with n_neutral = 0 → error.
+    @test_throws ArgumentError PS.validate(
+        PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
+                   n_qtl=100, n_neutral=0, Uqtl=0.01, Uneu=0.1,
+                   selection_mode=:neutral, ngen_eq=0,
+                   output_formats=Symbol[]))
+
+    # Validation: n_neutral > 0 with Uneu = 0 (explicit) → error.
+    @test_throws ArgumentError PS.validate(
+        PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
+                   n_qtl=100, n_neutral=200, Uqtl=0.01, Uneu=0.0,
+                   selection_mode=:neutral, ngen_eq=0,
+                   output_formats=Symbol[]))
+
+    # Validation: Uqtl > 0 with n_qtl = 0 → error.
+    @test_throws ArgumentError PS.validate(
+        PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
+                   n_qtl=0, n_neutral=200, Uqtl=0.01, Uneu=0.1,
+                   selection_mode=:neutral, ngen_eq=0,
+                   output_formats=Symbol[]))
+end
+
+@testset "Mutation — QTL-only fast path skips neutral pool" begin
+    # n_neutral = 0 → no neutral allocation, no neutral mutation step.
+    cfg = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=20_000,
+                     n_qtl=400, n_neutral=0, Uqtl=0.02,
+                     theta_override=0.5,
+                     selection_mode=:stabilizing, ngen_eq=3, ngen_dir=0,
+                     n_threads=1,
+                     seed=UInt64(0xC0DE), output_formats=Symbol[])
+    rng = PS.make_master_rng(cfg)
+    vt, p_init = PS.init_variant_table(rng, cfg)
+    @test length(vt) == 400
+    @test all(vt.is_qtl)
+    pop = PS.PackedPop(length(vt), cfg.N)
+    PS.init_packed!(pop, p_init, rng)
+    scratch = PS.GenScratch(cfg, vt, rng)
+    @test length(scratch.qtl_idx) == 400
+    @test length(scratch.neutral_idx) == 0
+    PS.compute_breeding_values!(scratch, pop, vt)
+    mA0, vA0 = PS.population_mean_var(scratch.A)
+    V_E = vA0 * (1 - cfg.h2) / cfg.h2; Vs = cfg.vs_over_vp0 * (vA0 + V_E)
+    phase = PS.PhaseSelection(false, Vs, sqrt(V_E), [mA0], [mA0], typemax(Int))
+    for g in 1:cfg.ngen_eq
+        PS.step_generation_packed!(pop, vt, cfg, phase, scratch, rng, g)
+    end
+    @test pop.L == 400  # no neutral block
 end
 
 end # @testset top-level

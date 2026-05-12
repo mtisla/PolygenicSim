@@ -101,15 +101,19 @@ function sample_effects(rng::Xoshiro, cfg::Config, is_qtl::BitVector)
 end
 
 """
-    sample_initial_freqs(rng, cfg) -> Vector{Float64}
+    sample_initial_freqs(rng, cfg; is_qtl=nothing) -> Vector{Float64}
 
 Draw `L` initial allele frequencies under the configured init distribution.
 Implements rejection sampling against `maf_min` in batches.
 
-Default: `Beta(θ, θ)` with `θ = 4·Ne·μ_per_site` (or `theta_override`). Symmetric
-so `mean = 0.5`, `var = 1/(8θ + 4)`.
+For `:beta_mutation_drift`, when `is_qtl` is provided, QTL sites are drawn
+from `Beta(θ_qtl, θ_qtl)` and neutral sites from `Beta(θ_neu, θ_neu)`. Under
+the auto-derived `Uneu` (uniform per-site mutation), `θ_qtl == θ_neu`, so the
+split collapses to the legacy single-θ behavior. When `is_qtl === nothing`,
+falls back to a single Beta with `θ = theta_qtl(cfg)` (back-compat).
 """
-function sample_initial_freqs(rng::Xoshiro, cfg::Config)
+function sample_initial_freqs(rng::Xoshiro, cfg::Config;
+                                is_qtl::Union{BitVector,Nothing}=nothing)
     L = n_variants(cfg)
     p = Vector{Float64}(undef, L)
     if cfg.init_distribution === :uniform
@@ -117,11 +121,39 @@ function sample_initial_freqs(rng::Xoshiro, cfg::Config)
         cfg.maf_min > 0 && _truncate_inplace!(rng, p, cfg.maf_min, () -> rand(rng))
         return p
     elseif cfg.init_distribution === :beta_mutation_drift
-        θ = theta(cfg)
-        d = Beta(θ, θ)
-        rand!(rng, d, p)
-        cfg.maf_min > 0 && _truncate_inplace!(rng, p, cfg.maf_min, () -> rand(rng, d))
-        return p
+        θ_q = theta_qtl(cfg)
+        θ_n = theta_neu(cfg)
+        if is_qtl === nothing || θ_q == θ_n
+            # Single-θ path: identical to legacy behavior when per-class θs match.
+            θ = θ_q > 0 ? θ_q : θ_n
+            d = Beta(θ, θ)
+            rand!(rng, d, p)
+            cfg.maf_min > 0 && _truncate_inplace!(rng, p, cfg.maf_min, () -> rand(rng, d))
+            return p
+        else
+            # Per-class θ: QTL sites from Beta(θ_q,θ_q); neutrals from Beta(θ_n,θ_n).
+            # Either may be zero (no-mutation regime); use a degenerate draw at p=0.5
+            # in that case to avoid Beta(0,0) numerical issues.
+            d_q = θ_q > 0 ? Beta(θ_q, θ_q) : nothing
+            d_n = θ_n > 0 ? Beta(θ_n, θ_n) : nothing
+            @inbounds for j in eachindex(p)
+                p[j] = is_qtl[j] ?
+                    (d_q === nothing ? 0.5 : rand(rng, d_q)) :
+                    (d_n === nothing ? 0.5 : rand(rng, d_n))
+            end
+            if cfg.maf_min > 0
+                @inbounds for j in eachindex(p)
+                    draw = is_qtl[j] ? d_q : d_n
+                    if draw === nothing
+                        continue
+                    end
+                    while min(p[j], 1 - p[j]) < cfg.maf_min
+                        p[j] = rand(rng, draw)
+                    end
+                end
+            end
+            return p
+        end
     elseif cfg.init_distribution === :beta_asymmetric
         a = 4 * cfg.Ne * cfg.asym_v
         b = 4 * cfg.Ne * cfg.asym_u
@@ -168,7 +200,7 @@ function init_variant_table(rng::Xoshiro, cfg::Config)
     end
 
     α = sample_effects(rng, cfg, is_qtl)
-    p = sample_initial_freqs(rng, cfg)
+    p = sample_initial_freqs(rng, cfg; is_qtl=is_qtl)
 
     # Compute per-chromosome contiguous ranges.
     chr_start = fill(Int32(0), cfg.n_chr)

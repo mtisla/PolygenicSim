@@ -30,6 +30,7 @@ mutable struct GenScratch
     w::Vector{Float64}
     cumw::Vector{Float64}
     qtl_idx::Vector{Int}
+    neutral_idx::Vector{Int}          # positions where vt.is_qtl[j] is false
     alpha_qtl::Vector{Float64}
     genotype_buf::Matrix{UInt8}       # (n_qtl, N) per-individual genotype scratch for vectorized BV
     mscratch::MutationScratch
@@ -45,11 +46,14 @@ function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
                      layout::DemeLayout)
     N_total = layout.N_total
     qtl_idx = Int[]
+    neutral_idx = Int[]
     alpha_qtl = Float64[]
     @inbounds for j in eachindex(vt.is_qtl)
         if vt.is_qtl[j]
             push!(qtl_idx, j)
             push!(alpha_qtl, vt.alpha[j])
+        else
+            push!(neutral_idx, j)
         end
     end
     cc = _resolve_chunk_count(cfg)
@@ -72,6 +76,7 @@ function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
         zeros(Float64, N_total),
         zeros(Float64, N_total),
         qtl_idx,
+        neutral_idx,
         alpha_qtl,
         genotype_buf,
         MutationScratch(),
@@ -218,7 +223,7 @@ function step_generation_dense!(pop::DensePop, vt::VariantTable, cfg::Config,
             end
         end
     end
-    mutate_dense!(pop, mu_per_site(cfg), rng, scratch.mscratch)
+    mutate_dense!(pop, cfg, scratch, rng)
     swap_buffers!(pop)
     return nothing
 end
@@ -258,7 +263,7 @@ function step_generation_packed!(pop::PackedPop, vt::VariantTable, cfg::Config,
             end
         end
     end
-    mutate_packed!(pop, mu_per_site(cfg), rng, scratch.mscratch)
+    mutate_packed!(pop, cfg, scratch, rng)
     swap_buffers!(pop)
     return nothing
 end

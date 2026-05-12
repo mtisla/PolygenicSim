@@ -1,6 +1,7 @@
 #!/usr/bin/env julia
 #
-# Stabilizing run: panmictic, 10 chr, 5000 QTL, r=1e-6, U=0.02.
+# Stabilizing run: panmictic, 10 chr, 5000 QTL, r=1e-6, U=0.40
+# (= Uqtl + Uneu in bulmer.slim).
 # Bypasses the simulate() driver to expose per-gen progress every 1000 gens
 # plus end-of-sim convergence diagnostics. Backend switchable.
 
@@ -17,7 +18,7 @@ function main()
         r           = 1e-6,
         n_qtl       = 5_000,
         n_neutral   = 0,
-        U           = 0.02,
+        Uqtl        = 0.02,
         h2          = 0.5,
         vs_over_vp0 = 20.0,
         selection_mode = :stabilizing,
