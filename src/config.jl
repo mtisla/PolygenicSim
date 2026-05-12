@@ -117,6 +117,25 @@ Base.@kwdef struct Config
     output_formats::Vector{Symbol} = Symbol[:plink]
     output_prefix::String = "polygenicsim"
 
+    # oracle statistics (computed end-of-sim when `:oracle ∈ output_formats`
+    # OR via post-hoc `oracle_stats(result; ...)`).
+    #   `oracle_windows_pct` — window widths as % of `chr_len_bp`. Matches
+    #       the R reference defaults; gives 4 window scopes plus "within-chr"
+    #       and "genome" (6 scopes total).
+    #   `oracle_n_perm`      — number of sign-flip permutations for the B
+    #       and Δ_cross null distributions. 1000 matches the R reference.
+    #   `oracle_memory_path_threshold` — when `p_qtl > threshold` (after the
+    #       polymorphic filter), switch from the full p×p matrix path to a
+    #       per-chr + matrix-free genome path. Julia BLAS handles the fast
+    #       path well up to ~5000; tune up if RAM permits.
+    #   `oracle_cutoffs`     — Δ_cross frequency cutoffs (percent). 20 and
+    #       50 match the R reference; pair (L, H) groups are
+    #       {p_pol < c%} and {p_pol > (1-c%)}.
+    oracle_windows_pct::Vector{Float64} = [5.0, 10.0, 25.0, 50.0]
+    oracle_n_perm::Int = 1000
+    oracle_memory_path_threshold::Int = 5000
+    oracle_cutoffs::Vector{Int} = [20, 50]
+
     # diagnostics
     # n_int controls the trajectory-snapshot interval (in generations) for
     # convergence diagnostics in the summary:
@@ -314,8 +333,20 @@ function validate(cfg::Config)
     cfg.effect_distribution in (:signed_exponential, :normal, :fixed) ||
         throw(ArgumentError("invalid effect_distribution"))
     for f in cfg.output_formats
-        f in (:plink, :native, :summary) ||
+        f in (:plink, :native, :summary, :oracle) ||
             throw(ArgumentError("invalid output format: $f"))
+    end
+    cfg.oracle_n_perm >= 1 ||
+        throw(ArgumentError("oracle_n_perm must be >= 1"))
+    cfg.oracle_memory_path_threshold >= 1 ||
+        throw(ArgumentError("oracle_memory_path_threshold must be >= 1"))
+    for w in cfg.oracle_windows_pct
+        (0 < w <= 100) ||
+            throw(ArgumentError("oracle_windows_pct entries must be in (0, 100], got $w"))
+    end
+    for c in cfg.oracle_cutoffs
+        (1 <= c <= 50) ||
+            throw(ArgumentError("oracle_cutoffs entries must be in [1, 50], got $c"))
     end
     cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))

@@ -283,7 +283,7 @@ PS.simulate(PS.Config(load_plink_prefix = "external", load_demography = :twoD, .
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-314 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
+340 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
 Haldane recombination at d ∈ {0.01, 0.1, 0.5, 1.0} M, cross-chr LD, neutral
 drift, selection regimes), Phase-2 zero-allocation kernels and chunk
 determinism, Phase-4 spatial structure (DemeLayout, m=0 isolation vs m=high
@@ -294,9 +294,10 @@ for 2D, the `Uqtl/Uneu` auto-derivation and validation, the QTL-only fast
 path, a regression test asserting threaded reductions match the
 `Statistics` reference under `JULIA_NUM_THREADS=4`, and the new
 single-knob `ngen` mode (validation against the two-phase knobs and
-shift-from-gen-1 behavior for directional), and the `:twoD_recent`
+shift-from-gen-1 behavior for directional), the `:twoD_recent`
 demography (validation, structure-onset gen, panmictic vs structured
-`load_from` interaction).
+`load_from` interaction), and oracle statistics (B perm-p, Δ_cross
+sign-flip null, panmictic + structured paths, TSV side-effect).
 
 ## Defaults
 
@@ -333,6 +334,65 @@ Mostly aligned with the bulmer reference pipeline:
 | `ngen` | 0 (alternative single-knob run length; shift at gen 1 for directional. Mutually exclusive with `ngen_eq`/`ngen_dir`) |
 
 All overridable via the `Config(; ...)` keyword constructor.
+
+## Oracle statistics
+
+Add `:oracle` to `output_formats` to compute Bulmer **B** and **Δ_cross**
+direction statistics against the simulator's QTL genotypes and true effect
+sizes at end-of-sim. No PLINK BED needed — we have direct access to
+`vt.alpha` and `pop.H`.
+
+Output: a flat `{prefix}.oracle.tsv` and an `OracleResult` attached to
+`SimResult.oracle`. Reimplements the R reference
+(`bulmer/R/oracle.R`, `bulmer/R/stats.R`) in-process.
+
+```julia
+cfg = PS.Config(
+    N = 2000, n_qtl = 2000, h2 = 0.5,
+    selection_mode  = :stabilizing, ngen_eq = 50,
+    output_formats  = Symbol[:plink, :summary, :oracle],
+    oracle_windows_pct = [5.0, 10.0, 25.0, 50.0],   # % of chr_len_bp
+    oracle_n_perm      = 1000,
+    output_prefix      = "stab", seed = UInt64(1),
+)
+res = PS.simulate(cfg)
+res.oracle.B            # B per scope: [win_5pct, win_10pct, win_25pct, win_50pct, within, genome]
+res.oracle.B_perm_p     # one-tailed sign-flip permutation p-values
+res.oracle.dc_delta     # n_scopes × n_cutoffs matrix of Δ_cross
+```
+
+Scopes: user-specified windows (as % of `chr_len_bp`) plus **within-chr** and
+**genome** (6 scopes by default). For each scope and Δ_cross cutoff (default
+`[20, 50]` %), 13 fields are reported: `nL`, `nH`, `nPLH`, `nPLL`, `nPHH`,
+`BLH`, `BLL`, `BHH`, `delta`, `null_mean`, `null_sd`, `Z`, `perm_p`.
+
+For structured runs (`:twoD_perp` / `:twoD_recent`), the per-deme components
+(`VA_k`, `VG_off_k`, `R_k`) are deme-weighted (`w_k = N_k / N_total`) before
+ratio formation — matches the R reference's deme-weighted-component
+convention to avoid ratio-averaging bias.
+
+Configuration knobs:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `oracle_windows_pct` | `[5.0, 10.0, 25.0, 50.0]` | Window widths as % of `chr_len_bp` |
+| `oracle_n_perm` | `1000` | Sign-flip permutations |
+| `oracle_cutoffs` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%) |
+| `oracle_memory_path_threshold` | `5000` | Switch to per-chr matrix-free path when `p_qtl >` this |
+
+Standalone post-hoc API:
+```julia
+oracle = PS.oracle_stats(result;
+    windows_pct = [5.0, 25.0],
+    n_perm = 5000,
+    cutoffs = [10, 30, 50],
+    seed = UInt64(99))
+PS.write_oracle_tsv("recompute", oracle)
+```
+
+Expected cost (Julia BLAS, 8-thread): ~2 s for `p_qtl = 2000`,
+~30 s for `p_qtl = 5000` (panmictic or up to ~25 demes). Above `p_qtl ≈ 5000`
+the memory-path threshold kicks in.
 
 ## Versioning
 

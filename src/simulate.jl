@@ -18,6 +18,7 @@ struct SimResult
     final_gen::Int
     summary::Union{SimSummary,Nothing}
     checkpoint_paths::Vector{String}
+    oracle::Union{OracleResult,Nothing}
 end
 
 """
@@ -268,7 +269,18 @@ function simulate(cfg::Config)
         print(stdout, format_constraint_checks(summary))
     end
 
-    return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths)
+    # ---- oracle stats (opt-in via :oracle in output_formats) ------------
+    # oracle_stats requires the materialized SimResult; we build a temporary
+    # without the oracle field, then re-wrap with the computed oracle.
+    oracle_res = nothing
+    if :oracle in cfg.output_formats
+        tmp_result = SimResult(pop, vt, deme_id, cfg, total_gens, summary,
+                                 paths, nothing)
+        oracle_res = oracle_stats(tmp_result)
+        write_oracle_tsv(cfg.output_prefix, oracle_res)
+    end
+
+    return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths, oracle_res)
 end
 
 # ---------------------------------------------------------------------------

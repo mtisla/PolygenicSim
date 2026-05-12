@@ -9,6 +9,67 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-12
+
+Adds in-process oracle statistics — Bulmer **B** and **Δ_cross** direction
+tests — computed against the simulator's QTL genotypes and true effect
+sizes. Reimplements the R reference pipeline (`bulmer/R/oracle.R`,
+`bulmer/R/stats.R`) without BED I/O.
+
+### Added
+- `oracle_stats(result; ...) -> OracleResult` — post-hoc compute. Inputs:
+  `windows_pct`, `n_perm`, `cutoffs`, `seed`, `memory_path_threshold`
+  default from Config.
+- `:oracle` output format — when present in `cfg.output_formats`,
+  `simulate` auto-computes oracle stats at end-of-sim, attaches the
+  `OracleResult` to `SimResult.oracle`, and writes `{prefix}.oracle.tsv`.
+- `write_oracle_tsv(prefix, oracle::OracleResult)` writer.
+- Config fields:
+  - `oracle_windows_pct::Vector{Float64} = [5.0, 10.0, 25.0, 50.0]`
+  - `oracle_n_perm::Int = 1000`
+  - `oracle_memory_path_threshold::Int = 5000` (Julia BLAS default,
+    higher than R's 2000)
+  - `oracle_cutoffs::Vector{Int} = [20, 50]`
+- 26 new tests covering the smoke path, B finite, perm_p ∈ (0, 1], TSV
+  side-effect, standalone API override, 2D structured path, no auto-
+  compute when `:oracle ∉ output_formats`.
+
+### Algorithm
+- **B per scope**: per-deme `D_k = X_k'X_k/(N_k−1)`, `VA_k = Σ diag(D_k)·α²`,
+  `VG_off_k = α' (D_k ⊙ mask_scope) α`. Deme-weighted components
+  (`w_k = N_k/N_total`) summed, then ratio → `B_scope = VG_off_meta /
+  VA_meta`. Matches the R reference's "weight components, not ratios"
+  convention to avoid ratio-averaging bias.
+- **Δ_cross per (cutoff, scope)**: polarize frequencies, split into L/H
+  groups by cutoff, build `B_jk = α_j · R_meta[j,k] · α_k · mask`,
+  compute mean B in LH cross block vs LL/HH within blocks,
+  `δ = BLH − ½(BLL + BHH)`. Sign-flip null shared across demes via a
+  `p × n_perm` flip matrix.
+- **Scopes**: user windows + within-chromosome + genome (6 by default).
+- Δ_cross is computed at **every** scope (R reference only does within +
+  genome) per Q3=(b).
+- Polymorphic filter: `α ≠ 0` AND `0 < p_pool < 1`.
+
+### Internal
+- Split `OracleResult` struct into `src/oracle_types.jl` (included before
+  `simulate.jl`) so `SimResult` can carry an `OracleResult` field.
+  Functions stay in `src/oracle.jl` (included after `simulate.jl`).
+- New dep: `LinearAlgebra` (for `mul!`). `Statistics` moved from `extras`
+  to `deps` since `oracle.jl` calls `mean`/`std`.
+
+### Performance
+- Panmictic stabilizing run, `p_qtl ≈ 1000` (after filter), `n_perm =
+  1000`: ~2 s end-to-end (sim + oracle).
+- BLAS-internal multithreading; demes processed sequentially (one
+  `D_k = X_k'X_k` matmul per deme dominates).
+- Memory-path threshold default 5000 (vs R's 2000) reflects Julia BLAS
+  speed — tunable via `oracle_memory_path_threshold`.
+
+### Known follow-ups
+- Memory-path (per-chromosome matrix-free for `p_qtl > threshold`) is
+  currently a stub that re-uses the fast path. Above ~5000 `p_qtl` memory
+  pressure will be noticeable. Will land in a follow-up if/when needed.
+
 ## [0.5.0] — 2026-05-12
 
 Adds a third demography model for studying recent population structure.
@@ -219,7 +280,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/mtisla/PolygenicSim/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mtisla/PolygenicSim/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mtisla/PolygenicSim/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mtisla/PolygenicSim/compare/v0.2.0...v0.3.0

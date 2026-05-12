@@ -18,7 +18,9 @@ include("reproduction.jl")
 include("expansion.jl")
 include("io_plink.jl")
 include("io_native.jl")
+include("oracle_types.jl")
 include("summary.jl")
 include("simulate.jl")
+include("oracle.jl")
 
 end # module PolygenicSim

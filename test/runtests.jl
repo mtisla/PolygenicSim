@@ -1104,4 +1104,89 @@ end
     @test maximum(res_recent_load.deme_id) == 4
 end
 
+@testset "Oracle — B + delta-cross statistics" begin
+    # Smoke test: panmictic stabilizing run, oracle auto-computed via output_formats.
+    cfg = PS.Config(
+        N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+        n_qtl=100, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5, h2=0.5,
+        vs_over_vp0=10.0, selection_mode=:stabilizing,
+        ngen_eq=10,
+        output_formats=Symbol[:oracle],
+        output_prefix=tempname(),
+        oracle_n_perm=50,  # small to keep the test quick
+        oracle_windows_pct=[10.0, 25.0],
+        seed=UInt64(42), n_threads=1)
+    res = PS.simulate(cfg)
+    @test res.oracle !== nothing
+    or = res.oracle
+
+    # Scope ordering: [win_10pct, win_25pct, within, genome]
+    @test or.scope_names == ["win_10pct", "win_25pct", "within", "genome"]
+    @test or.windows_pct == [10.0, 25.0]
+    @test or.cutoffs == [20, 50]
+    @test or.p_qtl >= 3
+    @test or.n_total == 200
+    @test or.n_demes == 1
+    @test or.VA_meta > 0
+
+    # B at every scope should be finite
+    @test all(isfinite, or.B)
+    @test all(p -> 0 < p <= 1, or.B_perm_p)
+
+    # Δ_cross: every scope x cutoff cell has finite metadata
+    n_scopes = length(or.scope_names)
+    n_cut = length(or.cutoffs)
+    @test size(or.dc_delta) == (n_scopes, n_cut)
+    @test size(or.dc_perm_p) == (n_scopes, n_cut)
+    # When nL, nH >= 2 the dc fields are populated; permit some NaNs for cells
+    # that fall below the L/H thresholds at small p_qtl.
+    n_populated = count(isfinite, or.dc_delta)
+    @test n_populated >= 1  # at least one cell computed
+
+    # TSV side-effect: file exists and has expected header
+    tsv = cfg.output_prefix * ".oracle.tsv"
+    @test isfile(tsv)
+    lines = readlines(tsv)
+    @test lines[1] == "key\tvalue"
+    @test any(l -> startswith(l, "meta.p_qtl\t"), lines)
+    @test any(l -> startswith(l, "B_within\t"),   lines)
+    @test any(l -> startswith(l, "dc20_delta_within\t"), lines)
+
+    # Standalone API: same defaults, different n_perm/windows override.
+    or2 = PS.oracle_stats(res; n_perm=20, windows_pct=[5.0],
+                           seed=UInt64(99))
+    @test or2.windows_pct == [5.0]
+    @test or2.n_perm == 20
+    @test length(or2.B) == 3  # win_5pct + within + genome
+
+    # 2D structured stabilizing — verify deme-weighted path runs end-to-end.
+    cfg2D = PS.Config(
+        N=40, Ne=200, demography=:twoD_perp, grid_size=2, migration_rate=0.05,
+        n_chr=2, chr_len_bp=50_000,
+        n_qtl=60, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5, h2=0.5,
+        vs_over_vp0=10.0, selection_mode=:stabilizing,
+        ngen_eq=8,
+        output_formats=Symbol[:oracle],
+        output_prefix=tempname(),
+        oracle_n_perm=30, oracle_windows_pct=[20.0],
+        seed=UInt64(7), n_threads=1)
+    res2D = PS.simulate(cfg2D)
+    @test res2D.oracle !== nothing
+    @test res2D.oracle.n_demes == 4
+    @test res2D.oracle.n_total == 40 * 4
+    @test all(isfinite, res2D.oracle.B)
+
+    # When :oracle is absent, the field is nothing (no auto-compute).
+    cfg_noor = PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5, h2=0.5,
+        selection_mode=:neutral, ngen_eq=3,
+        output_formats=Symbol[], output_prefix=tempname(),
+        seed=UInt64(11), n_threads=1)
+    res_noor = PS.simulate(cfg_noor)
+    @test res_noor.oracle === nothing
+end
+
 end # @testset top-level
