@@ -62,7 +62,7 @@ end
 const _CONFIG_CATEGORIES = (
     "demographic" => (:N, :Ne, :grid_size, :migration_rate, :cline_amp,
                        :expansion_factor, :expansion_k_before_end),
-    "genomic"     => (:n_chr, :chr_len_bp, :n_qtl, :n_neutral, :r),
+    "genomic"     => (:n_chr, :chr_len_bp, :n_qtl, :n_neutral, :xovers_per_chr),
     "mutation"    => (:Uqtl, :Uneu, :init_distribution, :theta_override,
                        :asym_u, :asym_v),
     "effects"     => (:effect_distribution, :effect_scale, :maf_min),
@@ -103,6 +103,11 @@ end
     ("Bulmer_B",           s.bulmer_B),
     ("var_pheno",          s.var_pheno),
     ("h2_realized",        s.h2_realized),
+    # Realized per-bp rates (for cross-simulator comparison with SLiM, msprime, etc.).
+    ("mu_per_bp",          mu_per_bp(s.cfg)),
+    ("mu_per_qtl_site",    mu_per_qtl_site(s.cfg)),
+    ("mu_per_neutral_site",mu_per_neutral_site(s.cfg)),
+    ("recomb_per_bp",      recomb_per_bp(s.cfg)),
 )
 
 # Format a Config field value uniformly for both text and TSV.
@@ -406,6 +411,19 @@ function format_msd_report(s::SimSummary)
     end
     @printf(io, "  Convergence      | %10.4f\n", m.conv_rel)
     println(io, "  -----------------+-----------")
+    # Realized per-bp rates — for cross-simulator comparison with SLiM, etc.
+    println(io)
+    println(io, "  Realized per-bp rates:")
+    @printf(io, "    mu_per_bp           = %.3e   (total U / (n_chr · chr_len_bp))\n",
+            mu_per_bp(s.cfg))
+    @printf(io, "    mu_per_qtl_site     = %.3e   (Uqtl / n_qtl)\n",
+            mu_per_qtl_site(s.cfg))
+    if s.cfg.n_neutral > 0
+        @printf(io, "    mu_per_neutral_site = %.3e   (Uneu / n_neutral)\n",
+                mu_per_neutral_site(s.cfg))
+    end
+    @printf(io, "    recomb_per_bp       = %.3e   (xovers_per_chr / chr_len_bp)\n",
+            recomb_per_bp(s.cfg))
     return String(take!(io))
 end
 

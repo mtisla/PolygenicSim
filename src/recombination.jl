@@ -68,33 +68,42 @@ end
     sample_breakpoints!(scratch, rng, vt, cfg)
 
 Populate `scratch.break_idx` with sorted, *cumulative* (across chromosomes)
-break variant indices for one gamete. Steady-state: zero allocations.
+break variant indices for one gamete.
+
+Per chromosome `c`, draws `K_c ~ Poisson(cfg.xovers_per_chr)` crossovers
+and places each at a uniformly-chosen variant boundary in
+`[chr_start[c]+1, chr_end[c]]`. Sampling is with replacement: duplicate
+break positions in the same inter-marker interval cancel correctly inside
+the gamete kernel (two source toggles = identity), matching the biological
+parity of multiple crossovers in the same interval.
+
+Steady-state: zero allocations once `break_idx` has been sized.
 """
 function sample_breakpoints!(scratch::RecombScratch, rng::Xoshiro,
                               vt::VariantTable, cfg::Config)
     empty!(scratch.break_idx)
     n_chr = cfg.n_chr
-    c = 1
-    @inbounds while c <= n_chr
+    poisson_M = Poisson(cfg.xovers_per_chr)
+    @inbounds for c in 1:n_chr
         j_lo = Int(vt.chr_start[c])
         j_hi = Int(vt.chr_end[c])
-        if j_lo != 0
-            K_c = rand(rng, Binomial(cfg.chr_len_bp - 1, cfg.r))
-            if K_c > 0
-                empty!(scratch.xover_bp)
-                _fill_unique_random_int32!(scratch.xover_bp, rng, cfg.chr_len_bp - 1, K_c)
-                bp_view = view(vt.bp, j_lo:j_hi)
-                k = 1
-                while k <= K_c
-                    local_idx = searchsortedfirst(bp_view, scratch.xover_bp[k])
-                    global_idx = j_lo + local_idx - 1
-                    push!(scratch.break_idx, Int32(global_idx))
-                    k += 1
-                end
-            end
+        # Skip chromosomes with fewer than 2 variants — no inter-marker
+        # interval, so crossovers can't change the gamete.
+        (j_lo == 0 || j_lo >= j_hi) && continue
+        K_c = rand(rng, poisson_M)
+        K_c == 0 && continue
+        range_lo = j_lo + 1
+        range_hi = j_hi
+        # Place each crossover uniformly in [j_lo+1, j_hi]. Sample with
+        # replacement; duplicates cancel in the gamete kernel.
+        k = 1
+        while k <= K_c
+            push!(scratch.break_idx, Int32(rand(rng, range_lo:range_hi)))
+            k += 1
         end
-        c += 1
     end
+    # Cumulative sort so the gamete kernel can binary-search the per-chr range.
+    sort!(scratch.break_idx)
     return nothing
 end
 

@@ -223,6 +223,7 @@ code. Key answers:
 | Q60 | Summary interval | `n_int` controls trajectory snapshot frequency: default `-1` ⇒ auto = `max(1, ngen_eq÷100)` (~100 snapshots, ≲1% overhead); `0` ⇒ no trajectory; `k>0` ⇒ snapshot every k gens |
 | Q61 | Replication API | user-side loop; no `replicate()` in the package |
 | Q62 | Mutation parameterization | `U` replaced by `Uqtl` (per-gamete QTL-targeting rate) + optional `Uneu`; when `Uneu` is `nothing`, auto-derived as `Uqtl·n_neutral/n_qtl` (uniform per-site rate, matches `bulmer.slim`). `n_neutral = 0` (default) → QTL-only fast path, skips neutral pool entirely. Strict coupling: `Uneu > 0 ⟺ n_neutral > 0`. |
+| Q63 | Recombination parameterization | `r` (per-bp rate) replaced by `xovers_per_chr` (expected crossovers per chr per gamete = Morgan-length). `chr_len_bp` retained only for PLINK BIM bp coordinates. Kernel samples `K_c ~ Poisson(xovers_per_chr)` and places each crossover at a uniform variant boundary; duplicates cancel in the gamete kernel. Realized per-bp rates (`mu_per_bp`, `recomb_per_bp`) reported in summary for cross-simulator comparison. |
 
 ## File layout
 

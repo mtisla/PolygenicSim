@@ -11,10 +11,16 @@ Base.@kwdef struct Config
 
     # genome
     n_chr::Int = 10
-    chr_len_bp::Int = 1_000_000
+    chr_len_bp::Int = 1_000_000                    # only used for BIM/PLINK bp coordinates
     n_qtl::Int = 1_000
     n_neutral::Int = 0
-    r::Float64 = 1e-6                              # per-bp recombination rate
+    # Expected number of crossovers per chromosome per gamete per generation
+    # (the genetic-map length of the chromosome in Morgans). Replaces the old
+    # `r` (per-bp rate) parameterization — biologically stable across changes
+    # in `chr_len_bp` and avoids the `r · chr_len_bp` arithmetic. Each gamete
+    # draws K_c ~ Poisson(xovers_per_chr) crossovers per chromosome, placed at
+    # uniformly-chosen variant boundaries.
+    xovers_per_chr::Float64 = 1.0
 
     # mutation
     # Per-gamete mutation rates, split by site class (matches `bulmer.slim`):
@@ -203,6 +209,29 @@ when an explicit `Uneu` may differ from the auto-derived value.
 mu_per_site(cfg::Config) = mu_per_qtl_site(cfg)
 
 """
+    recomb_per_bp(cfg) -> Float64
+
+Realized per-bp recombination rate, equivalent to SLiM's `initializeRecombination
+Rate`. Derived as `xovers_per_chr / chr_len_bp` — the per-bp rate consistent
+with the configured Morgan-length per chromosome.
+"""
+@inline recomb_per_bp(cfg::Config) =
+    cfg.chr_len_bp > 0 ? cfg.xovers_per_chr / cfg.chr_len_bp : 0.0
+
+"""
+    mu_per_bp(cfg) -> Float64
+
+Realized per-bp mutation rate of the underlying genome model. Computed by
+spreading the total per-gamete mutation rate over `n_chr · chr_len_bp` base
+pairs: `(Uqtl + Uneu) / (n_chr · chr_len_bp)`. Use this for cross-simulator
+comparison against per-bp rates (e.g. SLiM's `initializeMutationRate`).
+"""
+@inline function mu_per_bp(cfg::Config)
+    total_bp = cfg.n_chr * cfg.chr_len_bp
+    return total_bp > 0 ? total_U(cfg) / total_bp : 0.0
+end
+
+"""
     validate(cfg) -> Nothing
 
 Throws `ArgumentError` if `cfg` violates Phase-1 invariants. Phase 4/5 fields
@@ -218,7 +247,8 @@ function validate(cfg::Config)
     n_variants(cfg) > 0 || throw(ArgumentError("n_qtl + n_neutral must be > 0"))
     n_variants(cfg) <= cfg.n_chr * cfg.chr_len_bp ||
         throw(ArgumentError("n_qtl + n_neutral exceeds total bp ($(cfg.n_chr * cfg.chr_len_bp))"))
-    0 <= cfg.r <= 1 || throw(ArgumentError("r must be in [0, 1]"))
+    cfg.xovers_per_chr >= 0 ||
+        throw(ArgumentError("xovers_per_chr must be >= 0"))
     cfg.Uqtl >= 0 || throw(ArgumentError("Uqtl must be >= 0"))
     cfg.Uneu === nothing || cfg.Uneu::Float64 >= 0 ||
         throw(ArgumentError("Uneu must be >= 0 when set"))
@@ -293,4 +323,5 @@ end
 
 export Config, n_variants, n_demes, n_total, theta, theta_qtl, theta_neu,
        mu_per_site, mu_per_qtl_site, mu_per_neutral_site,
+       mu_per_bp, recomb_per_bp,
        effective_Uneu, total_U, validate

@@ -155,7 +155,7 @@ function write_bim(path::AbstractString, vt::VariantTable, cfg::Config)
         for j in 1:length(vt)
             chr = Int(vt.chr[j])
             bp  = Int(vt.bp[j])
-            cm  = bp * cfg.r * 100.0    # centiMorgans
+            cm  = bp * recomb_per_bp(cfg) * 100.0    # centiMorgans
             snp_id = "chr$(chr)_$(bp)"
             # cols: chr  snp_id  cm  bp  A1  A2
             println(io, chr, "\t", snp_id, "\t", cm, "\t", bp, "\t1\t0")

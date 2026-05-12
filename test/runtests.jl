@@ -66,7 +66,7 @@ end
     # U=0 ⇒ θ=0 ⇒ invalid Beta(0,0); supply theta_override just for the init
     # draw of vt — we overwrite the haplotype state below anyway.
     cfg = PS.Config(N=500, Ne=500, n_chr=1, chr_len_bp=10_000,
-                     r=0.0, n_qtl=100, n_neutral=0, Uqtl=0.0,
+                     xovers_per_chr=0.0, n_qtl=100, n_neutral=0, Uqtl=0.0,
                      theta_override=0.5,
                      selection_mode=:neutral, ngen_eq=1, ngen_dir=0,
                      seed=UInt64(11), output_formats=Symbol[])
@@ -98,25 +98,22 @@ end
 # Test 4: Haldane recombination fraction
 # ---------------------------------------------------------------------------
 @testset "Test 4 — Haldane recomb fraction" begin
-    # Two markers per chr. We pick chr_len_bp such that the two markers
-    # are at specified bp positions ⇒ Morgan distance = (bp_diff) * r.
-    # Empirical r̂ from a custom gamete-generation experiment should match
-    # Haldane: r(d) = (1 - exp(-2d)) / 2.
+    # With 2 markers on a single chromosome, the recombination fraction
+    # between them is the parity probability of Poisson(M) crossovers, i.e.
+    #   P(odd K) = (1 - exp(-2M)) / 2
+    # — exactly Haldane's mapping with M = xovers_per_chr Morgans.
+    # We vary M and check the empirical recombinant fraction matches the
+    # closed-form Haldane prediction.
     function empirical_recomb_fraction(d_M::Float64; n_meioses::Int=20_000, seed=UInt64(99))
-        # one chromosome 1.0 Morgan; r = 1 / chr_len_bp = 1e-6
-        chr_len_bp = 1_000_000
-        r_per_bp = 1.0 / chr_len_bp
-        cfg = PS.Config(N=2, Ne=2, n_chr=1, chr_len_bp=chr_len_bp, r=r_per_bp,
+        cfg = PS.Config(N=2, Ne=2, n_chr=1, chr_len_bp=1_000_000,
+                         xovers_per_chr=d_M,
                          n_qtl=2, n_neutral=0, Uqtl=0.0,
                          selection_mode=:neutral, ngen_eq=0, ngen_dir=0,
                          seed=seed, output_formats=Symbol[])
         L = 2
-        # Build vt by hand to control marker positions
-        # Marker A at bp 1, Marker B at bp = 1 + d_M / r
-        bpA = Int32(1)
-        bpB = Int32(round(1 + d_M / r_per_bp))
+        # 2 markers on chr 1 — bp positions are only for cosmetics now.
         chr   = Int32[1, 1]
-        bp    = Int32[bpA, bpB]
+        bp    = Int32[1, cfg.chr_len_bp]
         is_qtl = falses(L); is_qtl[1] = true; is_qtl[2] = true
         α = [1.0, 1.0]
         chr_start = Int32[1]; chr_end = Int32[2]
@@ -124,16 +121,12 @@ end
 
         # parent state: hap1 = (0, 1), hap2 = (1, 0). Single individual.
         pop = PS.PackedPop(L, 1)
-        # Marker A bit
-        wA = 1; bA = 0
-        # Marker B bit; depends on whether L=2 fits in one word — yes.
-        wB = 1; bB = 1
-        pop.H[wA, 1] = UInt64(0)                       # hap1 marker A = 0
-        pop.H[wB, 1] |= (UInt64(1) << bB)              # hap1 marker B = 1
-        pop.H[wA, 2] = UInt64(0); pop.H[wA, 2] |= (UInt64(1) << bA)  # hap2 marker A = 1
-        pop.H[wB, 2] = pop.H[wB, 2] & ~(UInt64(1) << bB)             # hap2 marker B = 0
+        wA = 1; bA = 0; wB = 1; bB = 1
+        pop.H[wA, 1] = UInt64(0)
+        pop.H[wB, 1] |= (UInt64(1) << bB)
+        pop.H[wA, 2] = UInt64(0); pop.H[wA, 2] |= (UInt64(1) << bA)
+        pop.H[wB, 2] = pop.H[wB, 2] & ~(UInt64(1) << bB)
 
-        # Generate n_meioses gametes from this single parent, count recombinants.
         rng = PS.make_master_rng(cfg)
         scratch_recomb = PS.RecombScratch()
         g = zeros(UInt64, 1)
@@ -142,9 +135,6 @@ end
             PS.gamete_packed!(g, pop.H, 1, vt, cfg, rng, scratch_recomb)
             bA_val = (g[1] >> bA) & UInt64(1)
             bB_val = (g[1] >> bB) & UInt64(1)
-            # parent's haplotypes have A and B on opposite sides:
-            # non-recomb LL: (A=0, B=1); RR: (A=1, B=0).
-            # recomb LR: (A=0, B=0); RL: (A=1, B=1).
             if bA_val == bB_val
                 n_recomb += 1
             end
@@ -155,7 +145,6 @@ end
     for d in (0.01, 0.1, 0.5, 1.0)
         rhat = empirical_recomb_fraction(d; n_meioses=8_000)
         rtrue = (1.0 - exp(-2 * d)) / 2.0
-        # Tolerance: generous due to Monte Carlo noise at 8k meioses
         @test abs(rhat - rtrue) < 0.025
     end
 end
@@ -226,7 +215,7 @@ end
     # meiosis per chromosome; with 20 chromosomes this gives high effective
     # independence across sites.
     N = 250; T = 30
-    base = (N=N, Ne=N, n_chr=20, chr_len_bp=100_000, r=1e-5,
+    base = (N=N, Ne=N, n_chr=20, chr_len_bp=100_000, xovers_per_chr=1.0,
              n_qtl=4_000, n_neutral=0, Uqtl=0.0,
              theta_override=10.0,
              selection_mode=:neutral, ngen_eq=T, ngen_dir=0,

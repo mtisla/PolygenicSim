@@ -198,8 +198,8 @@ Mostly aligned with the bulmer reference pipeline:
 |---|---|
 | `N`, `Ne` | 5000 |
 | `n_chr` | 10 |
-| `chr_len_bp` | 1,000,000 |
-| `r` | 1e-6 (1 Morgan/chr) |
+| `chr_len_bp` | 1,000,000  (only used to emit bp coordinates in PLINK BIM output) |
+| `xovers_per_chr` | 1.0  (expected crossovers per chr per gamete; Morgan-length of the chromosome) |
 | `n_qtl`, `n_neutral` | 1000, 0 |
 | `Uqtl` | 0.02 (haploid gamete rate of QTL-targeting mutations) |
 | `Uneu` | `nothing` (auto: `Uqtl·n_neutral/n_qtl` — uniform per-site rate, matches `bulmer.slim`) |
