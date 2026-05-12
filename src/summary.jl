@@ -426,9 +426,8 @@ function format_constraint_checks(s::SimSummary)
                m.sqrt_2NU < 20 ? "moderate polygenicity" : "high polygenicity"
     @printf(io, " 1. Polygenicity: sqrt(2NU) = %.2f (%s) %s\n",
             m.sqrt_2NU, poly_lab, m.sqrt_2NU > 10 ? "OK" : "WARNING")
-    # 2. Mutation load
-    @printf(io, " 2. Mutation load: U = %.4f <= 0.02 %s\n",
-            s.cfg.Uqtl, s.cfg.Uqtl <= 0.02 ? "OK" : "WARNING")
+    # 2. Mutation load (informational — no threshold check).
+    @printf(io, " 2. Mutation load: Uqtl = %.4f\n", s.cfg.Uqtl)
     if m.neutral
         println(io, " 3-10. Skipped (neutral regime, VS=INF)")
         return String(take!(io))
