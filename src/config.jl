@@ -72,14 +72,27 @@ Base.@kwdef struct Config
     expansion_k_before_end::Int = 0
 
     # phases
-    # `ngen` is the universal "number of generations to simulate" knob —
-    # applies to :neutral, :stabilizing, and :directional regimes. For
-    # :directional, the run is two-phase: `ngen` settling generations
-    # followed by `ngen_dir` post-shift generations (total = ngen + ngen_dir).
-    # When `load_from` is set the loaded state IS the settling phase, so
-    # `ngen` is ignored and only `ngen_dir` runs.
-    ngen::Int = 0
+    # Two ways to specify run length — use one or the other, not both.
+    #
+    # (1) Two-phase model — the original setup. `ngen_eq` is the settling/
+    #     equilibration phase (neutral drift-mutation eq for :neutral; MSD
+    #     eq for :stabilizing; pre-shift settling for :directional at
+    #     `directional_start_from`). `ngen_dir` is the post-shift extension
+    #     for :directional. Total gens = ngen_eq + ngen_dir. When `load_from`
+    #     is set, the loaded state IS the settled eq, so `ngen_eq` is
+    #     ignored and only `ngen_dir` runs.
+    #
+    # (2) Single-knob model — set `ngen > 0` instead. The simulator runs
+    #     for exactly `ngen` generations from gen 0 under the chosen
+    #     `selection_mode`, with no pre-shift settling. For :directional,
+    #     the shift fires at gen 1 so the entire run is under directional
+    #     pressure. With `load_from` set, `ngen` is the post-load run length.
+    #
+    # Setting both `ngen > 0` and `ngen_eq > 0` (or `ngen_dir > 0`) is an
+    # error — pick one model per run.
+    ngen_eq::Int = 0
     ngen_dir::Int = 0
+    ngen::Int = 0
 
     # checkpoints — Vector{Int} (absolute gens) or Vector{Float64} (multiples of t½)
     checkpoints::Union{Vector{Int},Vector{Float64},Nothing} = nothing
@@ -91,7 +104,7 @@ Base.@kwdef struct Config
     # diagnostics
     # n_int controls the trajectory-snapshot interval (in generations) for
     # convergence diagnostics in the summary:
-    #   n_int <  0  ⇒ auto: `max(1, ngen ÷ 100)` — targets ~100 snapshots
+    #   n_int <  0  ⇒ auto: `max(1, ngen_eq ÷ 100)` — targets ~100 snapshots
     #                 over the whole run, ≲1% overhead regardless of run
     #                 length. Tail-window diagnostics (last_10 / prior_10
     #                 mean comparison) are unchanged by snapshot count once
@@ -288,8 +301,12 @@ function validate(cfg::Config)
         f in (:plink, :native, :summary) ||
             throw(ArgumentError("invalid output format: $f"))
     end
-    cfg.ngen >= 0 || throw(ArgumentError("ngen must be >= 0"))
+    cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))
+    cfg.ngen >= 0 || throw(ArgumentError("ngen must be >= 0"))
+    if cfg.ngen > 0 && (cfg.ngen_eq > 0 || cfg.ngen_dir > 0)
+        throw(ArgumentError("set either `ngen` (single-knob mode) OR `ngen_eq`/`ngen_dir` (two-phase mode), not both"))
+    end
     cfg.n_int >= -1 || throw(ArgumentError("n_int must be >= -1 (-1 = auto)"))
     # Phase 4 invariants (spatial)
     cfg.grid_size >= 1 ||

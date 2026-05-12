@@ -9,27 +9,49 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-05-12
+## [0.4.0] — 2026-05-12
+
+Reverts the v0.3.0 `ngen_eq` → `ngen` rename based on user feedback that
+`ngen_eq` is the informative name for the equilibration phase (works for
+both neutral eq and stabilizing MSD eq). Instead, adds `ngen` as an
+**additional** single-knob mode that runs from gen 0 for `ngen`
+generations under any `selection_mode`. The two modes are mutually
+exclusive per run.
 
 ### Changed
-- **BREAKING — generations param renamed**: `ngen_eq` → `ngen`. The new
-  name reflects what the parameter actually is: the universal "number of
-  generations to simulate", applicable to **all** selection regimes
-  (`:neutral`, `:stabilizing`, `:directional`). For directional runs,
-  `ngen_dir` still extends the simulation past the shift, so total
-  generations = `ngen + ngen_dir`. When `load_from` is set, `ngen` is
-  ignored and only `ngen_dir` runs.
-- Internal local `ngen_eq_eff` renamed to `ngen_eff`.
+- **BREAKING — revert `ngen_eq` rename**. `ngen_eq` is restored as the
+  canonical equilibration-phase knob; `ngen_dir` is restored as the
+  directional post-shift extension. Scripts written against v0.3.0 need
+  the inverse migration:
+  ```bash
+  perl -i -pe 's/\bngen\b/ngen_eq/g' yourscript.jl
+  ```
+- **`n_int = -1` auto** now targets `max(1, total_gens ÷ 100)` instead of
+  `max(1, ngen_eq ÷ 100)`. ~100 snapshots are spread over the full run,
+  not just the settling phase. Behaviorally equivalent when
+  `ngen_dir = 0`; for runs with both settling and post-shift phases,
+  snapshots now appear in both.
 
 ### Added
-- README "Generations" section with a regime-vs-gen-count table.
-- `ngen` and `ngen_dir` rows in the defaults table.
+- **`ngen::Int = 0`** Config field — single-knob run-length mode.
+  Semantics:
+  - `:neutral` / `:stabilizing` — runs `ngen` gens with no settling.
+  - `:directional` — runs `ngen` gens with the shift active from gen 1
+    (entire run under post-shift pressure; no pre-shift reference phase).
+  - With `load_from` set, `ngen` is the post-load run length.
+  - Mutually exclusive with `ngen_eq > 0` and `ngen_dir > 0` (validated).
+- README "Generations" section documents both modes side-by-side with
+  worked examples.
+- 10 new tests covering `ngen` validation (mutual exclusion against
+  `ngen_eq` / `ngen_dir`), exact-gen-count behavior for all three
+  regimes, directional-shift-at-gen-1 behavior, `load_from` interaction,
+  and `ngen = 0` no-op.
 
-### Migration
-Scripts written against v0.2.0 need a global `ngen_eq` → `ngen` rename:
-```bash
-perl -i -pe 's/\bngen_eq\b/ngen/g' yourscript.jl
-```
+## [0.3.0] — 2026-05-12 — yanked
+
+Renamed `ngen_eq` → `ngen`. Reverted in v0.4.0 because `ngen_eq` is
+informative (settling-phase intent). The v0.3.0 tag is left in place for
+git history; the v0.4.0 release supersedes it.
 
 ## [0.2.0] — 2026-05-12
 
@@ -148,7 +170,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mtisla/PolygenicSim/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mtisla/PolygenicSim/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mtisla/PolygenicSim/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mtisla/PolygenicSim/releases/tag/v0.1.0

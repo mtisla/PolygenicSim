@@ -30,8 +30,8 @@ Workflow:
 2. Build/load initial state (`load_from` > `load_plink_prefix` > fresh init).
 3. Compute V_E from realized V_A_init and h².
 4. Plan two sub-phases:
-    - Phase A ("settling" / pre-shift): gens 1..ngen_eff
-    - Phase B ("post-shift" / experimental): gens ngen_eff+1..total_gens
+    - Phase A ("settling" / pre-shift): gens 1..ngen_eq_eff
+    - Phase B ("post-shift" / experimental): gens ngen_eq_eff+1..total_gens
 5. Run the generation loop, emitting outputs at user-specified checkpoints.
 6. Optionally compile end-of-sim summary.
 """
@@ -60,12 +60,23 @@ function simulate(cfg::Config)
 
     # ---- phase plan -----------------------------------------------------
     is_loaded = cfg.load_from !== nothing || cfg.load_plink_prefix !== nothing
-    ngen_eff = is_loaded ? 0 : cfg.ngen
-    if is_loaded && cfg.ngen > 0
-        @info "load_from/load_plink_prefix is set; ignoring cfg.ngen=$(cfg.ngen)."
+    # Two ways to specify run length (validated mutually exclusive in `validate`):
+    #   (a) ngen > 0  — single-knob mode. All gens run as Phase B from gen 1
+    #       so :directional gets shift applied immediately; :neutral and
+    #       :stabilizing Phase B is identical to Phase A (no shift), so the
+    #       net behavior is "run ngen gens under selection_mode".
+    #   (b) ngen_eq + ngen_dir — two-phase model. Phase A settles for ngen_eq
+    #       gens, Phase B runs for ngen_dir gens. With load_from, Phase A is
+    #       skipped (loaded state IS the settled eq).
+    ngen_eq_eff, ngen_dir_eff = if cfg.ngen > 0
+        (0, cfg.ngen)
+    else
+        (is_loaded ? 0 : cfg.ngen_eq, cfg.ngen_dir)
     end
-    ngen_dir_eff = cfg.ngen_dir
-    total_gens = ngen_eff + ngen_dir_eff
+    if is_loaded && cfg.ngen_eq > 0
+        @info "load_from/load_plink_prefix is set; ignoring cfg.ngen_eq=$(cfg.ngen_eq)."
+    end
+    total_gens = ngen_eq_eff + ngen_dir_eff
     phase_A, phase_B = _build_phase_plan(cfg, mean_A0, V_P0, Vs, sigma_E, layout)
 
     # ---- checkpoint resolution ------------------------------------------
@@ -74,11 +85,11 @@ function simulate(cfg::Config)
     paths = String[]
 
     # ---- summary trajectory buffer --------------------------------------
-    # Resolve n_int sentinel: -1 → auto (target ~100 snapshots = max(1, ngen÷100))
+    # Resolve n_int sentinel: -1 → auto (target ~100 snapshots over total_gens).
     # 0 ⇒ no snapshots (fastest); >0 ⇒ snapshot every n_int gens.
     conv_buffer = NamedTuple{(:gen, :B, :var_A, :mean_p, :var_p),
                                 Tuple{Int,Float64,Float64,Float64,Float64}}[]
-    n_int = cfg.n_int < 0 ? max(1, ngen_eff ÷ 100) : cfg.n_int
+    n_int = cfg.n_int < 0 ? max(1, total_gens ÷ 100) : cfg.n_int
     p_buf = zeros(Float64, L)
     # Per-deme work buffers (resized after expansion).
     mean_buf = zeros(Float64, layout.n_demes)
@@ -96,9 +107,9 @@ function simulate(cfg::Config)
     step! = pop isa PackedPop ? step_generation_packed! : step_generation_dense!
     expand_step! = pop isa PackedPop ? step_generation_packed_expand! : step_generation_dense_expand!
     for gen in 1:total_gens
-        in_phase_A = gen <= ngen_eff
+        in_phase_A = gen <= ngen_eq_eff
         phase = in_phase_A ? phase_A : phase_B
-        gen_in_phase = in_phase_A ? gen : gen - ngen_eff
+        gen_in_phase = in_phase_A ? gen : gen - ngen_eq_eff
         if gen == expansion_gen
             expand_step!(pop, vt, cfg, phase, scratch, rng, gen_in_phase, expand_factor)
             # Rebuild deme_id for the new (larger) population. The number of

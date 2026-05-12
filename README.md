@@ -61,7 +61,7 @@ from the saved state:
 ```julia
 # 1. Run + save eq (stabilizing or :md/:msd settling)
 PS.simulate(PS.Config(
-    selection_mode = :stabilizing, ngen = 25,
+    selection_mode = :stabilizing, ngen_eq = 25,
     output_formats = Symbol[:native, :summary],
     output_prefix = "eq", seed = UInt64(1),
     # ... rest of cfg
@@ -140,24 +140,42 @@ LD-window heritability methods) see realistic LD decay over bp distance.
 
 ## Generations
 
-A single knob, `ngen`, controls the number of generations to simulate
-and applies to **all selection regimes**:
+Two ways to specify run length — pick one per run.
 
-| Regime           | Total generations simulated         |
-|------------------|-------------------------------------|
-| `:neutral`       | `ngen`                              |
-| `:stabilizing`   | `ngen`                              |
-| `:directional`   | `ngen` settling + `ngen_dir` post-shift |
+### Two-phase model (`ngen_eq` + optional `ngen_dir`)
 
-For directional runs, `ngen_dir` extends the simulation past the shift
-event. When `load_from` is set the loaded state IS the settling-phase
-output, so `ngen` is ignored and only `ngen_dir` runs.
+`ngen_eq` runs an equilibration phase appropriate to the regime — neutral
+drift–mutation eq for `:neutral`, MSD eq for `:stabilizing`, pre-shift
+settling at `:md` / `:msd` for `:directional`. `ngen_dir` extends a
+`:directional` run past the shift event.
+
+| Regime           | Total generations simulated  |
+|------------------|------------------------------|
+| `:neutral`       | `ngen_eq`                    |
+| `:stabilizing`   | `ngen_eq`                    |
+| `:directional`   | `ngen_eq` + `ngen_dir`       |
+
+When `load_from` is set, the loaded state IS the settled eq, so `ngen_eq`
+is ignored and only `ngen_dir` runs.
+
+### Single-knob model (`ngen`)
+
+Set `ngen > 0` to run for exactly `ngen` generations from gen 0 under
+whichever `selection_mode` is set, with no pre-shift settling phase. For
+`:directional`, the shift fires at gen 1 so the entire run is under
+directional pressure. With `load_from` set, `ngen` is the post-load run
+length. Setting both `ngen` and `ngen_eq` / `ngen_dir` is an error.
+
+```julia
+PS.Config(selection_mode = :directional, shift_sd = 2.0, ngen = 50, ...)
+# 50 gens, every gen under post-shift selection
+```
 
 ## Selection regimes
 
 - `:neutral` — V_S = ∞; fitness uniform; pure mutation–drift dynamics.
 - `:stabilizing` — V_S finite; θ fixed at the gen-0 mean breeding value (per deme); Bulmer effect develops.
-- `:directional` — V_S finite; θ shifts by `shift_sd · σ_P_0` (or `sel_grad · V_S`) at gen `t_shift`. Two-phase: `ngen` settling at `:md` or `:msd`, then `ngen_dir` post-shift. When `load_from` is set, the loaded state is the settled eq and `ngen` is skipped (only `ngen_dir` runs).
+- `:directional` — V_S finite; θ shifts by `shift_sd · σ_P_0` (or `sel_grad · V_S`) at gen `t_shift`. In two-phase mode: `ngen_eq` settling at `:md` or `:msd`, then `ngen_dir` post-shift. In single-knob mode (`ngen`): no settling, shift active from gen 1. When `load_from` is set, the loaded state is the settled eq and `ngen_eq` is skipped (only `ngen_dir` or `ngen` runs).
 
 ## Spatial structure
 
@@ -196,7 +214,7 @@ For fixed seed and matching `n_threads`, both backends produce **bit-identical**
 
 - **PLINK 1 trio** (`{prefix}_gen{t}.bed/bim/fam`) plus a sibling `{prefix}_gen{t}.effects.tsv` with per-variant effect sizes. IIDs are `p{deme}_{i}` (1-indexed) so loaders can recover deme assignments.
 - **Native restart** (`{prefix}_gen{t}.psim.zst`) — phase-preserving full state with bit-packed haplotypes, variant table, effects, and deme assignments. zstd-compressed (level 3).
-- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, plus a convergence-diagnostics block and intermediate trajectory log of (gen, B, V_A, mean_p, var_p). Snapshot frequency is controlled by `n_int`: the default `-1` auto-resolves to `max(1, ngen ÷ 100)` so you get ~100 trajectory points regardless of run length (≲1% overhead); set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k` generations explicitly.
+- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, plus a convergence-diagnostics block and intermediate trajectory log of (gen, B, V_A, mean_p, var_p). Snapshot frequency is controlled by `n_int`: the default `-1` auto-resolves to `max(1, total_gens ÷ 100)` so you get ~100 trajectory points regardless of run length (≲1% overhead); set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k` generations explicitly.
 
 ## Equilibrium diagnostics
 
@@ -239,7 +257,7 @@ PS.simulate(PS.Config(load_plink_prefix = "external", load_demography = :twoD, .
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-292 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
+302 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
 Haldane recombination at d ∈ {0.01, 0.1, 0.5, 1.0} M, cross-chr LD, neutral
 drift, selection regimes), Phase-2 zero-allocation kernels and chunk
 determinism, Phase-4 spatial structure (DemeLayout, m=0 isolation vs m=high
@@ -247,8 +265,10 @@ panmictic asymptote, cline gradient), Phase-5 expansion (size scaling
 including fractional factors, mean-AF preservation, stepping-stone
 integration, checkpoint correctness), weighted-average per-deme diagnostics
 for 2D, the `Uqtl/Uneu` auto-derivation and validation, the QTL-only fast
-path, and a regression test asserting threaded reductions match the
-`Statistics` reference under `JULIA_NUM_THREADS=4`.
+path, a regression test asserting threaded reductions match the
+`Statistics` reference under `JULIA_NUM_THREADS=4`, and the new
+single-knob `ngen` mode (validation against the two-phase knobs and
+shift-from-gen-1 behavior for directional).
 
 ## Defaults
 
@@ -278,8 +298,9 @@ Mostly aligned with the bulmer reference pipeline:
 | `output_formats` | `[:plink]` |
 | `init_distribution` | `:beta_mutation_drift` |
 | `maf_min` | 0.0 |
-| `ngen` | 0 (number of generations to simulate; all regimes) |
+| `ngen_eq` | 0 (settling generations — neutral eq, MSD, or pre-shift) |
 | `ngen_dir` | 0 (additional post-shift gens for `:directional` only) |
+| `ngen` | 0 (alternative single-knob run length; shift at gen 1 for directional. Mutually exclusive with `ngen_eq`/`ngen_dir`) |
 
 All overridable via the `Config(; ...)` keyword constructor.
 

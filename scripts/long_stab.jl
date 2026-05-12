@@ -22,7 +22,7 @@ function main()
         h2          = 0.5,
         vs_over_vp0 = 20.0,
         selection_mode = :stabilizing,
-        ngen     = 25_000,        # 5N
+        ngen_eq     = 25_000,        # 5N
         seed        = UInt64(1),
         backend     = :packed,
         output_formats = Symbol[],
@@ -83,7 +83,7 @@ function main()
     t_start = time()
     last_t = t_start
     last_gen = 0
-    total_gens = cfg.ngen
+    total_gens = cfg.ngen_eq
 
     step! = cfg.backend === :dense ? PS.step_generation_dense! : PS.step_generation_packed!
     for gen in 1:total_gens
