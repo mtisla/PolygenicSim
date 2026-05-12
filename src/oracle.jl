@@ -480,6 +480,106 @@ function _delta_cross_one(R_meta::Matrix{T}, α::Vector{T},
             Z = Z, perm_p = p_perm)
 end
 
+# rho_B_logitp — continuous Pearson correlation of pair-level B_jk against
+# logit(p_pol_j). Sign-flip null is efficient because under perm:
+#   B_jk → s_j · s_k · B_jk
+# logit(p_pol_j) is invariant. So Σ y², mean(y), var(y), and Σ B_jk² are all
+# invariant; only Σ B_jk and Σ B_jk · y_j shift. These can be computed for
+# all n_perm sign vectors at once via a single (C · S) gemm.
+function _rho_B_logitp_one(R_meta::Matrix{T}, α::Vector{T},
+                              p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                              mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    eps_clamp = 1.0e-3   # logit-clamp away from 0 and 1
+    logitp = Vector{Float64}(undef, p)
+    @inbounds for j in 1:p
+        pj = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
+        pj = clamp(pj, eps_clamp, 1.0 - eps_clamp)
+        logitp[j] = log(pj / (1.0 - pj))
+    end
+    # Build C[j,k] = α_j · R_meta[j,k] · α_k · mask[j,k]; diag(C) = 0.
+    C = Matrix{T}(undef, p, p)
+    scope_count = zeros(Int, p)
+    n_pairs = 0
+    sum_C2 = 0.0
+    sum_C  = 0.0
+    sum_C_y = 0.0
+    @inbounds for k in 1:p
+        for j in 1:p
+            if j != k && mask[j, k]
+                v = α[j] * R_meta[j, k] * α[k]
+                C[j, k] = v
+                vd = Float64(v)
+                sum_C   += vd
+                sum_C2  += vd * vd
+                sum_C_y += vd * logitp[j]
+                scope_count[j] += 1
+                n_pairs += 1
+            else
+                C[j, k] = zero(T)
+            end
+        end
+    end
+    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN,
+               perm_p = NaN, n_pairs = n_pairs)
+    n_pairs < 3 && return nan_out
+
+    # mean_y and var_y depend on the scope-restricted distribution of y_pair
+    # = logitp[j_pair]; each j contributes scope_count[j] times.
+    sum_y_scoped = 0.0
+    sum_y2_scoped = 0.0
+    @inbounds for j in 1:p
+        cnt = scope_count[j]
+        sum_y_scoped  += logitp[j] * cnt
+        sum_y2_scoped += logitp[j]^2 * cnt
+    end
+    mean_y = sum_y_scoped / n_pairs
+    var_y  = sum_y2_scoped / n_pairs - mean_y^2
+    var_y < 1e-30 && return nan_out
+
+    # Observed correlation
+    mean_x_obs = sum_C / n_pairs
+    var_x_obs  = sum_C2 / n_pairs - mean_x_obs^2
+    cov_xy_obs = sum_C_y / n_pairs - mean_x_obs * mean_y
+    rho_obs = (var_x_obs > 1e-30) ?
+              cov_xy_obs / sqrt(var_x_obs * var_y) : NaN
+
+    # Permutation null. C · S gives the per-perm row sums Σ_k C[j,k] · s_k.
+    n_perm = size(raw_signs, 2)
+    CS = Matrix{T}(undef, p, n_perm)
+    mul!(CS, C, raw_signs)
+    rho_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        # Σ s_j s_k C_jk     = Σ_j s_j · CS[j, b]
+        # Σ s_j s_k C_jk y_j = Σ_j s_j · CS[j, b] · y_j
+        sum_C_perm = zero(T)
+        sum_Cy_perm = 0.0
+        @simd for j in 1:p
+            sj_csjb = raw_signs[j, b] * CS[j, b]
+            sum_C_perm  += sj_csjb
+            sum_Cy_perm += logitp[j] * Float64(sj_csjb)
+        end
+        mean_x_perm = Float64(sum_C_perm) / n_pairs
+        cov_perm    = sum_Cy_perm / n_pairs - mean_x_perm * mean_y
+        var_x_perm  = sum_C2 / n_pairs - mean_x_perm^2
+        rho_null[b] = (var_x_perm > 1e-30) ?
+                       cov_perm / sqrt(var_x_perm * var_y) : NaN
+    end
+
+    valid = filter(!isnan, rho_null)
+    if isnan(rho_obs) || isempty(valid)
+        return nan_out
+    end
+    null_mean = mean(valid)
+    null_sd   = length(valid) > 1 ? std(valid; corrected=true) : 0.0
+    Z = null_sd > 1e-30 ? (rho_obs - null_mean) / null_sd : NaN
+    abs_dev_obs = abs(rho_obs - null_mean)
+    perm_p = (1 + count(r -> !isnan(r) && abs(r - null_mean) >= abs_dev_obs,
+                          rho_null)) / (n_perm + 1)
+    return (rho = rho_obs, null_mean = null_mean, null_sd = null_sd,
+            Z = Z, perm_p = perm_p, n_pairs = n_pairs)
+end
+
 """
     oracle_stats(result; kwargs...) -> OracleResult
 
@@ -537,7 +637,10 @@ function oracle_stats(result::SimResult;
             fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut),
             fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut),
             fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut),
-            fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut))
+            fill(NaN, n_scopes, n_cut), fill(NaN, n_scopes, n_cut),
+            fill(NaN, n_scopes), fill(NaN, n_scopes),
+            fill(NaN, n_scopes), fill(NaN, n_scopes),
+            fill(NaN, n_scopes), zeros(Int, n_scopes))
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -587,6 +690,13 @@ function oracle_stats(result::SimResult;
     dc_Z         = fill(NaN, n_scopes, n_cut)
     dc_perm_p    = fill(NaN, n_scopes, n_cut)
 
+    rho_obs   = fill(NaN, n_scopes)
+    rho_nm    = fill(NaN, n_scopes)
+    rho_nsd   = fill(NaN, n_scopes)
+    rho_Z     = fill(NaN, n_scopes)
+    rho_pp    = fill(NaN, n_scopes)
+    rho_np    = zeros(Int, n_scopes)
+
     if !failed
         for (ci, co) in enumerate(cutoffs)
             for s in 1:n_scopes
@@ -606,6 +716,16 @@ function oracle_stats(result::SimResult;
                 dc_perm_p[s, ci]    = r.perm_p
             end
         end
+        # ρ_B_logitp — continuous correlation test (one per scope).
+        for s in 1:n_scopes
+            r = _rho_B_logitp_one(R_meta, α, p_pool, raw_signs, masks[s])
+            rho_obs[s] = r.rho
+            rho_nm[s]  = r.null_mean
+            rho_nsd[s] = r.null_sd
+            rho_Z[s]   = r.Z
+            rho_pp[s]  = r.perm_p
+            rho_np[s]  = r.n_pairs
+        end
     end
 
     return OracleResult(windows_pct, scope_names, cutoffs, p, N_total,
@@ -613,7 +733,8 @@ function oracle_stats(result::SimResult;
                          B, B_perm_p,
                          dc_nL, dc_nH, dc_nPLH, dc_nPLL, dc_nPHH,
                          dc_BLH, dc_BLL, dc_BHH, dc_delta,
-                         dc_null_mean, dc_null_sd, dc_Z, dc_perm_p)
+                         dc_null_mean, dc_null_sd, dc_Z, dc_perm_p,
+                         rho_obs, rho_nm, rho_nsd, rho_Z, rho_pp, rho_np)
 end
 
 """
@@ -654,6 +775,18 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult)
                 for (fname, fmat) in dc_fields
                     println(io, "dc", co, "_", fname, "_", name, "\t", fmat[s, ci])
                 end
+            end
+        end
+        # rho_B_logitp — one set per scope.
+        rho_fields = (("rho",       oracle.rho_B_logitp),
+                       ("null_mean", oracle.rho_B_logitp_null_mean),
+                       ("null_sd",   oracle.rho_B_logitp_null_sd),
+                       ("Z",         oracle.rho_B_logitp_Z),
+                       ("perm_p",    oracle.rho_B_logitp_perm_p),
+                       ("n_pairs",   oracle.rho_B_logitp_n_pairs))
+        for (s, name) in enumerate(oracle.scope_names)
+            for (fname, fvec) in rho_fields
+                println(io, "rho_B_logitp_", fname, "_", name, "\t", fvec[s])
             end
         end
     end

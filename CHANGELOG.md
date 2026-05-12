@@ -9,6 +9,46 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-05-12
+
+### Added
+- **`rho_B_logitp`** — continuous Pearson correlation of pair-level
+  `B_jk = α_j · R_meta[j,k] · α_k` against `logit(p_pol_j)` across all
+  in-scope ordered pairs (j, k) with j ≠ k. Tests for monotone
+  B-vs-frequency structure without discretizing into L/H bins.
+- New `OracleResult` fields (one per scope): `rho_B_logitp`,
+  `rho_B_logitp_null_mean`, `rho_B_logitp_null_sd`, `rho_B_logitp_Z`,
+  `rho_B_logitp_perm_p` (two-tailed), `rho_B_logitp_n_pairs`.
+- New `.oracle.tsv` keys: `rho_B_logitp_<field>_<scope>`.
+
+### Algorithm
+- Polarized logit: `p_pol_j = (α_j ≥ 0 ? p_pool_j : 1 − p_pool_j)`,
+  clamped to `(1e-3, 1 − 1e-3)`.
+- Pair vector: x = B_jk, y = logit(p_pol_j), with j the "anchor" SNP
+  (so each pair contributes once with the j-side anchored).
+- Sign-flip null: under perm, B_jk → s_j · s_k · B_jk; y is invariant.
+  Σ(B_jk)², Σy², mean(y), var(y) all invariant; only Σ B_jk and Σ B_jk·y_j
+  shift, both efficiently computed via a single (C · S) BLAS gemm
+  where S is the p × n_perm sign matrix. Same asymptotic cost as dc.
+- Two-tailed empirical perm_p — consistent with dc convention from
+  v0.6.3.
+
+### Empirical power vs dc (100-gen sel_grad=0.1 directional smoke run)
+The discretized dc test won here because the directional signal
+concentrates in the extremes of the polarized-frequency spectrum
+(BLL ≪ 0, BHH ≈ 0, BLH ≈ small +). dc directly contrasts the cleanest
+L-vs-H pairs; rho averages every pair into one correlation, diluting
+the LL signal with the LH bulk:
+
+  scope        dc20_Z    dc20_p   |  rho_Z    rho_p
+  ---------    ------    ------      ------   ------
+  win_10pct    +2.86     0.003       +1.25    0.23
+  win_25pct    +3.17     0.002       +1.13    0.25
+
+Both tests now coexist in the output. rho may win when signal is more
+uniformly spread across frequencies, when the dc cutoff is mis-specified,
+or for non-Hayward-Sella regimes; dc wins when signal is tail-concentrated.
+
 ## [0.6.3] — 2026-05-12
 
 ### Fixed
@@ -358,7 +398,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/mtisla/PolygenicSim/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/mtisla/PolygenicSim/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/mtisla/PolygenicSim/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/mtisla/PolygenicSim/compare/v0.6.0...v0.6.1

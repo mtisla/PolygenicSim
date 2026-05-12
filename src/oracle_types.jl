@@ -43,6 +43,17 @@ struct OracleResult
     dc_null_sd::Matrix{Float64}
     dc_Z::Matrix{Float64}
     dc_perm_p::Matrix{Float64}
+    # rho_B_logitp — continuous Pearson correlation of pair-level B_jk against
+    # logit(p_pol_j) across all in-scope ordered pairs. One per scope.
+    # Two-tailed sign-flip perm_p. Captures the monotone B-vs-frequency
+    # relationship predicted by directional-selection theory without
+    # discretizing into L/H bins.
+    rho_B_logitp::Vector{Float64}            # length n_scopes
+    rho_B_logitp_null_mean::Vector{Float64}
+    rho_B_logitp_null_sd::Vector{Float64}
+    rho_B_logitp_Z::Vector{Float64}
+    rho_B_logitp_perm_p::Vector{Float64}
+    rho_B_logitp_n_pairs::Vector{Int}
 end
 
 export OracleResult
