@@ -152,11 +152,10 @@ function simulate(cfg::Config)
         sum_of_var_per_deme!(sov_buf, pop, scratch.layout, scratch.qtl_idx, scratch.alpha_qtl)
         bulmer_per_deme!(B_buf, var_buf, sov_buf)
         sample_env!(scratch.env, sigma_E, rng)
-        # Re-use mean_buf? No — phenotype variance only.
         var_pheno_buf = zeros(Float64, scratch.layout.n_demes)
         phenotype_var_per_deme!(var_pheno_buf, scratch.A, scratch.env, scratch.layout)
 
-        # Weighted averages across demes (equal deme sizes ⇒ simple mean).
+        # Within-deme weighted averages (= pooled when panmictic).
         mA  = weighted_avg_demes(mean_buf, scratch.layout)
         vA  = weighted_avg_demes(var_buf, scratch.layout)
         sov = weighted_avg_demes(sov_buf, scratch.layout)
@@ -164,9 +163,40 @@ function simulate(cfg::Config)
         vz  = weighted_avg_demes(var_pheno_buf, scratch.layout)
         h2_real = vz > 0 ? vA / vz : 0.0
 
-        # Locus-level pooled quantities (kept as-is so the .effects.tsv-style
-        # outputs reflect metapop allele frequencies).
+        # Pooled across the whole population.
+        _, vA_pooled = population_mean_var(scratch.A)
         allele_freqs!(p_buf, pop, vt)
+        sov_pooled = sum_of_per_locus_var(p_buf, vt.alpha)
+        B_pooled = sov_pooled > 0 ? (vA_pooled - sov_pooled) / sov_pooled : 0.0
+
+        # MSD-report inputs (derived from cfg + realized init).
+        V_S_eff = cfg.selection_mode === :neutral ? Inf : Vs
+        # Phenotypic shift used by directional phase (else 0).
+        shift_raw = if cfg.selection_mode === :directional
+            cfg.sel_grad != 0.0 ? cfg.sel_grad * Vs :
+            cfg.shift_sd != 0.0 ? cfg.shift_sd * sqrt(max(0.0, V_P0)) : 0.0
+        else
+            0.0
+        end
+
+        # QTL-level statistics over polymorphic QTLs only (matches SLiM, which
+        # only counts segregating m2 mutations).
+        n_qtl_poly = 0
+        sum_a2 = 0.0
+        sum_abs_a = 0.0
+        @inbounds for j in eachindex(vt.is_qtl)
+            if vt.is_qtl[j]
+                p = p_buf[j]
+                if p > 1e-12 && p < 1 - 1e-12
+                    a = vt.alpha[j]
+                    sum_a2 += a * a
+                    sum_abs_a += abs(a)
+                    n_qtl_poly += 1
+                end
+            end
+        end
+        mean_alpha_sq  = n_qtl_poly > 0 ? sum_a2 / n_qtl_poly : 0.0
+        mean_abs_alpha = n_qtl_poly > 0 ? sum_abs_a / n_qtl_poly : 0.0
 
         summary = SimSummary(
             cfg.seed,
@@ -174,16 +204,20 @@ function simulate(cfg::Config)
             cfg,
             total_gens,
             polymorphic_count(p_buf),
-            mA, vA, sov,
-            B,
-            vz,
-            h2_real,
+            mA, vA, sov, B, vz, h2_real,
+            vA_pooled, sov_pooled, B_pooled,
+            V_S_eff, sigma_E, shift_raw,
+            mean_alpha_sq, mean_abs_alpha, n_qtl_poly,
             conv_buffer,
             copy(p_buf),
             copy(vt.alpha),
             copy(vt.is_qtl),
         )
         write_summary(cfg.output_prefix, summary)
+        # Echo the MSD equilibrium report + Hayward–Sella constraint checks to
+        # stdout so users running simulate() interactively see the verdict.
+        print(stdout, format_msd_report(summary))
+        print(stdout, format_constraint_checks(summary))
     end
 
     return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths)
