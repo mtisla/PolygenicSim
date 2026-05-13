@@ -205,16 +205,18 @@ See [Mutation rates](#mutation-rates) for full discussion.
 | `Uqtl` | `Float64` | `0.02` | Per-gamete rate of QTL-targeting mutations. |
 | `Uneu` | `Float64?` | `nothing` | Per-gamete rate of neutral-targeting mutations. `nothing` auto-derives `Uqtl · n_neutral / n_qtl` (uniform per-site rate). Set explicitly only for non-uniform per-site rates. |
 
-### Initial allele frequencies
+### Init (initial allele frequencies)
 
-See [Initial allele frequencies](#initial-allele-frequencies) for full discussion.
+See [Initial allele frequencies](#initial-allele-frequencies) below for the
+full description of each mode.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `init_distribution` | `Symbol` | `:beta_mutation_drift` | One of `:beta_mutation_drift`, `:uniform`, `:beta_asymmetric`, `:fixed_p`, `:empirical_sfs` (stub — not implemented). |
-| `theta_override` | `Float64?` | `nothing` | Override the auto-derived θ for `:beta_mutation_drift`. |
-| `asym_u`, `asym_v` | `Float64` | `NaN` | Per-site 0→1 / 1→0 rates for `:beta_asymmetric`. Both must be set when this mode is used. |
-| `init_p` | `Float64` | `0.5` | Per-locus expected frequency for `:fixed_p`. Realized freqs are `Binomial(2N, init_p)/2N`. |
+| `init_distribution` | `Symbol` | `:beta_mutation_drift` | Per-locus initial-freq model. Options: `:beta_mutation_drift` (Beta(θ,θ) drift-mutation eq), `:uniform` (U(0,1) per locus), `:beta_asymmetric` (Beta(4Ne·v, 4Ne·u)), `:fixed_p` (every locus at `init_p`), `:empirical_sfs` (stub — not implemented). |
+| `theta_override` | `Float64?` | `nothing` | Override `θ` for `:beta_mutation_drift`. When unset, `θ = 4·Ne·μ_per_site`. |
+| `asym_u` | `Float64` | `NaN` | Per-site 0→1 mutation rate for `:beta_asymmetric`. Required when this mode is used. |
+| `asym_v` | `Float64` | `NaN` | Per-site 1→0 mutation rate for `:beta_asymmetric`. Required when this mode is used. |
+| `init_p` | `Float64` | `0.5` | Per-locus expected frequency for `:fixed_p`. Realized freqs are `Binomial(2N, init_p) / 2N`. |
 | `maf_min` | `Float64` | `0.0` | Minimum MAF for rejection sampling of init freqs. Must be in `[0, 0.5)`. |
 
 ### Effects
@@ -328,17 +330,94 @@ or GWAS analysis, so the configuration is rejected at `validate`.
 ## Initial allele frequencies
 
 `init_distribution` selects the per-locus initial allele-frequency model.
-All modes feed a vector of per-locus expected frequencies into a Bernoulli
-sample for each of `2N` gene copies (so the realized per-locus frequency
-adds binomial sampling noise on top of the configured distribution).
+All modes first produce a vector `p` of per-locus expected frequencies
+(length `n_qtl + n_neutral`), then `init_packed!` / `init_dense!` samples
+each of the `2N` haploid gene copies independently as Bernoulli(`p[j]`)
+— so the realized per-locus frequency is `Binomial(2N, p[j]) / 2N`,
+which adds binomial sampling noise on top of the configured distribution.
+
+### Summary
 
 | Mode | Math | When to use |
 |---|---|---|
-| `:beta_mutation_drift` | `Beta(θ, θ)` with `θ = 4·Ne·μ` | Default. Symmetric drift-mutation eq SFS; U-shaped (most mass near 0 and 1) when `θ < 1`. |
+| `:beta_mutation_drift` | `Beta(θ, θ)` with `θ = 4·Ne·μ` | **Default**. Symmetric drift-mutation eq SFS; U-shaped (most mass near 0 and 1) when `θ < 1`. |
 | `:uniform` | `U(0, 1)` per locus | Flat across the frequency spectrum. |
-| `:beta_asymmetric` | `Beta(4·Ne·v, 4·Ne·u)` | Asymmetric mutation eq with `u = asym_u` (0→1) and `v = asym_v` (1→0). Both must be set. |
-| `:fixed_p` | All loci start at `init_p` | qcseln/SimPol-style: every locus's expected freq is `init_p` (default `0.5`), with binomial sampling per gene copy. |
+| `:beta_asymmetric` | `Beta(4·Ne·v, 4·Ne·u)` | Asymmetric mutation eq with `u = asym_u` (per-site 0→1) and `v = asym_v` (per-site 1→0). |
+| `:fixed_p` | Every locus at `p = init_p` | qcseln/SimPol-style: every locus's expected freq is `init_p` (default `0.5`), with binomial sampling per gene copy. |
 | `:empirical_sfs` | Sample from empirical SFS | **Stub — throws on use.** Reserved for future support of real-dataset SFS init. |
+
+### Per-mode detail
+
+#### `:beta_mutation_drift` (default)
+
+Draws each locus's expected freq independently from `Beta(θ, θ)` where
+`θ = 4·Ne·μ_per_site` (or `cfg.theta_override` if set). Symmetric, so
+`E[p] = 0.5`; shape depends on `θ`:
+- `θ < 1` → U-shaped (most mass near 0 and 1) — the realistic SFS for
+  natural populations.
+- `θ ≈ 1` → flat.
+- `θ ≫ 1` → bell-shaped around 0.5.
+
+```julia
+PS.Config(init_distribution = :beta_mutation_drift)            # uses θ = 4·Ne·μ
+PS.Config(init_distribution = :beta_mutation_drift,
+          theta_override = 0.5)                                # explicit θ
+```
+
+#### `:uniform`
+
+Each locus's expected freq is drawn from `U(0, 1)` independently. Useful
+when you want a flat marginal SFS without a population-genetics
+interpretation.
+
+```julia
+PS.Config(init_distribution = :uniform)
+```
+
+#### `:beta_asymmetric`
+
+Models the equilibrium SFS under asymmetric mutation rates. The
+zero-allele equilibrium is `Beta(4·Ne·v, 4·Ne·u)` where:
+- `asym_u` = per-site rate of `0 → 1` mutations
+- `asym_v` = per-site rate of `1 → 0` mutations
+
+Both `asym_u` and `asym_v` must be set explicitly (defaults are `NaN` and
+validation fails otherwise).
+
+```julia
+PS.Config(init_distribution = :beta_asymmetric,
+          asym_u = 1e-6, asym_v = 2e-6)
+```
+
+#### `:fixed_p`
+
+Sets every locus's expected frequency to `cfg.init_p` (default `0.5`).
+The realized per-locus freq comes entirely from Binomial sampling of the
+`2N` gene copies — i.e. `p_realized ~ Binomial(2N, init_p) / 2N` with
+SD ≈ `√(init_p · (1−init_p) / (2N))`. This is what qcseln/SimPol does
+when each haploid allele is independently `±1` with prob `0.5`
+(equivalent to `init_p = 0.5`).
+
+```julia
+# qcseln-style: every locus starts tightly around p = 0.5
+PS.Config(init_distribution = :fixed_p, init_p = 0.5)
+
+# Skewed init: every locus starts tightly around p = 0.2
+PS.Config(init_distribution = :fixed_p, init_p = 0.2)
+```
+
+Validation:
+- `init_p` must be in `[0, 1]`.
+- When `maf_min > 0`, `min(init_p, 1 − init_p) >= maf_min` is required
+  (otherwise every locus would be filtered out by the MAF rejection
+  step).
+
+#### `:empirical_sfs`
+
+**Not yet implemented.** The validator accepts the symbol but the
+runtime throws `ArgumentError`. Reserved for future support of loading
+an empirical site-frequency spectrum (e.g. 1000 Genomes or HapMap) and
+sampling initial frequencies from it.
 
 ---
 
