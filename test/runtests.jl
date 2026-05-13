@@ -28,6 +28,43 @@ const PS = PolygenicSim
     @test isapprox(var(p_init), expected_var; rtol=0.30)
 end
 
+@testset "init_distribution = :fixed_p" begin
+    # :fixed_p makes sample_initial_freqs return a constant init_p vector.
+    # The realized per-locus frequency after sampling 2N gene copies follows
+    # Binomial(2N, init_p)/2N — variance = init_p·(1-init_p)/(2N).
+    cfg = PS.Config(N=2000, Ne=2000, n_chr=1, chr_len_bp=200_000,
+                     n_qtl=500, n_neutral=0, Uqtl=0.02,
+                     init_distribution=:fixed_p, init_p=0.5,
+                     selection_mode=:neutral, ngen=0,
+                     seed=UInt64(42), output_formats=Symbol[])
+    PS.validate(cfg)
+    rng = PS.make_master_rng(cfg)
+    _, p_init = PS.init_variant_table(rng, cfg)
+    @test all(p -> p == 0.5, p_init)
+
+    # Asymmetric init_p
+    cfg2 = PS.Config(N=2000, Ne=2000, n_chr=1, chr_len_bp=200_000,
+                      n_qtl=500, n_neutral=0, Uqtl=0.02,
+                      init_distribution=:fixed_p, init_p=0.2,
+                      selection_mode=:neutral, ngen=0,
+                      seed=UInt64(42), output_formats=Symbol[])
+    PS.validate(cfg2)
+    rng2 = PS.make_master_rng(cfg2)
+    _, p_init2 = PS.init_variant_table(rng2, cfg2)
+    @test all(p -> p == 0.2, p_init2)
+
+    # Validation: init_p out of range
+    @test_throws ArgumentError PS.validate(PS.Config(
+        N=100, Ne=100, n_chr=1, chr_len_bp=10_000, n_qtl=10, n_neutral=0,
+        Uqtl=0.02, init_distribution=:fixed_p, init_p=1.5,
+        selection_mode=:neutral, ngen=0, output_formats=Symbol[]))
+    # Validation: init_p incompatible with maf_min
+    @test_throws ArgumentError PS.validate(PS.Config(
+        N=100, Ne=100, n_chr=1, chr_len_bp=10_000, n_qtl=10, n_neutral=0,
+        Uqtl=0.02, init_distribution=:fixed_p, init_p=0.01, maf_min=0.05,
+        selection_mode=:neutral, ngen=0, output_formats=Symbol[]))
+end
+
 # ---------------------------------------------------------------------------
 # Test 2: V_A_init match
 # ---------------------------------------------------------------------------

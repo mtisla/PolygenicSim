@@ -9,6 +9,36 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-05-13
+
+### Added
+- **`:fixed_p` initial allele-frequency distribution** matching the
+  qcseln/SimPol convention. Every locus's expected frequency is set to
+  `cfg.init_p` (default `0.5`); the realized per-locus frequency is then
+  `Binomial(2N, init_p) / 2N` via the Bernoulli sampling already in
+  `init_packed!` / `init_dense!`. Useful for benchmarking against
+  qcseln-style simulators where each haploid allele is independently ±1
+  with prob 0.5. New Config field `init_p::Float64 = 0.5`, validated to
+  `[0, 1]` and to be compatible with `maf_min` when both are set.
+- **Comprehensive README rewrite.** Full Configuration reference table
+  covering all 50 `Config` fields, grouped by category (population,
+  genome, mutation, init frequencies, effects, selection, spatial,
+  expansion, run length, output, oracle, runtime, loading). Added a new
+  "Run the simulator" section with three explicit usage patterns (REPL,
+  script, examples) and an "Initial allele frequencies" section
+  documenting all five init modes.
+
+### Verified
+- qcseln-benchmark suite (`/tmp/polysim_bench/`) — PolygenicSim's Bulmer
+  B test matches the qcseln reference within ~0.01 across neutral,
+  stabilizing (opt=0, sdF=1), and directional (opt=1, sdF=1) regimes on
+  N=10000, n_qtl=100, 10 generations. Permutation test gives 0/10 false
+  positives under neutrality and 10/10 power at `p<0.01` under both
+  selection regimes.
+
+### Tests
+- `360` tests pass (was `356`), `+4` for the new `:fixed_p` testset.
+
 ## [0.7.1] — 2026-05-12
 
 ### Fixed

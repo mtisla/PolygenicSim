@@ -120,6 +120,14 @@ function sample_initial_freqs(rng::Xoshiro, cfg::Config;
         rand!(rng, p)
         cfg.maf_min > 0 && _truncate_inplace!(rng, p, cfg.maf_min, () -> rand(rng))
         return p
+    elseif cfg.init_distribution === :fixed_p
+        # Every locus starts at expected p = cfg.init_p. The realized per-locus
+        # frequency is Binomial(2N, init_p) / 2N — the binomial sampling happens
+        # downstream in init_packed! / init_dense! (Bernoulli(p[j]) per gene
+        # copy). This matches qcseln/SimPol's initialization (each haploid ±1
+        # with prob 0.5 ≡ init_p=0.5).
+        fill!(p, cfg.init_p)
+        return p
     elseif cfg.init_distribution === :beta_mutation_drift
         θ_q = theta_qtl(cfg)
         θ_n = theta_neu(cfg)

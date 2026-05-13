@@ -65,7 +65,7 @@ const _CONFIG_CATEGORIES = (
                        :expansion_factor, :expansion_k_before_end),
     "genomic"     => (:n_chr, :chr_len_bp, :n_qtl, :n_neutral, :xovers_per_chr),
     "mutation"    => (:Uqtl, :Uneu, :init_distribution, :theta_override,
-                       :asym_u, :asym_v),
+                       :asym_u, :asym_v, :init_p),
     "effects"     => (:effect_distribution, :effect_scale, :maf_min),
     "selection"   => (:selection_mode, :vs_over_vp0, :vs, :h2,
                        :shift_sd, :sel_grad, :t_shift, :directional_start_from),

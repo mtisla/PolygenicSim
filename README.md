@@ -9,15 +9,95 @@ This package implements **Phases 1, 2, 4, 5** of the spec in
 `IMPLEMENTATION_PLAN.md`. Phases 3 (haplotype additive-value tracking) and 6
 (Bulmer / ρ_B / analysis module) are deferred — see [`SUMMARY.md`](./SUMMARY.md).
 
+---
+
+## Contents
+
+- [Install](#install)
+- [Run the simulator](#run-the-simulator)
+- [Quickstart](#quickstart)
+- [Examples](#examples)
+- [Multi-rep workflow](#multi-rep-workflow)
+- [Configuration reference](#configuration-reference)
+- [Mutation rates](#mutation-rates)
+- [Initial allele frequencies](#initial-allele-frequencies)
+- [Recombination and LD](#recombination-and-ld)
+- [Generations](#generations)
+- [Selection regimes](#selection-regimes)
+- [Spatial structure](#spatial-structure)
+- [Population expansion](#population-expansion)
+- [Backends](#backends)
+- [I/O formats](#io-formats)
+- [Equilibrium diagnostics](#equilibrium-diagnostics)
+- [Oracle statistics](#oracle-statistics)
+- [Loading prior state](#loading-prior-state)
+- [Tests](#tests)
+- [Versioning](#versioning)
+- [Reference](#reference)
+
+---
+
 ## Install
 
-Requires Julia ≥ 1.10. Clone and `Pkg.instantiate`:
+Requires **Julia ≥ 1.10**. Clone the repo, activate the project, and let Julia
+download dependencies:
 
 ```julia
-julia> using Pkg
-julia> Pkg.activate(".")
-julia> Pkg.instantiate()
+$ git clone <repo-url> PolygenicSim
+$ cd PolygenicSim
+$ julia --project=.
+julia> using Pkg; Pkg.instantiate()      # one-time: pull deps from Manifest.toml
+julia> using PolygenicSim                 # precompile + ready to use
 ```
+
+`Manifest.toml` is committed, so dependency versions are reproducible
+across machines.
+
+---
+
+## Run the simulator
+
+There are three equivalent ways to drive a run.
+
+### 1. From the REPL
+
+```julia
+julia --project=.
+julia> using PolygenicSim
+julia> const PS = PolygenicSim
+julia> cfg = PS.Config(N=1000, n_qtl=500, selection_mode=:stabilizing,
+                        ngen=25, seed=UInt64(42),
+                        output_formats=[:plink, :summary],
+                        output_prefix="my_run")
+julia> result = PS.simulate(cfg)
+julia> result.summary.bulmer_B            # Bulmer factor B at end of run
+```
+
+### 2. From a script
+
+Write your config and `simulate(cfg)` call into a `.jl` file, then run:
+
+```bash
+julia --project=. --threads=4 path/to/script.jl
+```
+
+The `--threads=4` flag enables BLAS-parallel offspring generation; bump it
+to your core count for production runs.
+
+### 3. Bundled examples
+
+The `examples/` directory has three runnable scripts that cover the common
+configurations:
+
+```bash
+julia --project=. --threads=4 examples/panmictic.jl       # eq + 3 directional reps
+julia --project=. --threads=4 examples/stepping_stone.jl  # 5×5 grid, 3 regimes
+julia --project=. --threads=4 examples/expansion.jl       # 10× + 4× expansion
+```
+
+Use these as starting templates for your own runs — copy, edit, run.
+
+---
 
 ## Quickstart
 
@@ -29,29 +109,41 @@ using PolygenicSim
 const PS = PolygenicSim
 
 cfg = PS.Config(
-    N           = 1_000,
-    n_chr       = 5,
-    chr_len_bp  = 200_000,
-    n_qtl       = 1_000,
-    n_neutral   = 1_000,
-    Uqtl        = 0.02,                 # per-gamete QTL-targeting mutation rate
-                                        # (Uneu auto-derived as Uqtl·n_neutral/n_qtl)
-    h2          = 0.5,
-    vs_over_vp0 = 20.0,                 # V_S / V_P_0; ∞ = neutral
+    N              = 1_000,
+    n_chr          = 5,
+    chr_len_bp     = 200_000,
+    n_qtl          = 1_000,
+    n_neutral      = 1_000,
+    Uqtl           = 0.02,              # per-gamete QTL mutation rate
+    h2             = 0.5,
+    vs_over_vp0    = 20.0,              # V_S / V_P_0
     selection_mode = :stabilizing,
-    ngen           = 25,                # generations to simulate (all regimes)
-    output_formats = Symbol[:plink, :summary],
+    ngen           = 25,
+    output_formats = [:plink, :summary],
     output_prefix  = "stab_run",
     seed           = UInt64(42),
 )
 result = PS.simulate(cfg)
+
 @info "done" final_gen=result.final_gen Bulmer_B=result.summary.bulmer_B
 ```
 
-This writes a PLINK trio (`stab_run_gen25.{bed,bim,fam}`), an
-`.effects.tsv` companion file, and a text + TSV summary. To capture a
-phase-preserving restart point, add `:native` to `output_formats` and you'll
-get `stab_run_gen25.psim.zst` alongside.
+Writes a PLINK trio (`stab_run_gen25.{bed,bim,fam}`), an
+`stab_run_gen25.effects.tsv` companion, and a `stab_run.summary.{txt,tsv}`.
+To capture a phase-preserving restart point, add `:native` to
+`output_formats` and you'll get `stab_run_gen25.psim.zst` alongside.
+
+---
+
+## Examples
+
+```
+examples/panmictic.jl          # eq + 3 directional reps loaded from eq
+examples/stepping_stone.jl     # 5×5 grid, three regimes (cline_amp=0 by default)
+examples/expansion.jl          # 10× panmictic + 4× stepping-stone expansion
+```
+
+---
 
 ## Multi-rep workflow
 
@@ -62,8 +154,8 @@ from the saved state:
 # 1. Run + save eq (stabilizing or :md/:msd settling)
 PS.simulate(PS.Config(
     selection_mode = :stabilizing, ngen_eq = 25,
-    output_formats = Symbol[:native, :summary],
-    output_prefix = "eq", seed = UInt64(1),
+    output_formats = [:native, :summary],
+    output_prefix  = "eq", seed = UInt64(1),
     # ... rest of cfg
 ))
 
@@ -74,7 +166,7 @@ for (rep, shift) in enumerate((1.0, 2.0, 4.0))
         ngen_dir       = 30,
         shift_sd       = shift,
         load_from      = "eq_gen25.psim.zst",
-        output_formats = Symbol[:plink, :summary],
+        output_formats = [:plink, :summary],
         output_prefix  = "rep$rep",
         seed           = UInt64(rep),
         # ... rest of cfg matching the eq run
@@ -85,19 +177,131 @@ end
 Loaded state preserves haplotype phase, so the directional shift fires
 against the same Bulmer-equilibrated population in every rep.
 
-## Examples
+---
 
-```
-examples/panmictic.jl          # eq + 3 directional reps loaded from eq
-examples/stepping_stone.jl     # 5×5 grid, three regimes (cline_amp=0 by default)
-examples/expansion.jl          # 10× panmictic + 4× stepping-stone expansion
-```
+## Configuration reference
 
-Run any example with:
+Every `Config(; ...)` keyword argument, grouped by category. `Default` is
+the value used when the kwarg is omitted.
 
-```
-julia --project=. --threads=4 examples/panmictic.jl
-```
+### Population & genome
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `N` | `Int` | `5000` | Diploid census size per deme. |
+| `Ne` | `Int` | `5000` | Effective size used to compute `θ = 4·Ne·μ` for the Beta(θ,θ) init. |
+| `n_chr` | `Int` | `10` | Number of chromosomes. |
+| `chr_len_bp` | `Int` | `1_000_000` | Length of each chromosome in base pairs. Sets the bp coordinate space for crossovers, BIM output, and `recomb_per_bp = xovers_per_chr / chr_len_bp`. |
+| `n_qtl` | `Int` | `1_000` | Number of QTL sites (contribute to the trait). |
+| `n_neutral` | `Int` | `0` | Number of neutral sites (no effect on trait). `0` → QTL-only fast path. |
+| `xovers_per_chr` | `Float64` | `1.0` | Expected crossovers per chromosome per gamete (genetic-map length in Morgans). Each gamete draws `K_c ~ Poisson(xovers_per_chr)`. |
+
+### Mutation
+
+See [Mutation rates](#mutation-rates) for full discussion.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `Uqtl` | `Float64` | `0.02` | Per-gamete rate of QTL-targeting mutations. |
+| `Uneu` | `Float64?` | `nothing` | Per-gamete rate of neutral-targeting mutations. `nothing` auto-derives `Uqtl · n_neutral / n_qtl` (uniform per-site rate). Set explicitly only for non-uniform per-site rates. |
+
+### Initial allele frequencies
+
+See [Initial allele frequencies](#initial-allele-frequencies) for full discussion.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `init_distribution` | `Symbol` | `:beta_mutation_drift` | One of `:beta_mutation_drift`, `:uniform`, `:beta_asymmetric`, `:fixed_p`, `:empirical_sfs` (stub — not implemented). |
+| `theta_override` | `Float64?` | `nothing` | Override the auto-derived θ for `:beta_mutation_drift`. |
+| `asym_u`, `asym_v` | `Float64` | `NaN` | Per-site 0→1 / 1→0 rates for `:beta_asymmetric`. Both must be set when this mode is used. |
+| `init_p` | `Float64` | `0.5` | Per-locus expected frequency for `:fixed_p`. Realized freqs are `Binomial(2N, init_p)/2N`. |
+| `maf_min` | `Float64` | `0.0` | Minimum MAF for rejection sampling of init freqs. Must be in `[0, 0.5)`. |
+
+### Effects
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `effect_distribution` | `Symbol` | `:signed_exponential` | One of `:signed_exponential` (Exponential(scale) with random sign), `:normal` (Normal(0, scale)), `:fixed` (±scale with random sign). |
+| `effect_scale` | `Float64` | `0.03` | Scale parameter of the chosen effect distribution. For `:signed_exponential`, this is the mean of `|α|`. |
+
+### Heritability & selection
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `h2` | `Float64` | `0.5` | Initial heritability `V_A / V_P` at gen 0. Sets `σ_E`. |
+| `selection_mode` | `Symbol` | `:stabilizing` | `:neutral` \| `:stabilizing` \| `:directional`. |
+| `vs_over_vp0` | `Float64` | `20.0` | Primary V_S parameterization: `V_S = vs_over_vp0 · V_P_0`. |
+| `vs` | `Float64?` | `nothing` | Raw `V_S` override; takes precedence over `vs_over_vp0`. |
+| `shift_sd` | `Float64` | `0.0` | Optimum shift for `:directional`, in `σ_P_0` units. |
+| `sel_grad` | `Float64` | `0.0` | Alternative: `Δ = sel_grad · V_S`. Takes precedence over `shift_sd` when both set. |
+| `t_shift` | `Int` | `0` | Generation (relative to start of post-eq phase) at which `:directional` shift fires. `0` = shift at gen 1. |
+| `directional_start_from` | `Symbol` | `:msd` | `:md` (mutation-drift eq) \| `:msd` (mutation-selection-drift eq). Only matters for `:directional` two-phase mode. |
+
+### Spatial structure
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `demography` | `Symbol` | `:panmictic` | `:panmictic` \| `:twoD_perp` \| `:twoD_recent`. Must be set explicitly when `grid_size > 1`. |
+| `grid_size` | `Int` | `1` | Side length of the 2D grid (so `grid_size²` demes). Must be ≥ 2 for 2D models. |
+| `n_recent` | `Int` | `100` | Generations of recent structure for `:twoD_recent`. Onset at `total_gens − n_recent + 1`. |
+| `migration_rate` | `Float64` | `0.0` | Per-neighbor backward migration rate `m`. Total emigration from interior = `4m`. |
+| `cline_amp` | `Float64` | `0.0` | Y-axis cline amplitude on the optimum, in `σ_P_0` units. |
+
+### Expansion
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `expansion_factor` | `Float64` | `1.0` | Multiplicative size change at the expansion event. Fractional factors are allowed; `new_N = floor(factor · old_N)`. |
+| `expansion_k_before_end` | `Int` | `0` | Expansion fires `k` generations before the final generation. |
+
+### Run length
+
+Pick one of the two models; setting both is an error.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `ngen_eq` | `Int` | `0` | Two-phase: settling/eq generations (neutral, MSD, or pre-shift). |
+| `ngen_dir` | `Int` | `0` | Two-phase: additional post-shift generations for `:directional`. |
+| `ngen` | `Int` | `0` | Single-knob: exact run length; no settling. `:directional` shift fires at gen 1. |
+| `checkpoints` | `Vector{Int}` \| `Vector{Float64}` \| `nothing` | `nothing` | Absolute gens (`Int`) or multiples of `t_½` (`Float64`) at which to write checkpoint output. |
+
+### Output
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `output_formats` | `Vector{Symbol}` | `[:plink]` | Subset of `:plink`, `:native`, `:summary`, `:oracle`. |
+| `output_prefix` | `String` | `"polygenicsim"` | Filename prefix for all output files. |
+
+### Oracle statistics (only used when `:oracle ∈ output_formats`)
+
+See [Oracle statistics](#oracle-statistics) for details.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `oracle_windows_pct` | `Vector{Float64}` | `[5.0, 10.0, 25.0, 50.0]` | Window widths as % of `chr_len_bp`. |
+| `oracle_n_perm` | `Int` | `1000` | Sign-flip permutations for the null. |
+| `oracle_memory_path_threshold` | `Int` | `10000` | Switch to per-chr matrix-free path when `p_qtl >` this. |
+| `oracle_cutoffs` | `Vector{Int}` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%). |
+| `oracle_precision` | `Symbol` | `:Float64` | `:Float64` \| `:Float32` (sgemm, ~1.4× faster at `p_qtl ≥ 4000`). |
+
+### Runtime & diagnostics
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `backend` | `Symbol` | `:packed` | `:packed` (bit-packed `UInt64`) \| `:dense` (`UInt8`, oracle-only). Both produce bit-identical haplotypes for fixed seed & threads. |
+| `seed` | `UInt64` | `0x1` | Master RNG seed. `0` reserved for "random". |
+| `n_threads` | `Int` | `0` | Threads for parallel reductions; `0` ⇒ `Threads.nthreads()`. |
+| `n_int` | `Int` | `-1` | Trajectory snapshot interval: `-1` auto (~100 snapshots), `0` disables diagnostics, `k>0` every k gens. |
+
+### Loading
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `load_from` | `String?` | `nothing` | Path to a `.psim.zst` for phase-preserving restart. |
+| `load_plink_prefix` | `String?` | `nothing` | PLINK prefix to load (`{prefix}.bed/bim/fam`). Heterozygous phase is randomized at load. |
+| `load_demography` | `Symbol` | `:pan` | `:pan` \| `:twoD`. Only used by the PLINK loader. |
+
+---
 
 ## Mutation rates
 
@@ -119,6 +323,25 @@ requires `Uneu > 0` (the auto-derived value satisfies this automatically).
 Monomorphic / frozen-init neutrals are not supported — they don't help LD
 or GWAS analysis, so the configuration is rejected at `validate`.
 
+---
+
+## Initial allele frequencies
+
+`init_distribution` selects the per-locus initial allele-frequency model.
+All modes feed a vector of per-locus expected frequencies into a Bernoulli
+sample for each of `2N` gene copies (so the realized per-locus frequency
+adds binomial sampling noise on top of the configured distribution).
+
+| Mode | Math | When to use |
+|---|---|---|
+| `:beta_mutation_drift` | `Beta(θ, θ)` with `θ = 4·Ne·μ` | Default. Symmetric drift-mutation eq SFS; U-shaped (most mass near 0 and 1) when `θ < 1`. |
+| `:uniform` | `U(0, 1)` per locus | Flat across the frequency spectrum. |
+| `:beta_asymmetric` | `Beta(4·Ne·v, 4·Ne·u)` | Asymmetric mutation eq with `u = asym_u` (0→1) and `v = asym_v` (1→0). Both must be set. |
+| `:fixed_p` | All loci start at `init_p` | qcseln/SimPol-style: every locus's expected freq is `init_p` (default `0.5`), with binomial sampling per gene copy. |
+| `:empirical_sfs` | Sample from empirical SFS | **Stub — throws on use.** Reserved for future support of real-dataset SFS init. |
+
+---
+
 ## Recombination and LD
 
 Crossover positions are sampled in **bp space** (SLiM / msprime convention)
@@ -137,6 +360,8 @@ and LD between two markers at bp distance `d` decays approximately as
 So BIM coordinates emitted in PLINK output carry **genetic** meaning —
 window-based downstream tools (PLINK clumping, BayesR window posteriors,
 LD-window heritability methods) see realistic LD decay over bp distance.
+
+---
 
 ## Generations
 
@@ -171,11 +396,27 @@ PS.Config(selection_mode = :directional, shift_sd = 2.0, ngen = 50, ...)
 # 50 gens, every gen under post-shift selection
 ```
 
+---
+
 ## Selection regimes
 
-- `:neutral` — V_S = ∞; fitness uniform; pure mutation–drift dynamics.
-- `:stabilizing` — V_S finite; θ fixed at the gen-0 mean breeding value (per deme); Bulmer effect develops.
-- `:directional` — V_S finite; θ shifts by `shift_sd · σ_P_0` (or `sel_grad · V_S`) at gen `t_shift`. In two-phase mode: `ngen_eq` settling at `:md` or `:msd`, then `ngen_dir` post-shift. In single-knob mode (`ngen`): no settling, shift active from gen 1. When `load_from` is set, the loaded state is the settled eq and `ngen_eq` is skipped (only `ngen_dir` or `ngen` runs).
+- `:neutral` — `V_S = ∞`; fitness uniform; pure mutation–drift dynamics.
+- `:stabilizing` — `V_S` finite; θ fixed at the gen-0 mean breeding value
+  (per deme); Bulmer effect develops.
+- `:directional` — `V_S` finite; θ shifts by `shift_sd · σ_P_0` (or
+  `sel_grad · V_S`) at gen `t_shift`. In two-phase mode: `ngen_eq` settling
+  at `:md` or `:msd`, then `ngen_dir` post-shift. In single-knob mode
+  (`ngen`): no settling, shift active from gen 1. When `load_from` is set,
+  the loaded state is the settled eq and `ngen_eq` is skipped (only
+  `ngen_dir` or `ngen` runs).
+
+Fitness function (stabilizing / directional):
+
+    w_i = exp(-(z_i - θ_{d(i),t})² / (2 V_S))
+
+with `z_i = A_i + ε_i`, `ε_i ~ Normal(0, σ_E)` set from the requested `h²`.
+
+---
 
 ## Spatial structure
 
@@ -219,6 +460,8 @@ equal deme sizes, that's a simple `mean()` across demes; for panmictic
 (`mean_p`, `var_p`, polymorphic count) remain pooled across the metapop
 because they are locus-level rather than individual-level.
 
+---
+
 ## Population expansion
 
 Set `expansion_factor > 1.0` and `expansion_k_before_end` to fire an
@@ -229,18 +472,41 @@ on `N=200` gives `300`; `factor=2.7` gives `540`). All demes scale
 simultaneously. The expansion event samples `factor · N_old` offspring per
 deme from the existing parents.
 
+---
+
 ## Backends
 
-- `:packed` (default) — `Matrix{UInt64}` with 1 bit per allele (LSB-first within each word). Threaded offspring chunks via `Threads.@threads`.
-- `:dense` — `Matrix{UInt8}` with 1 byte per allele. Used as the oracle for backend-equivalence tests; same chunk-based logic as packed but always sequential.
+- `:packed` (default) — `Matrix{UInt64}` with 1 bit per allele (LSB-first
+  within each word). Threaded offspring chunks via `Threads.@threads`.
+- `:dense` — `Matrix{UInt8}` with 1 byte per allele. Used as the oracle for
+  backend-equivalence tests; same chunk-based logic as packed but always
+  sequential.
 
-For fixed seed and matching `n_threads`, both backends produce **bit-identical** haplotypes (test 9 is the gating check).
+For fixed seed and matching `n_threads`, both backends produce
+**bit-identical** haplotypes (test 9 is the gating check).
+
+---
 
 ## I/O formats
 
-- **PLINK 1 trio** (`{prefix}_gen{t}.bed/bim/fam`) plus a sibling `{prefix}_gen{t}.effects.tsv` with per-variant effect sizes. IIDs are `p{deme}_{i}` (1-indexed) so loaders can recover deme assignments.
-- **Native restart** (`{prefix}_gen{t}.psim.zst`) — phase-preserving full state with bit-packed haplotypes, variant table, effects, and deme assignments. zstd-compressed (level 3).
-- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as within-deme weighted averages for 2D, pooled for panmictic), polymorphic count, plus a convergence-diagnostics block and intermediate trajectory log of (gen, B, V_A, mean_p, var_p). Snapshot frequency is controlled by `n_int`: the default `-1` auto-resolves to `max(1, total_gens ÷ 100)` so you get ~100 trajectory points regardless of run length (≲1% overhead); set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k` generations explicitly.
+- **PLINK 1 trio** (`{prefix}_gen{t}.bed/bim/fam`) plus a sibling
+  `{prefix}_gen{t}.effects.tsv` with per-variant effect sizes. IIDs are
+  `p{deme}_{i}` (1-indexed) so loaders can recover deme assignments.
+- **Native restart** (`{prefix}_gen{t}.psim.zst`) — phase-preserving full
+  state with bit-packed haplotypes, variant table, effects, and deme
+  assignments. zstd-compressed (level 3).
+- **Summary** (`{prefix}.summary.txt` + `.tsv`) — opt-in end-of-sim stats
+  including realized V_A, V_P, h², Bulmer B, mean phenotype (computed as
+  within-deme weighted averages for 2D, pooled for panmictic), polymorphic
+  count, plus a convergence-diagnostics block and intermediate trajectory
+  log of (gen, B, V_A, mean_p, var_p). Snapshot frequency is controlled by
+  `n_int`: the default `-1` auto-resolves to `max(1, total_gens ÷ 100)` so
+  you get ~100 trajectory points regardless of run length (≲1% overhead);
+  set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k`
+  generations explicitly.
+- **Oracle TSV** (`{prefix}.oracle.tsv`) — written when `:oracle ∈ output_formats`.
+
+---
 
 ## Equilibrium diagnostics
 
@@ -267,73 +533,7 @@ replicates without re-reading the trajectory.
 For multi-replicate aggregation, use `read_summary_tsv(path)` to load each
 replicate's `category.<field>` → value map and stack into a DataFrame.
 
-## Loading
-
-```julia
-# Phase-preserving restart from native format:
-PS.simulate(PS.Config(load_from = "prev.psim.zst", ...))
-
-# Phase-randomized load from PLINK (warning: heterozygous phase is randomized):
-PS.simulate(PS.Config(load_plink_prefix = "external", load_demography = :twoD, ...))
-```
-
-## Tests
-
-```
-julia --project=. -e 'using Pkg; Pkg.test()'
-```
-
-340 tests covering Phase-1 correctness (init AF, V_A, Mendelian segregation,
-Haldane recombination at d ∈ {0.01, 0.1, 0.5, 1.0} M, cross-chr LD, neutral
-drift, selection regimes), Phase-2 zero-allocation kernels and chunk
-determinism, Phase-4 spatial structure (DemeLayout, m=0 isolation vs m=high
-panmictic asymptote, cline gradient), Phase-5 expansion (size scaling
-including fractional factors, mean-AF preservation, stepping-stone
-integration, checkpoint correctness), weighted-average per-deme diagnostics
-for 2D, the `Uqtl/Uneu` auto-derivation and validation, the QTL-only fast
-path, a regression test asserting threaded reductions match the
-`Statistics` reference under `JULIA_NUM_THREADS=4`, and the new
-single-knob `ngen` mode (validation against the two-phase knobs and
-shift-from-gen-1 behavior for directional), the `:twoD_recent`
-demography (validation, structure-onset gen, panmictic vs structured
-`load_from` interaction), and oracle statistics (B perm-p, Δ_cross
-sign-flip null, panmictic + structured paths, TSV side-effect).
-
-## Defaults
-
-Mostly aligned with the bulmer reference pipeline:
-
-| Field | Default |
-|---|---|
-| `N`, `Ne` | 5000 |
-| `n_chr` | 10 |
-| `chr_len_bp` | 1,000,000  (bp-space over which variants and crossovers are placed; sets `recomb_per_bp = xovers_per_chr / chr_len_bp`) |
-| `xovers_per_chr` | 1.0  (expected crossovers per chr per gamete; Morgan-length of the chromosome) |
-| `n_int` | -1  (auto: target ~100 trajectory snapshots; `0` disables diagnostics; `k>0` logs every k gens) |
-| `n_qtl`, `n_neutral` | 1000, 0 |
-| `Uqtl` | 0.02 (haploid gamete rate of QTL-targeting mutations) |
-| `Uneu` | `nothing` (auto: `Uqtl·n_neutral/n_qtl` — uniform per-site rate, matches `bulmer.slim`) |
-| `h2` | 0.5 |
-| `vs_over_vp0` | 20.0 |
-| `effect_distribution` | `:signed_exponential` |
-| `effect_scale` | 0.03 |
-| `selection_mode` | `:stabilizing` |
-| `directional_start_from` | `:msd` |
-| `demography` | `:panmictic` (must be set explicitly to `:twoD_perp` or `:twoD_recent` when `grid_size > 1`) |
-| `grid_size` | 1 (≥2 required for 2D models) |
-| `n_recent` | 100 (gens of recent structure; `:twoD_recent` only) |
-| `migration_rate` | 0.0 |
-| `cline_amp` | 0.0 |
-| `expansion_factor` | 1.0 |
-| `backend` | `:packed` |
-| `output_formats` | `[:plink]` |
-| `init_distribution` | `:beta_mutation_drift` |
-| `maf_min` | 0.0 |
-| `ngen_eq` | 0 (settling generations — neutral eq, MSD, or pre-shift) |
-| `ngen_dir` | 0 (additional post-shift gens for `:directional` only) |
-| `ngen` | 0 (alternative single-knob run length; shift at gen 1 for directional. Mutually exclusive with `ngen_eq`/`ngen_dir`) |
-
-All overridable via the `Config(; ...)` keyword constructor.
+---
 
 ## Oracle statistics
 
@@ -343,14 +543,14 @@ sizes at end-of-sim. No PLINK BED needed — we have direct access to
 `vt.alpha` and `pop.H`.
 
 Output: a flat `{prefix}.oracle.tsv` and an `OracleResult` attached to
-`SimResult.oracle`. Reimplements the R reference
-(`bulmer/R/oracle.R`, `bulmer/R/stats.R`) in-process.
+`SimResult.oracle`. Reimplements the R reference (`bulmer/R/oracle.R`,
+`bulmer/R/stats.R`) in-process.
 
 ```julia
 cfg = PS.Config(
     N = 2000, n_qtl = 2000, h2 = 0.5,
     selection_mode  = :stabilizing, ngen_eq = 50,
-    output_formats  = Symbol[:plink, :summary, :oracle],
+    output_formats  = [:plink, :summary, :oracle],
     oracle_windows_pct = [5.0, 10.0, 25.0, 50.0],   # % of chr_len_bp
     oracle_n_perm      = 1000,
     output_prefix      = "stab", seed = UInt64(1),
@@ -361,26 +561,32 @@ res.oracle.B_perm_p     # one-tailed sign-flip permutation p-values
 res.oracle.dc_delta     # n_scopes × n_cutoffs matrix of Δ_cross
 ```
 
-Scopes: user-specified windows (as % of `chr_len_bp`) plus **within-chr** and
-**genome** (6 scopes by default). For each scope and Δ_cross cutoff (default
-`[20, 50]` %), 13 fields are reported: `nL`, `nH`, `nPLH`, `nPLL`, `nPHH`,
-`BLH`, `BLL`, `BHH`, `delta`, `null_mean`, `null_sd`, `Z`, `perm_p`.
+Scopes: user-specified windows (as % of `chr_len_bp`) plus **within-chr**
+and **genome** (6 scopes by default). For each scope and Δ_cross cutoff
+(default `[20, 50]` %), 13 fields are reported: `nL`, `nH`, `nPLH`, `nPLL`,
+`nPHH`, `BLH`, `BLL`, `BHH`, `delta`, `null_mean`, `null_sd`, `Z`, `perm_p`.
+
+**Conventions:**
+- **B test** uses the **covariance** scale: `α' D α / VA`, where D is the
+  deme-weighted per-locus covariance matrix.
+- **Δ_cross and rho_pearson** use the **correlation** scale:
+  `B_jk = α_j · cor(g_j, g_k) · α_k`.
 
 **Test directions:**
 - `B_perm_p` is **one-tailed lower** (`Pr(null ≤ obs)`): tests whether
   `B` is significantly *more negative* than null. Appropriate because
-  E[B] < 0 under both stabilizing and directional selection (Bulmer effect).
+  `E[B] < 0` under both stabilizing and directional selection (Bulmer
+  effect).
 - `dc<co>_perm_p` is **two-tailed** (symmetric absolute-deviation): tests
-  whether `δ` deviates from the null in either direction. Appropriate
-  because the L and H tails of the polarized-frequency spectrum can be
-  enriched in either direction — Bulmer repulsion among rising alleles
-  drives `BLL ≪ 0` (and so δ > 0); coupling LD would drive δ < 0.
-  Diverges from the R reference (`bulmer/R/stats.R`) which reports the
-  one-tailed lower-tail p for `dc` — that's the wrong tail for the test.
+  whether `δ` deviates from the null in either direction. Bulmer repulsion
+  among rising alleles drives `BLL ≪ 0` (and so δ > 0); coupling LD
+  would drive δ < 0.
+- `rho_pearson_perm_p` is **two-tailed**, with the null repolarized per
+  permutation.
 
 **`rho_pearson` — direction-aware sign-flip test.** Per scope, computes
-the Pearson correlation between the studentized per-locus marginal
-Bulmer effect and the logit polarized allele frequency:
+the Pearson correlation between the studentized per-locus marginal Bulmer
+effect and the logit polarized allele frequency:
 
 ```
 B_j         = α_j · Σ_{k ≠ j, mask[j,k]} R_meta[j,k] · α_k
@@ -388,35 +594,13 @@ B_std_j     = (B_j_obs − mean_b B_j_null_b) / sd_b B_j_null_b
 rho_pearson = cor(B_std_j, logit(p_pol_j))         (per scope)
 ```
 
-The studentization stabilizes variance across loci with different α². The
-SIGN of ρ encodes the direction of selection:
-
-- **ρ > 0**: positive directional selection (mean phenotype rising).
-- **ρ < 0**: negative directional selection.
-
-`rho_pearson_perm_p` is two-tailed (same absolute-deviation convention as
-`dc<co>_perm_p`). Smoke run: at `sel_grad = +0.1`, ρ is positive across
-all 6 scopes, confirming the sign-aware behavior. Power is typically
-lower than `dc<co>` for tail-concentrated signals (as in Hayward-Sella
-regime), but `rho_pearson` is the right tool when you need the sign of
-selection rather than just the magnitude of the LD signature.
-
 For structured runs (`:twoD_perp` / `:twoD_recent`), the per-deme components
 (`VA_k`, `VG_off_k`, `R_k`) are deme-weighted (`w_k = N_k / N_total`) before
 ratio formation — matches the R reference's deme-weighted-component
 convention to avoid ratio-averaging bias.
 
-Configuration knobs:
+**Standalone post-hoc API:**
 
-| Field | Default | Meaning |
-|---|---|---|
-| `oracle_windows_pct` | `[5.0, 10.0, 25.0, 50.0]` | Window widths as % of `chr_len_bp` |
-| `oracle_n_perm` | `1000` | Sign-flip permutations |
-| `oracle_cutoffs` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%) |
-| `oracle_memory_path_threshold` | `10000` | Switch to per-chr matrix-free path when `p_qtl >` this. Peak fast-path memory ≈ 3·p² doubles + N·p (e.g. ~3 GB at p=10000) |
-| `oracle_precision` | `:Float64` | `:Float64` or `:Float32`. Float32 halves memory and gives ~1.3–1.5× speedup at `p_qtl ≥ 4000` via BLAS sgemm. Per-generation diagnostics stay Float64 regardless |
-
-Standalone post-hoc API:
 ```julia
 oracle = PS.oracle_stats(result;
     windows_pct = [5.0, 25.0],
@@ -426,18 +610,60 @@ oracle = PS.oracle_stats(result;
 PS.write_oracle_tsv("recompute", oracle)
 ```
 
-Expected cost (Julia BLAS, 4-thread): ~2 s for `p_qtl = 2000`,
+**Expected cost** (Julia BLAS, 4-thread): ~2 s for `p_qtl = 2000`,
 ~8 s for `p_qtl = 5000` (panmictic), `n_perm = 1000`. Peak Float64
-fast-path memory ≈ 3·p² doubles + N·p — about 3 GB at p=10000 on a
+fast-path memory ≈ `3·p²` doubles + `N·p` — about 3 GB at `p=10000` on a
 5000-individual run, comfortably within modern workstation RAM.
 
 `oracle_precision = :Float32` runs the same kernels in single precision
 (sgemm + Float32 buffers). At `p_qtl = 4900`, `n_perm = 1000`:
 ~1.4× faster (8.7 s → 6.0 s) with ~45% less memory (2.8 GB → 1.6 GB).
 B values agree with Float64 to 5+ decimals — well below report precision
-and the n_perm = 1000 perm-p quantization floor. Below `p_qtl ≈ 2000`
-the conversion overhead in mask construction and R_meta build offsets
-the sgemm savings, so the speedup is marginal there.
+and the `n_perm = 1000` perm-p quantization floor.
+
+---
+
+## Loading prior state
+
+```julia
+# Phase-preserving restart from native format:
+PS.simulate(PS.Config(load_from = "prev.psim.zst", ...))
+
+# Phase-randomized load from PLINK (heterozygous phase is randomized):
+PS.simulate(PS.Config(load_plink_prefix = "external",
+                        load_demography = :twoD, ...))
+```
+
+---
+
+## Tests
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+**360 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
+segregation, Haldane recombination at `d ∈ {0.01, 0.1, 0.5, 1.0} M`,
+cross-chr LD, neutral drift, selection regimes), Phase-2 zero-allocation
+kernels and chunk determinism, Phase-4 spatial structure (DemeLayout, `m=0`
+isolation vs `m=high` panmictic asymptote, cline gradient), Phase-5
+expansion (size scaling including fractional factors, mean-AF preservation,
+stepping-stone integration, checkpoint correctness), weighted-average
+per-deme diagnostics for 2D, the `Uqtl/Uneu` auto-derivation and
+validation, the QTL-only fast path, a regression test asserting threaded
+reductions match the `Statistics` reference under `JULIA_NUM_THREADS=4`,
+the single-knob `ngen` mode, the `:twoD_recent` demography (structure
+onset, panmictic vs structured `load_from` interaction), the `:fixed_p`
+init distribution, and oracle statistics (B perm-p, Δ_cross sign-flip
+null, rho_pearson, panmictic + structured paths, TSV side-effect).
+
+To run with parallelism (recommended):
+
+```bash
+JULIA_NUM_THREADS=4 julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+---
 
 ## Versioning
 
@@ -468,6 +694,8 @@ Workflow for pre-1.0 development:
   documented stability guarantee for output formats (PLINK, `.psim.zst`,
   summary TSV schema), and (c) reproducibility tests pinned across the
   supported Julia minor versions.
+
+---
 
 ## Reference
 

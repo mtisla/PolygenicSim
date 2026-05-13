@@ -38,10 +38,21 @@ Base.@kwdef struct Config
     Uneu::Union{Float64,Nothing} = nothing
 
     # init
+    # init_distribution selects the initial per-locus allele-frequency model:
+    #   :beta_mutation_drift  — Beta(θ,θ), drift-mutation eq SFS (default)
+    #   :uniform              — U(0,1) per locus
+    #   :beta_asymmetric      — Beta(a,b) with explicit asym_u, asym_v
+    #   :fixed_p              — every locus starts at p = init_p; the actual
+    #                           Bernoulli sampling of 2N gene copies provides
+    #                           binomial noise around init_p. Matches the
+    #                           qcseln/SimPol convention (each haploid ±1 with
+    #                           prob 0.5) when init_p = 0.5.
+    #   :empirical_sfs        — not yet implemented
     init_distribution::Symbol = :beta_mutation_drift
     theta_override::Union{Float64,Nothing} = nothing
     asym_u::Float64 = NaN                          # used only if init_distribution == :beta_asymmetric
     asym_v::Float64 = NaN
+    init_p::Float64 = 0.5                          # used only if init_distribution == :fixed_p
     maf_min::Float64 = 0.0
 
     # effects
@@ -338,8 +349,14 @@ function validate(cfg::Config)
         throw(ArgumentError("directional_start_from must be :md or :msd"))
     cfg.backend in (:packed, :dense) ||
         throw(ArgumentError("backend must be :packed or :dense"))
-    cfg.init_distribution in (:beta_mutation_drift, :beta_asymmetric, :uniform, :empirical_sfs) ||
+    cfg.init_distribution in (:beta_mutation_drift, :beta_asymmetric, :uniform, :fixed_p, :empirical_sfs) ||
         throw(ArgumentError("invalid init_distribution"))
+    if cfg.init_distribution === :fixed_p
+        0.0 <= cfg.init_p <= 1.0 ||
+            throw(ArgumentError("init_p must be in [0, 1] for :fixed_p init"))
+        cfg.maf_min == 0.0 || min(cfg.init_p, 1.0 - cfg.init_p) >= cfg.maf_min ||
+            throw(ArgumentError("init_p violates maf_min: min(init_p, 1-init_p) < maf_min"))
+    end
     cfg.effect_distribution in (:signed_exponential, :normal, :fixed) ||
         throw(ArgumentError("invalid effect_distribution"))
     for f in cfg.output_formats
