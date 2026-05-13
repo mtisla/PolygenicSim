@@ -48,6 +48,17 @@ using Printf
 #       BHH = mean(B_HH[lower-tri])
 #       δ   = BLH − 0.5 (BLL + BHH)
 #       Sign-flip null on δ → null_mean, null_sd, Z, perm_p.
+#
+#       Δ_cross null is **NOT repolarized** — by design, not by inheritance.
+#       dc is a group-comparison test (BLL vs BLH vs BHH for *these specific*
+#       observed L and H groups). The groups are defined by observed allele
+#       frequencies and are part of the test setup, not random variables.
+#       Letting groups reshuffle per permutation (loci swap between L and H
+#       under ε[j] = −1) would change the question being asked. So under
+#       sign-flip we flip α (which flips per-pair B_jk = α_j R_jk α_k via
+#       ε[j]·ε[k]) but hold the L and H sets at their observed assignments.
+#       Distinct from rho_pearson, which IS repolarized because logit(p_pol)
+#       is a continuous predictor directly tied to α's sign.
 #       perm_p is **two-tailed**: tests whether δ deviates from the null in
 #       either direction (Bulmer repulsion among rising alleles makes BLL
 #       very negative → δ > 0; coupling LD would make δ < 0). This
@@ -351,6 +362,15 @@ end
 # Δ_cross at one (scope, cutoff). Operates on the deme-weighted R_meta in
 # element type T (Float32 or Float64). All scalar outputs are returned as
 # Float64 for storage uniformity in OracleResult.
+#
+# Sign-flip null does NOT repolarize the L/H groups. By design: dc is a
+# group-comparison test where the L and H bins are defined by observed
+# allele frequencies and held fixed across permutations. Only the per-pair
+# B_jk values get sign-flipped via α_perm = ε ⊙ α (giving s_j · s_k · B_jk).
+# Repolarizing would shuffle loci between L and H under sign-flips, which
+# would conflate the "is the LL/LH/HH structure different from random?"
+# question with "are the L and H sets themselves stable under sign-flip?"
+# — a different and less interpretable test.
 function _delta_cross_one(R_meta::Matrix{T}, α::Vector{T},
                             p_pool::Vector{Float64}, raw_signs::Matrix{T},
                             mask::BitMatrix, cutoff::Int) where {T<:AbstractFloat}
