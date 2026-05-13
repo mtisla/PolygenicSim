@@ -9,6 +9,37 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-05-12
+
+### Fixed
+- **`rho_pearson` sign-flip null now repolarizes `logit(p_pol)` per
+  permutation.** Under sign-flip α_perm = ε ⊙ α, the polarized logit at
+  locus j flips whenever ε[j] = −1:
+  ```
+  logit(p_pol_perm[j, b]) = ε[j, b] · logit(p_pol_obs[j])
+  ```
+  (using `logit(1 − p) = −logit(p)`). Previously the null correlation
+  used the *observed* `logit_p` for every permutation — inherited
+  verbatim from `bulmer/R/stats.R` but theoretically inconsistent:
+  the per-locus ε[j, b] factor entered `B_std_null` (via α_perm) but
+  not `logit_p`, giving a variance-inflated null distribution where the
+  per-locus sign-flip of B was unmatched on the logit_p side.
+
+  With the fix, both `B_std_null[j, b]` and `logit_p_perm[j, b]` carry
+  the same ε[j, b] factor — they flip together at each locus per perm,
+  giving the consistent null for the "sign-flip on α" hypothesis.
+
+  Effect on output: observed `rho_pearson` is unchanged (the
+  observed-data statistic doesn't depend on the null). `perm_p` values
+  change because the null distribution shape changes — typically
+  tighter in the working Hayward-Sella regime (giving stronger
+  signals), but possibly less powerful in extreme-selection regimes
+  where the test is already misbehaving.
+
+  Deliberate divergence from the R reference. The R version remains
+  the verbatim implementation of `compute_direction_stats` in
+  `bulmer/R/stats.R` (no repolarization).
+
 ## [0.7.0] — 2026-05-12
 
 Replace the pair-level `rho_B_logitp` with a direction-aware per-locus
@@ -445,7 +476,8 @@ Initial public snapshot. Phases 1, 2, 4, 5 of `IMPLEMENTATION_PLAN.md`.
   kernels, Phase-4 spatial structure, Phase-5 expansion correctness, and
   dense ≡ packed bit-identity at fixed seed.
 
-[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/mtisla/PolygenicSim/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/mtisla/PolygenicSim/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/mtisla/PolygenicSim/compare/v0.6.4...v0.7.0
 [0.6.4]: https://github.com/mtisla/PolygenicSim/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/mtisla/PolygenicSim/compare/v0.6.2...v0.6.3

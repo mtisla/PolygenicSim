@@ -29,6 +29,15 @@ using Printf
 #       B_null[b, scope]          = VG_off_null_meta[b, scope] / VA_meta
 #       B_perm_p_scope = (1 + #{B_null ≤ B_obs}) / (n_perm + 1)
 #
+#   rho_pearson sign-flip null: REPOLARIZED per perm. Under α_perm = ε ⊙ α,
+#   the polarized logit becomes  logit(p_pol_perm[j]) = ε[j] · logit(p_pol_obs[j])
+#   since logit(1 − p) = −logit(p). Both `B_std_null` and `logit_p_perm` carry
+#   the same ε[j] factor per locus per perm — the pair flips together, which
+#   is the consistent null for "sign-flip on α". Diverges from the R reference
+#   (`bulmer/R/stats.R`) which uses observed-α logit_p across all perms; that
+#   version's null is variance-inflated by the unmatched sign flipping of B
+#   alone, giving wider but less calibrated perm_p tails.
+#
 #   Δ_cross (per cutoff c ∈ {20, 50} × scope):
 #       polarize: p_pol_j = a_j ≥ 0 ? p_pool_j : 1 − p_pool_j
 #       L  = {j : 0.005 ≤ p_pol_j < c/100}
@@ -586,28 +595,38 @@ function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
     norm_bx = sqrt(sum(abs2, bx))
     rho_obs = norm_bx > 1e-30 ? dot(bx, ly) / (norm_bx * norm_ly) : NaN
 
-    # 9. Null rho per perm: cor(B_std_null_b, logit_p) on valid loci.
+    # 9. Null rho per perm: cor(B_std_null_b, logit_p_perm_b) on valid loci.
+    # **Repolarization**: under sign-flip α_perm = ε ⊙ α, the trait+ allele at
+    # locus j flips whenever ε[j] = −1, so the polarized logit becomes
+    #   logit(p_pol_perm[j, b]) = ε[j, b] · logit(p_pol_obs[j])
+    # (since logit(1 − p) = −logit(p)). Both `B_std_null` and `logit_p_perm`
+    # carry the same ε[j, b] factor — pair-flipped at each locus per perm —
+    # which tightens the null distribution vs the no-repolarization version.
     rho_null = Vector{Float64}(undef, n_perm)
     bxb = Vector{Float64}(undef, n_v)
+    ly_perm = Vector{Float64}(undef, n_v)
     @inbounds for b in 1:n_perm
-        # Build standardized null vector on valid loci
-        s = 0.0
+        # Pass 1: build standardized null B and repolarized logit_p; sums.
+        sx = 0.0; sy = 0.0
         for vi in 1:n_v
             j = valid[vi]
-            v = (Bj_null[j, b] - Bj_mean[j]) / Bj_sd[j]
-            bxb[vi] = v
-            s += v
+            bxb[vi]    = (Bj_null[j, b] - Bj_mean[j]) / Bj_sd[j]
+            ly_perm[vi] = Float64(raw_signs[j, b]) * logit_p_v[vi]
+            sx += bxb[vi]; sy += ly_perm[vi]
         end
-        mxb = s / n_v
-        nb  = 0.0
-        cv  = 0.0
+        mxb = sx / n_v
+        myb = sy / n_v
+        # Pass 2: centered variances and covariance.
+        nb = 0.0; ny = 0.0; cv = 0.0
         for vi in 1:n_v
-            d = bxb[vi] - mxb
+            d  = bxb[vi]    - mxb
+            dy = ly_perm[vi] - myb
             nb += d * d
-            cv += d * ly[vi]
+            ny += dy * dy
+            cv += d * dy
         end
-        norm_b = sqrt(nb)
-        rho_null[b] = norm_b > 1e-30 ? cv / (norm_b * norm_ly) : NaN
+        norm_b = sqrt(nb); norm_y = sqrt(ny)
+        rho_null[b] = (norm_b > 1e-30 && norm_y > 1e-30) ? cv / (norm_b * norm_y) : NaN
     end
 
     valid_null = filter(!isnan, rho_null)
