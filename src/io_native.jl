@@ -1,4 +1,6 @@
 using CodecZstd
+using TOML
+using Dates
 
 # =============================================================================
 # Native restart format (.psim.zst)
@@ -73,9 +75,15 @@ function _save_native_packed(path::AbstractString, H::Matrix{UInt64},
     buf = IOBuffer()
     write(buf, NATIVE_MAGIC)
     write(buf, NATIVE_VERSION)
+    # Derive the n_qtl/n_neutral counts from the actual `vt.is_qtl` so the
+    # header round-trips correctly under ISM (where `cfg.n_qtl + cfg.n_neutral`
+    # is just an init hint, not the true slot count). Under FSM this is
+    # numerically identical to `cfg.n_qtl, cfg.n_neutral`. Sum == L (pop.L).
+    n_qtl_actual    = Int(count(vt.is_qtl))
+    n_neutral_actual = Int(L) - n_qtl_actual
     # Use the *effective* layout fields (so :twoD_recent in its pre-structure
     # phase is correctly serialized as a single-deme panmictic state).
-    hdr = NativeHeader(Int32(cfg.n_chr), Int32(cfg.n_qtl), Int32(cfg.n_neutral),
+    hdr = NativeHeader(Int32(cfg.n_chr), Int32(n_qtl_actual), Int32(n_neutral_actual),
                          Int32(layout.N_per_deme), Int32(layout.n_demes),
                          Int32(layout.grid_size))
     write(buf, hdr.n_chr)
@@ -218,4 +226,164 @@ function load_native(path::AbstractString)
                        N_per_deme, n_demes_v, grid_size, deme_id)
 end
 
-export save_native, load_native, NativeLoad
+# =============================================================================
+# Settled-state cache: save end-of-Phase-A snapshots to
+# `<pkgdir(PolygenicSim)>/data/settled/` so directional follow-on runs can
+# skip the settling phase by setting `load_from=<path>.psim.zst`.
+# Filename encodes settle-affecting Config fields; sidecar TOML stores the
+# full Config + realized stats for provenance/lookup.
+# =============================================================================
+
+"""
+    settled_data_dir() -> String
+
+Package-rooted cache directory for settled-state snapshots
+(`<pkgdir(PolygenicSim)>/data/settled/`). Path is stable across cwd.
+"""
+function settled_data_dir()
+    root = pkgdir(@__MODULE__)
+    root === nothing && error("settled_data_dir: pkgdir lookup failed; PolygenicSim must be loaded as a package")
+    return joinpath(root, "data", "settled")
+end
+
+# Short token for cfg.mutation_model / cfg.init_distribution used in
+# filename descriptors.
+@inline _mut_tag(cfg::Config) = cfg.mutation_model === :infinite_sites ? "ism" : "fsm"
+@inline function _init_tag(cfg::Config)
+    cfg.init_distribution === :ism_watterson      && return "watt"
+    cfg.init_distribution === :ism_denovo         && return "denovo"
+    cfg.init_distribution === :beta_mutation_drift && return "beta"
+    cfg.init_distribution === :uniform            && return "unif"
+    cfg.init_distribution === :beta_asymmetric    && return "basym"
+    cfg.init_distribution === :fixed_p            && return "fixed"
+    cfg.init_distribution === :empirical_sfs      && return "esfs"
+    return string(cfg.init_distribution)
+end
+
+"""
+    settled_filename_descriptor(cfg) -> String
+
+Encode the settle-affecting Config fields into a human-readable filename
+stem (no extension). Two runs with identical settle params yield the
+same descriptor and overwrite the same cache entry.
+"""
+function settled_filename_descriptor(cfg::Config)
+    mut  = _mut_tag(cfg)
+    init = _init_tag(cfg)
+    # Uqtl × 1000 (so 0.005 → 5, 0.02 → 20); h2 × 100 (0.7 → 70).
+    Uqtl_int = round(Int, cfg.Uqtl * 1000)
+    h2_int   = round(Int, cfg.h2 * 100)
+    es_int   = round(Int, cfg.effect_scale * 1000)
+    vs_str = cfg.vs !== nothing ?
+        "vs" * string(round(Int, cfg.vs)) :
+        "vsr" * string(round(Int, cfg.vs_over_vp0))
+    sel = cfg.selection_mode === :stabilizing ? "stab" :
+          cfg.selection_mode === :directional ? "dir"  :
+          "neut"
+    return string(mut, "_", init, "_",
+                   "N", cfg.N, "_",
+                   "nq", cfg.n_qtl,
+                   cfg.n_neutral > 0 ? "_nn$(cfg.n_neutral)" : "",
+                   "_Uq", Uqtl_int,
+                   "_es", es_int,
+                   "_h2_", h2_int, "_", vs_str, "_",
+                   sel, "_ngeq", cfg.ngen_eq, "_seed", cfg.seed)
+end
+
+# Try to capture the current git SHA at the package root, empty string on
+# any failure (e.g. tarball install, no git in PATH).
+function _git_sha_short()
+    try
+        root = pkgdir(@__MODULE__)
+        root === nothing && return ""
+        sha = chomp(read(`git -C $root rev-parse --short=12 HEAD`, String))
+        return String(sha)
+    catch
+        return ""
+    end
+end
+
+function _polysim_version()
+    try
+        root = pkgdir(@__MODULE__)
+        root === nothing && return "unknown"
+        toml = TOML.parsefile(joinpath(root, "Project.toml"))
+        return get(toml, "version", "unknown")
+    catch
+        return "unknown"
+    end
+end
+
+# Convert one Config field value to a TOML-safe primitive.
+@inline _toml_value(x::Symbol)         = String(x)
+@inline _toml_value(x::Vector{Symbol}) = String.(x)
+@inline _toml_value(x::UInt64)         = Int(x)
+@inline _toml_value(x::Vector{UInt64}) = Int.(x)
+@inline _toml_value(x)                 = x
+
+function _config_to_dict(cfg::Config)
+    d = Dict{String,Any}()
+    for f in fieldnames(Config)
+        v = getfield(cfg, f)
+        v === nothing && continue   # TOML has no null; drop optional Nothing fields
+        d[String(f)] = _toml_value(v)
+    end
+    return d
+end
+
+"""
+    save_settled(prefix_no_ext, pop, vt, cfg, deme_id, layout;
+                 gen, wall_time_seconds,
+                 V_A_0, V_P_0, Vs, mean_A_0,
+                 V_A_settled, V_P_settled, B_pooled_settled,
+                 mean_A_settled) -> (psim_path, toml_path)
+
+Write a settled-state snapshot (`.psim.zst` haplotypes + `.toml` sidecar
+with full Config + provenance + realized stats). Used by `simulate()`
+when `cfg.save_settled = true`. Returns the (psim, toml) path pair.
+"""
+function save_settled(prefix_no_ext::AbstractString,
+                       pop, vt::VariantTable,
+                       cfg::Config, deme_id::Vector{Int},
+                       layout::DemeLayout;
+                       gen::Int,
+                       wall_time_seconds::Float64,
+                       V_A_0::Float64, V_P_0::Float64, Vs::Float64,
+                       mean_A_0::Float64,
+                       V_A_settled::Float64=NaN, V_P_settled::Float64=NaN,
+                       B_pooled_settled::Float64=NaN,
+                       mean_A_settled::Float64=NaN)
+    psim_path = prefix_no_ext * ".psim.zst"
+    toml_path = prefix_no_ext * ".toml"
+    save_native(psim_path, pop, vt, cfg, deme_id; layout=layout)
+    meta = Dict{String,Any}(
+        "polysim_version"    => _polysim_version(),
+        "git_sha"            => _git_sha_short(),
+        "saved_at"           => string(Dates.now()),
+        "gen"                => gen,
+        "wall_time_seconds"  => wall_time_seconds,
+        "descriptor"         => settled_filename_descriptor(cfg),
+    )
+    realized = Dict{String,Any}(
+        "V_A_0"            => V_A_0,
+        "V_P_0"            => V_P_0,
+        "Vs"               => Vs,
+        "mean_A_0"         => mean_A_0,
+        "V_A_settled"      => V_A_settled,
+        "V_P_settled"      => V_P_settled,
+        "B_pooled_settled" => B_pooled_settled,
+        "mean_A_settled"   => mean_A_settled,
+    )
+    data = Dict{String,Any}(
+        "meta"     => meta,
+        "realized" => realized,
+        "config"   => _config_to_dict(cfg),
+    )
+    open(toml_path, "w") do io
+        TOML.print(io, data)
+    end
+    return (psim_path, toml_path)
+end
+
+export save_native, load_native, NativeLoad,
+       save_settled, settled_data_dir, settled_filename_descriptor

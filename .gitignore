@@ -18,3 +18,13 @@ docs/site/
 .vscode/
 .idea/
 *.swp
+
+# Settled-state cache (data/settled/*.psim.zst + *.toml). Regenerable from
+# Config + seed; do not commit the binary blobs. The README and .gitkeep
+# placeholders are kept so the dir exists on fresh clones.
+data/*
+!data/README.md
+!data/.gitkeep
+!data/settled/
+data/settled/*
+!data/settled/.gitkeep

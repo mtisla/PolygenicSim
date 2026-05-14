@@ -3,6 +3,7 @@ using Random
 using Statistics
 using StatsBase
 using Distributions
+using TOML
 using PolygenicSim
 const PS = PolygenicSim
 
@@ -1269,6 +1270,101 @@ end
         seed=UInt64(11), n_threads=1)
     res_noor = PS.simulate(cfg_noor)
     @test res_noor.oracle === nothing
+end
+
+@testset "save_settled — Phase A snapshot + TOML sidecar" begin
+    # Use a tiny config so the test runs fast. Save to a temp subdir of the
+    # package cache; clean up after to avoid polluting the real cache.
+    cfg = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=10_000,
+        n_qtl=30, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5, ngen_eq=5,
+        save_settled=true,
+        output_formats=Symbol[],
+        seed=UInt64(771))
+    cache_dir = PS.settled_data_dir()
+    desc = PS.settled_filename_descriptor(cfg)
+    psim_path = joinpath(cache_dir, desc * ".psim.zst")
+    toml_path = joinpath(cache_dir, desc * ".toml")
+    # Clean any prior artifact so the test is hermetic.
+    isfile(psim_path) && rm(psim_path)
+    isfile(toml_path) && rm(toml_path)
+    try
+        res = PS.simulate(cfg)
+        @test isfile(psim_path)
+        @test isfile(toml_path)
+        # Sidecar should parse + round-trip the Config fields that matter
+        # for matching settled snapshots.
+        parsed = TOML.parsefile(toml_path)
+        @test haskey(parsed, "meta")
+        @test haskey(parsed, "realized")
+        @test haskey(parsed, "config")
+        @test parsed["config"]["N"] == cfg.N
+        @test parsed["config"]["Ne"] == cfg.Ne
+        @test parsed["config"]["n_qtl"] == cfg.n_qtl
+        @test parsed["config"]["Uqtl"] == cfg.Uqtl
+        @test parsed["config"]["h2"] == cfg.h2
+        @test parsed["config"]["mutation_model"] == "infinite_sites"
+        @test parsed["config"]["init_distribution"] == "ism_watterson"
+        @test parsed["config"]["seed"] == Int(cfg.seed)
+        @test parsed["meta"]["gen"] == cfg.ngen_eq
+        @test haskey(parsed["realized"], "V_A_0")
+        @test haskey(parsed["realized"], "V_A_settled")
+        # Round-trip: load the .psim.zst and continue 0 gens — state intact.
+        cfg_load = PS.Config(
+            N=cfg.N, Ne=cfg.Ne, n_chr=cfg.n_chr, chr_len_bp=cfg.chr_len_bp,
+            n_qtl=cfg.n_qtl, Uqtl=cfg.Uqtl,
+            mutation_model=cfg.mutation_model,
+            init_distribution=cfg.init_distribution,
+            h2=cfg.h2,
+            load_from=psim_path,
+            ngen_dir=0,
+            output_formats=Symbol[],
+            seed=UInt64(772))
+        res_load = PS.simulate(cfg_load)
+        @test res_load.pop.L == res.pop.L
+        # Bit-identity at the haplotype level — the saved state is the
+        # loaded state.
+        @test res_load.pop.H == res.pop.H
+    finally
+        isfile(psim_path) && rm(psim_path)
+        isfile(toml_path) && rm(toml_path)
+    end
+
+    # save_settled = false should NOT touch the cache dir.
+    cfg_off = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=10_000,
+        n_qtl=30, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5, ngen_eq=5,
+        save_settled=false,
+        output_formats=Symbol[],
+        seed=UInt64(773))
+    desc_off = PS.settled_filename_descriptor(cfg_off)
+    psim_off = joinpath(cache_dir, desc_off * ".psim.zst")
+    isfile(psim_off) && rm(psim_off)
+    PS.simulate(cfg_off)
+    @test !isfile(psim_off)
+
+    # save_settled = true with ngen_eq_eff == 0 (single-knob mode) should
+    # also no-op silently — no Phase A to snapshot.
+    cfg_nk = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=10_000,
+        n_qtl=30, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5, ngen=5,            # single-knob mode → ngen_eq_eff = 0
+        save_settled=true,
+        output_formats=Symbol[],
+        seed=UInt64(774))
+    desc_nk = PS.settled_filename_descriptor(cfg_nk)
+    psim_nk = joinpath(cache_dir, desc_nk * ".psim.zst")
+    isfile(psim_nk) && rm(psim_nk)
+    PS.simulate(cfg_nk)
+    @test !isfile(psim_nk)
 end
 
 @testset "Oracle — multi-phase recording" begin

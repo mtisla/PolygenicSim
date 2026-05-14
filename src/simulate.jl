@@ -231,6 +231,31 @@ function simulate(cfg::Config)
             oracle_records[:settled] = oracle_stats(tmp)
             write_oracle_tsv(cfg.output_prefix, oracle_records[:settled]; phase=:settled)
         end
+        # save_settled — write a Phase-A snapshot + TOML sidecar to the
+        # package's data/settled cache so a follow-on directional run can
+        # `load_from=<path>.psim.zst` and skip these gens. No-op when
+        # ngen_eq_eff == 0 (load_from or single-knob mode).
+        if cfg.save_settled && gen == ngen_eq_eff && ngen_eq_eff > 0
+            cache_dir = settled_data_dir()
+            mkpath(cache_dir)
+            descriptor = settled_filename_descriptor(cfg)
+            prefix_no_ext = joinpath(cache_dir, descriptor)
+            compute_breeding_values!(scratch, pop, vt)
+            allele_freqs!(p_buf, pop, vt)
+            mA_set, vA_set = population_mean_var(scratch.A)
+            sov_pool = sum_of_per_locus_var(p_buf, vt.alpha)
+            B_pool_set = sov_pool > 0 ? (vA_set - sov_pool) / sov_pool : 0.0
+            sample_env!(scratch.env, sigma_E, rng)
+            _, vP_set = population_mean_var(scratch.A .+ scratch.env)
+            psim_path, toml_path = save_settled(prefix_no_ext, pop, vt, cfg,
+                deme_id, scratch.layout;
+                gen=gen,
+                wall_time_seconds=time() - t_start,
+                V_A_0=V_A0, V_P_0=V_P0, Vs=Vs, mean_A_0=mean_A0,
+                V_A_settled=vA_set, V_P_settled=vP_set,
+                B_pooled_settled=B_pool_set, mean_A_settled=mA_set)
+            @info "save_settled: cached Phase-A snapshot" psim_path toml_path
+        end
     end
     # Always write a final-gen output if no checkpoint was specified
     if isempty(paths) && total_gens >= 0

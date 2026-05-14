@@ -162,6 +162,19 @@ Base.@kwdef struct Config
     # output
     output_formats::Vector{Symbol} = Symbol[:plink]
     output_prefix::String = "polygenicsim"
+    # When true and `ngen_eq_eff > 0`, write a settled-phase snapshot at the
+    # end of Phase A to `<pkgdir(PolygenicSim)>/data/settled/`. Two files:
+    #   {descriptor}.psim.zst — full population state (same format as
+    #                            save_native).
+    #   {descriptor}.toml     — sidecar with the full Config, realized
+    #                            gen-0 stats (V_A_0, V_P_0, Vs, mean_A_0),
+    #                            and settled stats (V_A, V_P, B_pooled).
+    # `{descriptor}` encodes the settle-affecting Config fields so two
+    # runs with identical settle params produce identical filenames.
+    # Use these as input to `load_from` in follow-on runs to skip the
+    # settling phase. Silently no-op when ngen_eq_eff == 0 (load_from or
+    # single-knob mode).
+    save_settled::Bool = false
 
     # oracle statistics (computed end-of-sim when `:oracle ∈ output_formats`
     # OR via post-hoc `oracle_stats(result; ...)`).

@@ -9,6 +9,37 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-05-14
+
+### Added
+- **`Config.save_settled::Bool = false`**. When `true` (and
+  `ngen_eq_eff > 0`), `simulate()` writes a snapshot at the end of
+  Phase A to `<pkgdir(PolygenicSim)>/data/settled/`:
+  - `{descriptor}.psim.zst` — full population state (same format as
+    `save_native`).
+  - `{descriptor}.toml` — sidecar with `[meta]`
+    (polysim_version, git_sha, saved_at, gen, wall_time_seconds,
+    descriptor), `[realized]` (V_A_0, V_P_0, Vs, mean_A_0,
+    V_A_settled, V_P_settled, B_pooled_settled, mean_A_settled),
+    and `[config]` (every Config field).
+  Filenames encode all settle-affecting params so a given Config →
+  deterministic descriptor; load with `load_from=<path>.psim.zst` in
+  a follow-on Config to skip the settling phase. Silently no-op
+  when `ngen_eq_eff == 0` (load_from or single-knob).
+- **`data/` directory** at the repo root, gitignored. Holds the
+  settled-state cache. `data/README.md` documents the layout,
+  filename grammar, and producer/consumer workflow.
+- **`PolygenicSim.save_settled` / `settled_data_dir` /
+  `settled_filename_descriptor`** exported helpers.
+- **`TOML` + `Dates`** added to `[deps]` (both stdlib).
+
+### Tests
+- 11 new cases under "save_settled — Phase A snapshot + TOML sidecar":
+  hermetic round-trip (save → load → state-identity), TOML schema
+  validation (meta/realized/config sections, key fields preserved),
+  `save_settled=false` no-op verification, single-knob `ngen` mode
+  no-op verification.
+
 ## [0.8.1] — 2026-05-14
 
 ### Added

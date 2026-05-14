@@ -18,6 +18,7 @@ This package implements **Phases 1, 2, 4, 5** of the spec in
 - [Quickstart](#quickstart)
 - [Examples](#examples)
 - [Multi-rep workflow](#multi-rep-workflow)
+  - [Settled-state cache](#settled-state-cache)
 - [Configuration reference](#configuration-reference)
 - [Mutation rates](#mutation-rates)
 - [Mutation model](#mutation-model)
@@ -178,6 +179,57 @@ end
 Loaded state preserves haplotype phase, so the directional shift fires
 against the same Bulmer-equilibrated population in every rep.
 
+### Settled-state cache
+
+For an opinionated version of the same workflow with deterministic
+filenames and a TOML provenance sidecar, set `save_settled = true`. At
+the end of Phase A the simulator writes both files to the package's
+`data/settled/` cache:
+
+```julia
+# 1. Produce the cache entry once.
+PS.simulate(PS.Config(
+    N=5_000, Ne=5_000, n_qtl=1_000, Uqtl=0.02,
+    mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+    h2=0.7, vs_over_vp0=20.0,
+    selection_mode=:stabilizing, ngen_eq=25_000,
+    save_settled=true,                    # ← writes data/settled/{descriptor}.{psim.zst,toml}
+    output_formats=Symbol[], seed=UInt64(1),
+))
+
+# 2. Every follow-on directional rep loads the same cache entry.
+for shift in (2.0, 4.0, 6.0)
+    PS.simulate(PS.Config(
+        N=5_000, Ne=5_000, n_qtl=1_000, Uqtl=0.02,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        h2=0.7, vs_over_vp0=20.0,
+        selection_mode=:directional, shift_sd=shift, ngen_dir=50,
+        load_from="data/settled/ism_watt_N5000_nq1000_Uq20_es30_h2_70_vsr20_stab_ngeq25000_seed1.psim.zst",
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:final],
+        seed=UInt64(rand(UInt32)),
+    ))
+end
+```
+
+The descriptor is deterministic in the Config — `PS.settled_filename_descriptor(cfg)`
+returns it. The `.toml` sidecar carries the full Config plus realized
+gen-0 stats (`V_A_0`, `V_P_0`, `Vs`, `mean_A_0`) and settled stats
+(`V_A_settled`, `V_P_settled`, `B_pooled_settled`, `mean_A_settled`)
+for provenance and programmatic lookup:
+
+```julia
+using TOML
+meta = TOML.parsefile("data/settled/<descriptor>.toml")
+meta["config"]["h2"]              # 0.7
+meta["realized"]["V_A_settled"]   # variance of breeding values at end of Phase A
+meta["meta"]["polysim_version"]   # version that produced the snapshot
+```
+
+The cache is gitignored — each entry is reproducible from `(Config,
+seed)`. See `data/README.md` for the full layout, descriptor grammar,
+and regeneration recipe.
+
 ---
 
 ## Configuration reference
@@ -278,6 +330,7 @@ Pick one of the two models; setting both is an error.
 |---|---|---|---|
 | `output_formats` | `Vector{Symbol}` | `[:plink]` | Subset of `:plink`, `:native`, `:summary`, `:oracle`. |
 | `output_prefix` | `String` | `"polygenicsim"` | Filename prefix for all output files. |
+| `save_settled` | `Bool` | `false` | When `true` and `ngen_eq_eff > 0`, write a Phase-A snapshot (`{descriptor}.psim.zst` + `{descriptor}.toml` sidecar) to `<pkgdir>/data/settled/` so follow-on directional runs can `load_from=...` and skip the settling phase. See [Settled-state cache](#settled-state-cache). |
 
 ### Oracle statistics (only used when `:oracle ∈ output_formats`)
 
