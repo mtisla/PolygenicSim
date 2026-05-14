@@ -9,6 +9,26 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-05-14
+
+### Changed — BREAKING: oracle output schema
+- **Dropped** three directional statistics that did not add useful signal
+  in v0.10.0 experiments:
+  - `rho_pair_pol_fix` (numerically identical to `T_slope` per scope).
+  - `rho_pair_pol_rep` (consistently weaker than `_fix` and `T_slope`).
+  - `T_asym` and `T_asym_r` (no scope ever fired in the v18 multiphase test).
+- **Added** `rho_pearson_q10` — same definition as `rho_pearson_q25` but
+  restricts the per-locus B_j to the bottom 10 % of partner contributions
+  instead of 25 %. Sharper tail-focus for picking up directional signal
+  hidden by symmetric noise. Five fields per scope, parallel to q25.
+- `_oracle_regression_tests` now returns only `T_slope` / `T_slope_r`.
+  The OLS pre-pass no longer accumulates the (now unused) sums of `w`,
+  `s`, and their cross-terms.
+
+### Tests
+- Renamed testset → "Oracle — q10/q25 stats + oracle_r_controls gate";
+  drops assertions on the four removed fields, adds q10 finite-output check.
+
 ## [0.10.0] — 2026-05-14
 
 ### Added — three new directional statistics

@@ -1430,7 +1430,7 @@ end
     @test :final in keys(res_noseet.oracle_records)
 end
 
-@testset "Oracle — new pair/q25 stats + oracle_r_controls gate" begin
+@testset "Oracle — q10/q25 stats + oracle_r_controls gate" begin
     cfg = PS.Config(
         N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
         n_qtl=60, Uqtl=0.02,
@@ -1446,18 +1446,15 @@ end
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
     o = res.oracle
-    # The three new tests are populated for every scope.
-    @test length(o.rho_pair_pol_fix) == length(o.scope_names)
-    @test length(o.rho_pair_pol_rep) == length(o.scope_names)
-    @test length(o.rho_pearson_q25)  == length(o.scope_names)
+    # q10 and q25 populated for every scope.
+    @test length(o.rho_pearson_q10) == length(o.scope_names)
+    @test length(o.rho_pearson_q25) == length(o.scope_names)
     # At least one scope should produce a finite value (small N may give NaN
     # at scopes with too few pairs, so we only require any).
-    @test any(isfinite, o.rho_pair_pol_fix)
-    @test any(isfinite, o.rho_pair_pol_rep)
+    @test any(isfinite, o.rho_pearson_q10)
     @test any(isfinite, o.rho_pearson_q25)
-    # Default behavior: _r variants skipped (all NaN).
+    # Default behavior: _r variant skipped (all NaN).
     @test all(isnan, o.T_slope_r)
-    @test all(isnan, o.T_asym_r)
 
     # Opt-in: oracle_r_controls=true re-enables _r computation.
     cfg2 = PS.Config(
@@ -1477,7 +1474,6 @@ end
     res2 = PS.simulate(cfg2)
     o2 = res2.oracle
     @test any(isfinite, o2.T_slope_r)
-    @test any(isfinite, o2.T_asym_r)
 end
 
 @testset "ISM — infinite-sites mutation model" begin

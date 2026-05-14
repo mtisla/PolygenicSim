@@ -61,6 +61,7 @@ struct OracleResult
     #
     # T_slope    — β slope of B_jk on |Δp_pol|, intercept only.
     # T_slope_r  — β slope of B_jk on |Δp_pol|, with log r_jk covariate.
+    #              Only populated when cfg.oracle_r_controls = true.
     T_slope::Vector{Float64}
     T_slope_null_mean::Vector{Float64}
     T_slope_null_sd::Vector{Float64}
@@ -71,44 +72,17 @@ struct OracleResult
     T_slope_r_null_sd::Vector{Float64}
     T_slope_r_Z::Vector{Float64}
     T_slope_r_perm_p::Vector{Float64}
-    # T_asym    — β_asym slope of B_jk on a_jk, with intercept + s_jk only.
-    # T_asym_r  — β_asym slope of B_jk on a_jk, with intercept + s_jk + log r_jk.
-    # Here a_jk = (p_pol_j−½)(p_pol_k−½), s_jk = ½(p_pol_j+p_pol_k−1)².
-    T_asym::Vector{Float64}
-    T_asym_null_mean::Vector{Float64}
-    T_asym_null_sd::Vector{Float64}
-    T_asym_Z::Vector{Float64}
-    T_asym_perm_p::Vector{Float64}
-    T_asym_r::Vector{Float64}
-    T_asym_r_null_mean::Vector{Float64}
-    T_asym_r_null_sd::Vector{Float64}
-    T_asym_r_Z::Vector{Float64}
-    T_asym_r_perm_p::Vector{Float64}
-    # === Pair-level Pearson correlation tests (v0.10.0) ===
-    # rho_pair_pol_fix — cor over in-scope pairs of:
-    #   x = α_j·α_k·R_jk  (signed pair B)
-    #   y = |p_pol_j − p_pol_k|   (polarized freq distance)
-    # Sign-flip null permutes only α (x flips per pair via ε_j ε_k); y stays
-    # at observed polarization.
-    rho_pair_pol_fix::Vector{Float64}
-    rho_pair_pol_fix_null_mean::Vector{Float64}
-    rho_pair_pol_fix_null_sd::Vector{Float64}
-    rho_pair_pol_fix_Z::Vector{Float64}
-    rho_pair_pol_fix_perm_p::Vector{Float64}
-    # rho_pair_pol_rep — same x/y but the sign-flip null ALSO repolarizes
-    # the freq side per perm: when ε_j = −1, p_pol_j ↔ 1 − p_pol_j, so
-    # y_perm[j,k,b] depends on the per-pair sign product.
-    rho_pair_pol_rep::Vector{Float64}
-    rho_pair_pol_rep_null_mean::Vector{Float64}
-    rho_pair_pol_rep_null_sd::Vector{Float64}
-    rho_pair_pol_rep_Z::Vector{Float64}
-    rho_pair_pol_rep_perm_p::Vector{Float64}
-    # rho_pearson_q25 — variant of rho_pearson where the per-locus B_j is
-    # restricted to the bottom 25% (most-negative) of α_j·α_k·R_jk partner
-    # contributions per locus. Standardized via the empirical sign-flip
-    # null (mean + Bessel sd, recomputed under perm-relevant re-ranking).
-    # Final stat is cor(B_std_q25, logit(p_pol_j)) with repolarization
-    # per perm.
+    # rho_pearson_q10 / rho_pearson_q25 — variants of rho_pearson where the
+    # per-locus B_j is restricted to the bottom 10 % / 25 % (most-negative)
+    # of α_j·α_k·R_jk partner contributions per locus. Standardized via the
+    # empirical sign-flip null (mean + Bessel sd, recomputed under
+    # perm-relevant re-ranking). Final stat is cor(B_std_q, logit(p_pol_j))
+    # with repolarization per perm.
+    rho_pearson_q10::Vector{Float64}
+    rho_pearson_q10_null_mean::Vector{Float64}
+    rho_pearson_q10_null_sd::Vector{Float64}
+    rho_pearson_q10_Z::Vector{Float64}
+    rho_pearson_q10_perm_p::Vector{Float64}
     rho_pearson_q25::Vector{Float64}
     rho_pearson_q25_null_mean::Vector{Float64}
     rho_pearson_q25_null_sd::Vector{Float64}

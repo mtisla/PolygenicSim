@@ -683,131 +683,12 @@ function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
 end
 
 # =============================================================================
-# rho_pair — Pearson correlation over in-scope pairs of:
-#   x_jk = α_j · α_k · R_meta[j, k]            (signed pair B)
-#   y_jk = |p_pol_j − p_pol_k|                 (polarized freq distance)
-#
-# Two sign-flip null conventions, selected by `repolarize`:
-#   false (`rho_pair_pol_fix`): only α flips per pair → x_perm[jk] = ε_j·ε_k·x_obs[jk];
-#     y stays at the observed polarization. Sxx, Sy, Syy are perm-invariant.
-#   true (`rho_pair_pol_rep`): α flips and p_pol is repolarized per perm. The
-#     polarized freq distance becomes
-#         y_perm[jk, b] = |p_pol_j − p_pol_k|        if ε_j·ε_k = +1
-#                        |p_pol_j + p_pol_k − 1|     if ε_j·ε_k = −1
-#     (since flipping one endpoint sends p_pol_j → 1 − p_pol_j). All five sums
-#     vary per perm.
-# Two-tailed perm_p via the dc convention.
-# =============================================================================
-function _pair_pearson_one(R_meta::Matrix{T}, α::Vector{T},
-                            p_pool::Vector{Float64}, raw_signs::Matrix{T},
-                            mask::BitMatrix; repolarize::Bool) where {T<:AbstractFloat}
-    p = length(α)
-    n_perm = size(raw_signs, 2)
-    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN)
-
-    # Polarize freq under observed α
-    p_pol = Vector{Float64}(undef, p)
-    @inbounds for j in 1:p
-        p_pol[j] = α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
-    end
-
-    # Count in-scope pairs (upper triangle, j < k)
-    N = 0
-    @inbounds for k in 2:p, j in 1:(k-1)
-        mask[j, k] && (N += 1)
-    end
-    N < 5 && return nan_out
-
-    pair_j = Vector{Int32}(undef, N)
-    pair_k = Vector{Int32}(undef, N)
-    x_obs  = Vector{Float64}(undef, N)
-    y_same = Vector{Float64}(undef, N)
-    y_flip = repolarize ? Vector{Float64}(undef, N) : Float64[]
-
-    idx = 0
-    @inbounds for k in 2:p, j in 1:(k-1)
-        mask[j, k] || continue
-        idx += 1
-        pair_j[idx] = j
-        pair_k[idx] = k
-        x_obs[idx]  = Float64(α[j]) * Float64(α[k]) * Float64(R_meta[j, k])
-        y_same[idx] = abs(p_pol[j] - p_pol[k])
-        if repolarize
-            y_flip[idx] = abs(p_pol[j] + p_pol[k] - 1.0)
-        end
-    end
-
-    # Observed Pearson
-    Sx_o = 0.0; Sxx_o = 0.0; Sy_o = 0.0; Syy_o = 0.0; Sxy_o = 0.0
-    @inbounds @simd for i in 1:N
-        x = x_obs[i]; y = y_same[i]
-        Sx_o  += x;   Sxx_o += x * x
-        Sy_o  += y;   Syy_o += y * y
-        Sxy_o += x * y
-    end
-    Nf = Float64(N)
-    num0 = Nf * Sxy_o - Sx_o * Sy_o
-    den_x0 = sqrt(max(0.0, Nf * Sxx_o - Sx_o * Sx_o))
-    den_y0 = sqrt(max(0.0, Nf * Syy_o - Sy_o * Sy_o))
-    rho_obs = (den_x0 > 1e-30 && den_y0 > 1e-30) ? num0 / (den_x0 * den_y0) : NaN
-
-    rho_null = Vector{Float64}(undef, n_perm)
-    if !repolarize
-        # Sxx, Sy, Syy are constant across perms — Sxx because x_perm² = x_obs²,
-        # Sy/Syy because y is fixed.
-        den_y_c = den_y0
-        @inbounds for b in 1:n_perm
-            Sx_b = 0.0; Sxy_b = 0.0
-            @simd for i in 1:N
-                ej = Float64(raw_signs[pair_j[i], b])
-                ek = Float64(raw_signs[pair_k[i], b])
-                xp = ej * ek * x_obs[i]
-                Sx_b  += xp
-                Sxy_b += xp * y_same[i]
-            end
-            num_b   = Nf * Sxy_b - Sx_b * Sy_o
-            den_x_b = sqrt(max(0.0, Nf * Sxx_o - Sx_b * Sx_b))
-            rho_null[b] = (den_x_b > 1e-30 && den_y_c > 1e-30) ?
-                            num_b / (den_x_b * den_y_c) : NaN
-        end
-    else
-        @inbounds for b in 1:n_perm
-            Sx_b = 0.0; Sxx_b = 0.0; Sy_b = 0.0; Syy_b = 0.0; Sxy_b = 0.0
-            @simd for i in 1:N
-                ej = Float64(raw_signs[pair_j[i], b])
-                ek = Float64(raw_signs[pair_k[i], b])
-                spair = ej * ek
-                xp = spair * x_obs[i]
-                yp = spair > 0 ? y_same[i] : y_flip[i]
-                Sx_b  += xp;   Sxx_b += xp * xp
-                Sy_b  += yp;   Syy_b += yp * yp
-                Sxy_b += xp * yp
-            end
-            num_b   = Nf * Sxy_b - Sx_b * Sy_b
-            den_x_b = sqrt(max(0.0, Nf * Sxx_b - Sx_b * Sx_b))
-            den_y_b = sqrt(max(0.0, Nf * Syy_b - Sy_b * Sy_b))
-            rho_null[b] = (den_x_b > 1e-30 && den_y_b > 1e-30) ?
-                            num_b / (den_x_b * den_y_b) : NaN
-        end
-    end
-
-    valid_null = filter(isfinite, rho_null)
-    isempty(valid_null) && return nan_out
-    nm  = mean(valid_null)
-    nsd = std(valid_null; corrected=true)
-    Z   = nsd > 1e-30 && isfinite(rho_obs) ? (rho_obs - nm) / nsd : NaN
-    abs_dev = abs(rho_obs - nm)
-    perm_p = (1 + count(r -> isfinite(r) && abs(r - nm) >= abs_dev, rho_null)) /
-                 (length(rho_null) + 1)
-    return (rho = rho_obs, null_mean = nm, null_sd = nsd, Z = Z, perm_p = perm_p)
-end
-
-# =============================================================================
-# rho_pearson_q25 — variant of rho_pearson where the per-locus marginal
-# B_j is restricted to the bottom 25 % (most negative) of α_j·α_k·R[j,k]
+# rho_pearson_qX — variant of rho_pearson where the per-locus marginal
+# B_j is restricted to the bottom q-fraction (most negative) of α_j·α_k·R[j,k]
 # partner contributions per locus. Standardize via empirical sign-flip
 # null (mean + Bessel sd), then correlate with logit(p_pol_j). Repolarize
 # the freq side per perm (matches rho_pearson convention).
+# `q` defaults to 0.25 (rho_pearson_q25); also called with q=0.10 (q10).
 # =============================================================================
 function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
                                 p_pool::Vector{Float64}, raw_signs::Matrix{T},
@@ -1000,30 +881,25 @@ function _quadform_signflip!(WR_buf::Matrix{T}, W::Matrix{T},
     return obs, null
 end
 
-# Regression-family directional tests per scope. Paired (no-r) vs (with-r)
-# versions of two test families:
+# Regression-family directional test per scope. Paired (no-r) vs (with-r)
+# variants of one test family:
 #   T_slope / T_slope_r — slope of B on |Δp_pol| (controls for log r in _r).
-#   T_asym / T_asym_r  — partial slope of B on a_jk (controls for s_jk; the _r
-#                         variant also controls for log r_jk).
 #
-# All operate on the deme-weighted correlation matrix R_meta, use the
+# Operates on the deme-weighted correlation matrix R_meta, uses the
 # sign-flip null on α, and polarized + allele freqs (p_pol_j = p_pool_j if
 # α_j ≥ 0 else 1 − p_pool_j).
 #
 # Math (polarized freqs):
 #   |Δp|_jk    = |p_pol_j − p_pol_k|
-#   a_jk       = (p_pol_j − ½)(p_pol_k − ½)
-#   s_jk       = ½(p_pol_j + p_pol_k − 1)²
 #   log r_jk   = log r_jk  (Haldane on bp dist, capped at log(0.5) cross-chr)
 #
-#   T_slope (β_1): regress B_jk on (1, |Δp|, log r); FWL gives
-#     x̃_jk = |Δp|_jk − OLS-fit on (1, log r) over in-scope pairs.
+#   T_slope (β_1): regress B_jk on (1, |Δp|); FWL gives
+#     x̃_jk = |Δp|_jk − mean_{in-scope}(|Δp|).
 #     β_1 = Σ x̃_jk · α_j α_k R_jk / Σ x̃²_jk = α' (W_slope ⊙ R_masked) α / 2
 #     where W_slope[j,k] = x̃_jk / Σ x̃².
 #
-#   T_asym (β_asym): regress B_jk on (1, a_jk, s_jk, log r); FWL gives
-#     ã_jk = a_jk − OLS-fit on (1, s_jk, log r) over in-scope pairs.
-#     β_asym = α' (W_asym ⊙ R_masked) α / 2  with W_asym[j,k] = ã_jk / Σ ã².
+#   T_slope_r: regress B_jk on (1, |Δp|, log r); FWL residualizes |Δp|
+#     against (1, log r) over in-scope pairs first.
 #
 # Sign-flip null: α_perm = ε ⊙ α; recompute each quadratic form. Two-tailed
 # perm_p uses |obs − null_mean| ≥ |null − null_mean| (same as dc).
@@ -1044,12 +920,10 @@ function _oracle_regression_tests(R_meta::Matrix{T}, α::Vector{T},
         p_pol[j] = α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
     end
 
-    # Allocate outputs (4 tests × 5 stats × n_scopes)
+    # Allocate outputs (2 tests × 5 stats × n_scopes)
     nan_v() = fill(NaN, n_scopes)
     Ts_obs  = nan_v(); Ts_nm  = nan_v(); Ts_nsd  = nan_v(); Ts_Z  = nan_v(); Ts_p  = nan_v()
     Tsr_obs = nan_v(); Tsr_nm = nan_v(); Tsr_nsd = nan_v(); Tsr_Z = nan_v(); Tsr_p = nan_v()
-    Ta_obs  = nan_v(); Ta_nm  = nan_v(); Ta_nsd  = nan_v(); Ta_Z  = nan_v(); Ta_p  = nan_v()
-    Tar_obs = nan_v(); Tar_nm = nan_v(); Tar_nsd = nan_v(); Tar_Z = nan_v(); Tar_p = nan_v()
 
     # Per-perm α_perm matrix (reused across all 6 tests, all scopes).
     a_perm = Matrix{T}(undef, p, n_perm)
@@ -1083,85 +957,47 @@ function _oracle_regression_tests(R_meta::Matrix{T}, α::Vector{T},
         n_eff = Float64(n_pairs_in_scope)
         inv_2N = 1.0 / (2 * n_pairs_in_scope)
 
-        # --- Pass 1 over in-scope pairs: accumulate OLS sums for the 4 tests ---
-        # (a_jk == w_jk in the original notation; kept as `sum_w` for the
-        # T_asym numerator + cross-terms with s_jk and log r_jk.)
-        sum_w  = 0.0; sum_dp = 0.0; sum_s = 0.0; sum_lr = 0.0
-        sum_dp2 = 0.0; sum_s2 = 0.0; sum_lr2 = 0.0
-        sum_w_lr  = 0.0; sum_dp_lr = 0.0; sum_s_lr  = 0.0
-        sum_w_s   = 0.0
+        # --- Pass 1 over in-scope pairs: accumulate OLS sums for T_slope/T_slope_r ---
+        sum_dp = 0.0; sum_lr = 0.0
+        sum_lr2 = 0.0; sum_dp_lr = 0.0
         @inbounds for k_ in 2:p
             for j_ in 1:(k_-1)
                 mask[j_, k_] || continue
                 pj = p_pol[j_]; pk = p_pol[k_]
-                w_  = (pj - 0.5) * (pk - 0.5)
                 dp_ = abs(pj - pk)
-                s_  = 0.5 * (pj + pk - 1.0)^2
                 lr_ = if chr[j_] == chr[k_]
                     rjk = 0.5 * (1.0 - exp(-2.0 * recomb_per_bp * Float64(abs(bp[j_] - bp[k_]))))
                     log(max(rjk, 1e-15))
                 else
                     log_half
                 end
-                sum_w  += w_;  sum_dp += dp_; sum_s += s_; sum_lr += lr_
-                sum_dp2 += dp_*dp_;  sum_s2 += s_*s_;  sum_lr2 += lr_*lr_
+                sum_dp += dp_; sum_lr += lr_
+                sum_lr2 += lr_ * lr_
                 sum_dp_lr += dp_ * lr_
-                sum_s_lr  += s_  * lr_
-                sum_w_s   += w_  * s_
-                sum_w_lr  += w_  * lr_
             end
         end
 
-        # OLS solutions for each residualization
+        # T_slope (no r): residualize dp against (1) → mean_dp
+        mean_dp = sum_dp / n_eff
         # T_slope_r: residualize dp against (1, log r)
         det_lr  = n_eff * sum_lr2 - sum_lr * sum_lr
-        β_lr_dp = 0.0; α_dp = sum_dp / n_eff
+        β_lr_dp = 0.0; α_dp = mean_dp
         if abs(det_lr) > 1e-30
             β_lr_dp = (n_eff * sum_dp_lr - sum_lr * sum_dp) / det_lr
             α_dp    = (sum_dp - β_lr_dp * sum_lr) / n_eff
         end
-        # T_slope (no r): residualize dp against (1) → mean_dp
-        mean_dp = sum_dp / n_eff
-        # T_asym (no r): residualize a (=w) against (1, s); 2x2 solve
-        mean_w  = sum_w / n_eff
-        det_s = n_eff * sum_s2 - sum_s * sum_s
-        β_s_a = 0.0; α_a_ns = mean_w
-        if abs(det_s) > 1e-30
-            β_s_a  = (n_eff * sum_w_s - sum_s * sum_w) / det_s
-            α_a_ns = (sum_w - β_s_a * sum_s) / n_eff
-        end
-        # T_asym_r: 3x3 solve for a on (1, s, log r)
-        XtX_ar = [n_eff sum_s sum_lr;
-                   sum_s sum_s2 sum_s_lr;
-                   sum_lr sum_s_lr sum_lr2]
-        Xty_ar = [sum_w, sum_w_s, sum_w_lr]
-        β_ar = try
-            XtX_ar \ Xty_ar
-        catch
-            zeros(3)
-        end
 
-        # --- Pass 2 over in-scope pairs: compute residuals + populate W matrices ---
-        # Six weight tracks; we run six small loops sharing the same mask iteration.
-        # To minimize memory, do tests one at a time. Each test:
-        #   1. Build W_buf with residual values for in-scope pairs.
-        #   2. Optionally normalize (slope tests divide by Σ residual²).
-        #   3. Compute α' (W ⊙ R) α / 2 and sign-flip null via gemm.
-
-        # Generic builder + dispatcher.
         # closure to recompute pair features
         function _pair_feats(j_, k_)
             pj = p_pol[j_]; pk = p_pol[k_]
-            w_  = (pj - 0.5) * (pk - 0.5)
             dp_ = abs(pj - pk)
-            s_  = 0.5 * (pj + pk - 1.0)^2
             lr_ = if chr[j_] == chr[k_]
                 rjk = 0.5 * (1.0 - exp(-2.0 * recomb_per_bp * Float64(abs(bp[j_] - bp[k_]))))
                 log(max(rjk, 1e-15))
             else
                 log_half
             end
-            return w_, dp_, s_, lr_
+            return dp_, lr_
         end
 
         # --- T_slope (no r): slope of B on |Δp| (intercept only) ---
@@ -1171,7 +1007,7 @@ function _oracle_regression_tests(R_meta::Matrix{T}, α::Vector{T},
         @inbounds for k_ in 2:p
             for j_ in 1:(k_-1)
                 mask[j_, k_] || continue
-                _, dp_, _, _ = _pair_feats(j_, k_)
+                dp_, _ = _pair_feats(j_, k_)
                 xt = dp_ - mean_dp
                 sum_xt_sq += xt * xt
                 W_buf[j_, k_] = T(xt); W_buf[k_, j_] = T(xt)
@@ -1196,7 +1032,7 @@ function _oracle_regression_tests(R_meta::Matrix{T}, α::Vector{T},
             @inbounds for k_ in 2:p
                 for j_ in 1:(k_-1)
                     mask[j_, k_] || continue
-                    _, dp_, _, lr_ = _pair_feats(j_, k_)
+                    dp_, lr_ = _pair_feats(j_, k_)
                     xt = dp_ - α_dp - β_lr_dp * lr_
                     sum_xt_sq += xt * xt
                     W_buf[j_, k_] = T(xt); W_buf[k_, j_] = T(xt)
@@ -1212,65 +1048,12 @@ function _oracle_regression_tests(R_meta::Matrix{T}, α::Vector{T},
                 (Tsr_nm[s], Tsr_nsd[s], Tsr_Z[s], Tsr_p[s]) = _summarize_perm_null(obs, null)
             end
         end
-
-        # --- T_asym (no r): slope of B on a (= w), with s_jk as covariate ---
-        # ã = a - α_a_ns - β_s_a * s
-        fill!(W_buf, zero(T))
-        sum_xt_sq = 0.0
-        @inbounds for k_ in 2:p
-            for j_ in 1:(k_-1)
-                mask[j_, k_] || continue
-                w_, _, s_, _ = _pair_feats(j_, k_)
-                xt = w_ - α_a_ns - β_s_a * s_
-                sum_xt_sq += xt * xt
-                W_buf[j_, k_] = T(xt); W_buf[k_, j_] = T(xt)
-            end
-        end
-        if sum_xt_sq > 1e-30
-            inv_norm = T(1.0 / sum_xt_sq)
-            @inbounds for k_ in 1:p, j_ in 1:p
-                W_buf[j_, k_] *= inv_norm
-            end
-            obs, null = _quadform_signflip!(WR_buf, W_buf, R_masked, α, a_perm, Mtmp)
-            Ta_obs[s] = obs
-            (Ta_nm[s], Ta_nsd[s], Ta_Z[s], Ta_p[s]) = _summarize_perm_null(obs, null)
-        end
-
-        # --- T_asym_r (with r): slope of B on a with s + log r as covariates ---
-        # Gated on r_controls; default false skips this and the
-        # corresponding Tar_* fields stay at NaN.
-        if r_controls
-            fill!(W_buf, zero(T))
-            sum_xt_sq = 0.0
-            @inbounds for k_ in 2:p
-                for j_ in 1:(k_-1)
-                    mask[j_, k_] || continue
-                    w_, _, s_, lr_ = _pair_feats(j_, k_)
-                    xt = w_ - β_ar[1] - β_ar[2] * s_ - β_ar[3] * lr_
-                    sum_xt_sq += xt * xt
-                    W_buf[j_, k_] = T(xt); W_buf[k_, j_] = T(xt)
-                end
-            end
-            if sum_xt_sq > 1e-30
-                inv_norm = T(1.0 / sum_xt_sq)
-                @inbounds for k_ in 1:p, j_ in 1:p
-                    W_buf[j_, k_] *= inv_norm
-                end
-                obs, null = _quadform_signflip!(WR_buf, W_buf, R_masked, α, a_perm, Mtmp)
-                Tar_obs[s] = obs
-                (Tar_nm[s], Tar_nsd[s], Tar_Z[s], Tar_p[s]) = _summarize_perm_null(obs, null)
-            end
-        end
     end
 
     return (T_slope = Ts_obs, T_slope_null_mean = Ts_nm,
             T_slope_null_sd = Ts_nsd, T_slope_Z = Ts_Z, T_slope_perm_p = Ts_p,
             T_slope_r = Tsr_obs, T_slope_r_null_mean = Tsr_nm,
-            T_slope_r_null_sd = Tsr_nsd, T_slope_r_Z = Tsr_Z, T_slope_r_perm_p = Tsr_p,
-            T_asym  = Ta_obs, T_asym_null_mean  = Ta_nm,
-            T_asym_null_sd  = Ta_nsd, T_asym_Z  = Ta_Z, T_asym_perm_p  = Ta_p,
-            T_asym_r = Tar_obs, T_asym_r_null_mean = Tar_nm,
-            T_asym_r_null_sd = Tar_nsd, T_asym_r_Z = Tar_Z, T_asym_r_perm_p = Tar_p)
+            T_slope_r_null_sd = Tsr_nsd, T_slope_r_Z = Tsr_Z, T_slope_r_perm_p = Tsr_p)
 end
 
 """
@@ -1338,13 +1121,7 @@ function oracle_stats(result::SimResult;
             nv(), nv(), nv(), nv(), nv(),
             # T_slope_r (5)
             nv(), nv(), nv(), nv(), nv(),
-            # T_asym (5)
-            nv(), nv(), nv(), nv(), nv(),
-            # T_asym_r (5)
-            nv(), nv(), nv(), nv(), nv(),
-            # rho_pair_pol_fix (5)
-            nv(), nv(), nv(), nv(), nv(),
-            # rho_pair_pol_rep (5)
+            # rho_pearson_q10 (5)
             nv(), nv(), nv(), nv(), nv(),
             # rho_pearson_q25 (5)
             nv(), nv(), nv(), nv(), nv())
@@ -1406,17 +1183,11 @@ function oracle_stats(result::SimResult;
     Ts_nsd  = fill(NaN, n_scopes); Ts_Z   = fill(NaN, n_scopes); Ts_p  = fill(NaN, n_scopes)
     Tsr_obs = fill(NaN, n_scopes); Tsr_nm = fill(NaN, n_scopes)
     Tsr_nsd = fill(NaN, n_scopes); Tsr_Z  = fill(NaN, n_scopes); Tsr_p = fill(NaN, n_scopes)
-    Ta_obs  = fill(NaN, n_scopes); Ta_nm  = fill(NaN, n_scopes)
-    Ta_nsd  = fill(NaN, n_scopes); Ta_Z   = fill(NaN, n_scopes); Ta_p  = fill(NaN, n_scopes)
-    Tar_obs = fill(NaN, n_scopes); Tar_nm = fill(NaN, n_scopes)
-    Tar_nsd = fill(NaN, n_scopes); Tar_Z  = fill(NaN, n_scopes); Tar_p = fill(NaN, n_scopes)
-    # New pair-Pearson + q25 tests
-    Rp_fix_obs = fill(NaN, n_scopes); Rp_fix_nm = fill(NaN, n_scopes)
-    Rp_fix_nsd = fill(NaN, n_scopes); Rp_fix_Z = fill(NaN, n_scopes); Rp_fix_p = fill(NaN, n_scopes)
-    Rp_rep_obs = fill(NaN, n_scopes); Rp_rep_nm = fill(NaN, n_scopes)
-    Rp_rep_nsd = fill(NaN, n_scopes); Rp_rep_Z = fill(NaN, n_scopes); Rp_rep_p = fill(NaN, n_scopes)
-    Rq_obs = fill(NaN, n_scopes); Rq_nm = fill(NaN, n_scopes)
-    Rq_nsd = fill(NaN, n_scopes); Rq_Z = fill(NaN, n_scopes); Rq_p = fill(NaN, n_scopes)
+    # Quantile-restricted per-locus Pearson stats (bottom 10 % and 25 %).
+    Rq10_obs = fill(NaN, n_scopes); Rq10_nm = fill(NaN, n_scopes)
+    Rq10_nsd = fill(NaN, n_scopes); Rq10_Z = fill(NaN, n_scopes); Rq10_p = fill(NaN, n_scopes)
+    Rq25_obs = fill(NaN, n_scopes); Rq25_nm = fill(NaN, n_scopes)
+    Rq25_nsd = fill(NaN, n_scopes); Rq25_Z = fill(NaN, n_scopes); Rq25_p = fill(NaN, n_scopes)
 
     if !failed
         for s in 1:n_scopes
@@ -1456,28 +1227,17 @@ function oracle_stats(result::SimResult;
         Ts_nsd .= treg.T_slope_null_sd; Ts_Z  .= treg.T_slope_Z;   Ts_p  .= treg.T_slope_perm_p
         Tsr_obs .= treg.T_slope_r;        Tsr_nm  .= treg.T_slope_r_null_mean
         Tsr_nsd .= treg.T_slope_r_null_sd; Tsr_Z  .= treg.T_slope_r_Z; Tsr_p  .= treg.T_slope_r_perm_p
-        Ta_obs .= treg.T_asym;          Ta_nm  .= treg.T_asym_null_mean
-        Ta_nsd .= treg.T_asym_null_sd;   Ta_Z  .= treg.T_asym_Z;    Ta_p  .= treg.T_asym_perm_p
-        Tar_obs .= treg.T_asym_r;          Tar_nm  .= treg.T_asym_r_null_mean
-        Tar_nsd .= treg.T_asym_r_null_sd;   Tar_Z  .= treg.T_asym_r_Z;    Tar_p  .= treg.T_asym_r_perm_p
 
-        # Pair-Pearson tests (rho_pair_pol_fix + rho_pair_pol_rep) and the
-        # q25-restricted per-locus rho_pearson_q25, one per scope.
+        # Quantile-restricted per-locus rho_pearson_q10 + rho_pearson_q25, one per scope.
         for s in 1:n_scopes
-            rfix = _pair_pearson_one(R_meta, α, p_pool, raw_signs, masks[s];
-                                       repolarize=false)
-            Rp_fix_obs[s] = rfix.rho;     Rp_fix_nm[s] = rfix.null_mean
-            Rp_fix_nsd[s] = rfix.null_sd; Rp_fix_Z[s]  = rfix.Z
-            Rp_fix_p[s]   = rfix.perm_p
-            rrep = _pair_pearson_one(R_meta, α, p_pool, raw_signs, masks[s];
-                                       repolarize=true)
-            Rp_rep_obs[s] = rrep.rho;     Rp_rep_nm[s] = rrep.null_mean
-            Rp_rep_nsd[s] = rrep.null_sd; Rp_rep_Z[s]  = rrep.Z
-            Rp_rep_p[s]   = rrep.perm_p
-            rq = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s])
-            Rq_obs[s] = rq.rho;     Rq_nm[s] = rq.null_mean
-            Rq_nsd[s] = rq.null_sd; Rq_Z[s]  = rq.Z
-            Rq_p[s]   = rq.perm_p
+            rq10 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.10)
+            Rq10_obs[s] = rq10.rho;     Rq10_nm[s] = rq10.null_mean
+            Rq10_nsd[s] = rq10.null_sd; Rq10_Z[s]  = rq10.Z
+            Rq10_p[s]   = rq10.perm_p
+            rq25 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.25)
+            Rq25_obs[s] = rq25.rho;     Rq25_nm[s] = rq25.null_mean
+            Rq25_nsd[s] = rq25.null_sd; Rq25_Z[s]  = rq25.Z
+            Rq25_p[s]   = rq25.perm_p
         end
     end
 
@@ -1490,11 +1250,8 @@ function oracle_stats(result::SimResult;
                          rho_obs, rho_nm, rho_nsd, rho_Z, rho_pp,
                          Ts_obs,  Ts_nm,  Ts_nsd,  Ts_Z,  Ts_p,
                          Tsr_obs, Tsr_nm, Tsr_nsd, Tsr_Z, Tsr_p,
-                         Ta_obs,  Ta_nm,  Ta_nsd,  Ta_Z,  Ta_p,
-                         Tar_obs, Tar_nm, Tar_nsd, Tar_Z, Tar_p,
-                         Rp_fix_obs, Rp_fix_nm, Rp_fix_nsd, Rp_fix_Z, Rp_fix_p,
-                         Rp_rep_obs, Rp_rep_nm, Rp_rep_nsd, Rp_rep_Z, Rp_rep_p,
-                         Rq_obs,     Rq_nm,     Rq_nsd,     Rq_Z,     Rq_p)
+                         Rq10_obs, Rq10_nm, Rq10_nsd, Rq10_Z, Rq10_p,
+                         Rq25_obs, Rq25_nm, Rq25_nsd, Rq25_Z, Rq25_p)
 end
 
 """
@@ -1553,8 +1310,8 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                 println(io, key, "\t", fvec[s])
             end
         end
-        # T_slope / T_asym (and their _r r-controlled variants) —
-        # regression-family per-scope tests.
+        # T_slope (and _r r-controlled variant) plus quantile-restricted
+        # per-locus rho_pearson_q10 / rho_pearson_q25.
         reg_specs = (
             ("T_slope",   oracle.T_slope,   oracle.T_slope_null_mean,
                           oracle.T_slope_null_sd, oracle.T_slope_Z,
@@ -1562,22 +1319,11 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             ("T_slope_r", oracle.T_slope_r, oracle.T_slope_r_null_mean,
                           oracle.T_slope_r_null_sd, oracle.T_slope_r_Z,
                           oracle.T_slope_r_perm_p),
-            ("T_asym",    oracle.T_asym,    oracle.T_asym_null_mean,
-                          oracle.T_asym_null_sd,  oracle.T_asym_Z,
-                          oracle.T_asym_perm_p),
-            ("T_asym_r",  oracle.T_asym_r,  oracle.T_asym_r_null_mean,
-                          oracle.T_asym_r_null_sd,  oracle.T_asym_r_Z,
-                          oracle.T_asym_r_perm_p),
-            ("rho_pair_pol_fix", oracle.rho_pair_pol_fix,
-                          oracle.rho_pair_pol_fix_null_mean,
-                          oracle.rho_pair_pol_fix_null_sd,
-                          oracle.rho_pair_pol_fix_Z,
-                          oracle.rho_pair_pol_fix_perm_p),
-            ("rho_pair_pol_rep", oracle.rho_pair_pol_rep,
-                          oracle.rho_pair_pol_rep_null_mean,
-                          oracle.rho_pair_pol_rep_null_sd,
-                          oracle.rho_pair_pol_rep_Z,
-                          oracle.rho_pair_pol_rep_perm_p),
+            ("rho_pearson_q10", oracle.rho_pearson_q10,
+                          oracle.rho_pearson_q10_null_mean,
+                          oracle.rho_pearson_q10_null_sd,
+                          oracle.rho_pearson_q10_Z,
+                          oracle.rho_pearson_q10_perm_p),
             ("rho_pearson_q25", oracle.rho_pearson_q25,
                           oracle.rho_pearson_q25_null_mean,
                           oracle.rho_pearson_q25_null_sd,
