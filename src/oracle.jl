@@ -1337,8 +1337,10 @@ oracle scalars. Keys follow the R reference's column names:
 Plus header rows for `p_qtl`, `VA_meta`, `n_total`, `n_demes`, `n_perm`,
 `used_memory_path`.
 """
-function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult)
-    path = prefix * ".oracle.tsv"
+function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
+                            phase::Union{Symbol,Nothing}=nothing)
+    suffix = phase === nothing ? "" : "." * String(phase)
+    path = prefix * ".oracle" * suffix * ".tsv"
     open(path, "w") do io
         println(io, "key\tvalue")
         println(io, "meta.p_qtl\t",      oracle.p_qtl)

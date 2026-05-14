@@ -183,6 +183,16 @@ Base.@kwdef struct Config
     oracle_n_perm::Int = 1000
     oracle_memory_path_threshold::Int = 10000
     oracle_cutoffs::Vector{Int} = [20, 50]
+    # Phases at which to record oracle statistics. Effective only when
+    # `:oracle ∈ output_formats`. Each entry must be one of:
+    #   :init    — gen 0, immediately after init + V_E computation.
+    #              Represents the neutral pre-selection baseline.
+    #   :settled — end of Phase A (after ngen_eq_eff settling gens).
+    #              Silently skipped when ngen_eq_eff == 0 (e.g. load_from,
+    #              single-knob `ngen` mode).
+    #   :final   — end of total run (post-shift state for two-phase mode).
+    # Default `[:final]` matches v0.7.x behavior.
+    oracle_phases::Vector{Symbol} = Symbol[:final]
     # Floating-point precision for the oracle matmul-heavy buffers (X, D_k,
     # R_meta, a_perm, raw_signs). `:Float64` is the safe default. `:Float32`
     # halves memory and runs sgemm instead of dgemm for ~1.5–2× wall-time
@@ -489,6 +499,14 @@ function validate(cfg::Config)
     end
     cfg.oracle_precision in (:Float64, :Float32) ||
         throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
+    isempty(cfg.oracle_phases) &&
+        throw(ArgumentError("oracle_phases must contain at least one of :init, :settled, :final"))
+    for ph in cfg.oracle_phases
+        ph in (:init, :settled, :final) ||
+            throw(ArgumentError("oracle_phases entries must be in (:init, :settled, :final), got $ph"))
+    end
+    length(cfg.oracle_phases) == length(unique(cfg.oracle_phases)) ||
+        throw(ArgumentError("oracle_phases contains duplicates: $(cfg.oracle_phases)"))
     cfg.ngen_eq >= 0 || throw(ArgumentError("ngen_eq must be >= 0"))
     cfg.ngen_dir >= 0 || throw(ArgumentError("ngen_dir must be >= 0"))
     cfg.ngen >= 0 || throw(ArgumentError("ngen must be >= 0"))

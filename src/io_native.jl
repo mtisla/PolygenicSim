@@ -191,10 +191,24 @@ function load_native(path::AbstractString)
         end
         chr_end[c] = Int32(j)
     end
-    # Loaded states are assumed to have every slot active (snapshot semantics).
-    # Under ISM, save_native should record the active mask explicitly; for now
-    # the loader treats all loaded slots as active.
-    active = trues(L)
+    # Reconstruct the active mask from the haplotype bits: a slot is active
+    # iff at least one haplotype carries the derived allele. This handles
+    # both FSM (where GenScratch ignores `active` and uses `is_qtl`) and
+    # ISM (where `active` is the source of truth for free-slot recovery).
+    # Fixed sites (popcount == 2N) are correctly marked active; only fully
+    # monomorphic-ancestral slots (popcount == 0) become free.
+    active = falses(L)
+    @inbounds for j in 1:L
+        w = ((j - 1) >> 6) + 1
+        b = (j - 1) & 63
+        mask = UInt64(1) << b
+        for k in 1:twoN
+            if (H[w, k] & mask) != 0
+                active[j] = true
+                break
+            end
+        end
+    end
     vt = VariantTable(chr, bp, is_qtl, α, active, chr_start, chr_end)
 
     pop = PackedPop(zeros(UInt64, nb, twoN), zeros(UInt64, nb, twoN), L, nb, N_per_deme * n_demes_v)

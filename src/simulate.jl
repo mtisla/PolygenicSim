@@ -18,8 +18,18 @@ struct SimResult
     final_gen::Int
     summary::Union{SimSummary,Nothing}
     checkpoint_paths::Vector{String}
+    # Final-state oracle (= oracle_records[:final] when present, else nothing).
+    # Retained for v0.7.x back-compat.
     oracle::Union{OracleResult,Nothing}
+    # Phase-recorded oracles. Keys are a subset of {:init, :settled, :final}
+    # populated according to `cfg.oracle_phases`. Always populated as a Dict
+    # (possibly empty) so callers can iterate without nothing-checks.
+    oracle_records::Dict{Symbol,OracleResult}
 end
+
+SimResult(pop, vt, deme_id, cfg, final_gen, summary, paths, oracle) =
+    SimResult(pop, vt, deme_id, cfg, final_gen, summary, paths, oracle,
+              Dict{Symbol,OracleResult}())
 
 """
     simulate(cfg::Config) -> SimResult
@@ -124,6 +134,24 @@ function simulate(cfg::Config)
     expansion_gen = (cfg.expansion_factor > 1.0) ?
                        max(1, total_gens - cfg.expansion_k_before_end) : 0
 
+    # ---- multi-phase oracle setup --------------------------------------
+    # Phases at which we record an oracle snapshot: a subset of
+    # {:init, :settled, :final} per cfg.oracle_phases.
+    oracle_records = Dict{Symbol,OracleResult}()
+    oracle_enabled = :oracle in cfg.output_formats
+    record_init    = oracle_enabled && :init    in cfg.oracle_phases
+    record_settled = oracle_enabled && :settled in cfg.oracle_phases && ngen_eq_eff > 0
+    record_final   = oracle_enabled && :final   in cfg.oracle_phases
+
+    # `:init` — gen 0 snapshot, before any selection acts. Captures the
+    # neutral mutation-drift baseline (Watterson SFS under :ism_watterson,
+    # Beta(θ,θ) under FSM default).
+    if record_init
+        tmp = SimResult(pop, vt, deme_id, cfg, 0, nothing, String[], nothing)
+        oracle_records[:init] = oracle_stats(tmp)
+        write_oracle_tsv(cfg.output_prefix, oracle_records[:init]; phase=:init)
+    end
+
     # ---- generation loop ------------------------------------------------
     step! = pop isa PackedPop ? step_generation_packed! : step_generation_dense!
     expand_step! = pop isa PackedPop ? step_generation_packed_expand! : step_generation_dense_expand!
@@ -193,6 +221,15 @@ function simulate(cfg::Config)
         if gen in checkpoint_set
             cp_paths = _emit_checkpoint(cfg, pop, vt, scratch, deme_id, gen)
             append!(paths, cp_paths)
+        end
+        # `:settled` — record oracle at the boundary between Phase A and
+        # Phase B (just *after* the last settling gen has been processed,
+        # before any directional gen). Equivalent to the end-state of a
+        # pure-stabilizing run of length ngen_eq.
+        if record_settled && gen == ngen_eq_eff
+            tmp = SimResult(pop, vt, deme_id, cfg, gen, nothing, paths, nothing)
+            oracle_records[:settled] = oracle_stats(tmp)
+            write_oracle_tsv(cfg.output_prefix, oracle_records[:settled]; phase=:settled)
         end
     end
     # Always write a final-gen output if no checkpoint was specified
@@ -277,18 +314,26 @@ function simulate(cfg::Config)
         print(stdout, format_constraint_checks(summary))
     end
 
-    # ---- oracle stats (opt-in via :oracle in output_formats) ------------
-    # oracle_stats requires the materialized SimResult; we build a temporary
-    # without the oracle field, then re-wrap with the computed oracle.
+    # ---- final-phase oracle (opt-in via :oracle in output_formats) -----
+    # When `oracle_phases` is the default `[:final]`, write the legacy
+    # `{prefix}.oracle.tsv` for back-compat; otherwise also write the
+    # phase-suffixed `{prefix}.oracle.final.tsv`.
     oracle_res = nothing
-    if :oracle in cfg.output_formats
+    if record_final
         tmp_result = SimResult(pop, vt, deme_id, cfg, total_gens, summary,
                                  paths, nothing)
         oracle_res = oracle_stats(tmp_result)
-        write_oracle_tsv(cfg.output_prefix, oracle_res)
+        oracle_records[:final] = oracle_res
+        if length(cfg.oracle_phases) == 1 && cfg.oracle_phases[1] === :final
+            # Legacy path: only one phase recorded → emit unsuffixed TSV.
+            write_oracle_tsv(cfg.output_prefix, oracle_res)
+        else
+            write_oracle_tsv(cfg.output_prefix, oracle_res; phase=:final)
+        end
     end
 
-    return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths, oracle_res)
+    return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths,
+                       oracle_res, oracle_records)
 end
 
 # ---------------------------------------------------------------------------

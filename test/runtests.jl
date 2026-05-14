@@ -1271,6 +1271,69 @@ end
     @test res_noor.oracle === nothing
 end
 
+@testset "Oracle — multi-phase recording" begin
+    # 1. Validation: invalid phase entry → reject
+    @test_throws ArgumentError PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5, ngen_eq=2,
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:bogus],
+        seed=UInt64(1)) |> PS.validate
+    # Duplicates → reject
+    @test_throws ArgumentError PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5, ngen_eq=2,
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:final, :final],
+        seed=UInt64(1)) |> PS.validate
+    # Empty → reject
+    @test_throws ArgumentError PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5, ngen_eq=2,
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[],
+        seed=UInt64(1)) |> PS.validate
+
+    # 2. Default `[:final]`: oracle_records has only :final, equal to res.oracle.
+    cfg_def = PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5, ngen_eq=3,
+        output_formats=Symbol[:oracle],
+        oracle_n_perm=50, oracle_cutoffs=[50],
+        output_prefix=tempname(), seed=UInt64(1), n_threads=1)
+    res_def = PS.simulate(cfg_def)
+    @test sort(collect(keys(res_def.oracle_records))) == [:final]
+    @test res_def.oracle === res_def.oracle_records[:final]
+
+    # 3. All three phases populate.
+    cfg_all = PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5,
+        selection_mode=:directional, directional_start_from=:msd,
+        vs_over_vp0=20.0, shift_sd=2.0, t_shift=0,
+        ngen_eq=5, ngen_dir=3,
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:init, :settled, :final],
+        oracle_n_perm=50, oracle_cutoffs=[50],
+        output_prefix=tempname(), seed=UInt64(1), n_threads=1)
+    res_all = PS.simulate(cfg_all)
+    @test sort(collect(keys(res_all.oracle_records))) == [:final, :init, :settled]
+    @test res_all.oracle === res_all.oracle_records[:final]
+
+    # 4. `:settled` is no-op under single-knob ngen mode (ngen_eq_eff == 0).
+    cfg_noseet = PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5, ngen=3,
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:init, :settled, :final],
+        oracle_n_perm=50, oracle_cutoffs=[50],
+        output_prefix=tempname(), seed=UInt64(1), n_threads=1)
+    res_noseet = PS.simulate(cfg_noseet)
+    @test :init in keys(res_noseet.oracle_records)
+    @test !(:settled in keys(res_noseet.oracle_records))   # silently skipped
+    @test :final in keys(res_noseet.oracle_records)
+end
+
 @testset "ISM — infinite-sites mutation model" begin
     # 1. Validation: ISM init_distribution requires mutation_model=:infinite_sites
     #    (and vice versa)

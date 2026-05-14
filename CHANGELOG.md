@@ -9,6 +9,34 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-05-14
+
+### Added
+- **Multi-phase oracle recording.** New Config field
+  `oracle_phases::Vector{Symbol} = [:final]` (default unchanged) selects
+  which phase boundaries should capture an `OracleResult`:
+  - `:init`    — gen 0, immediately after init + V_E computation.
+                 Represents the neutral pre-selection baseline.
+  - `:settled` — end of Phase A (after `ngen_eq` settling gens). Silently
+                 skipped when `ngen_eq_eff == 0` (e.g. `load_from`,
+                 single-knob `ngen` mode).
+  - `:final`   — end of total run.
+  Setting `oracle_phases=[:init, :settled, :final]` runs all three in a
+  single simulate() call, no save/load round-trip needed. Each phase
+  emits a `{prefix}.oracle.{phase}.tsv`; the legacy `{prefix}.oracle.tsv`
+  is still written when `oracle_phases == [:final]`.
+- **`SimResult.oracle_records::Dict{Symbol,OracleResult}`** new field
+  exposing all phase-recorded oracles. The existing `oracle` field is
+  retained for back-compat and aliases `oracle_records[:final]` when
+  `:final ∈ oracle_phases`. SimResult ships with a back-compat
+  constructor accepting the prior 8-arg positional signature.
+
+### Tests
+- 4 new cases under "Oracle — multi-phase recording" covering
+  validation (invalid/duplicate/empty phases), default `[:final]`
+  parity with v0.7.x, three-phase population, and `:settled` no-op
+  under `ngen` single-knob mode. Existing 374 tests unchanged.
+
 ## [0.8.0] — 2026-05-14
 
 ### Added

@@ -290,6 +290,7 @@ See [Oracle statistics](#oracle-statistics) for details.
 | `oracle_memory_path_threshold` | `Int` | `10000` | Switch to per-chr matrix-free path when `p_qtl >` this. |
 | `oracle_cutoffs` | `Vector{Int}` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%). |
 | `oracle_precision` | `Symbol` | `:Float64` | `:Float64` \| `:Float32` (sgemm, ~1.4× faster at `p_qtl ≥ 4000`). |
+| `oracle_phases` | `Vector{Symbol}` | `[:final]` | Subset of `:init`, `:settled`, `:final`. `:init` = gen 0 baseline before any selection acts. `:settled` = end of Phase A (`ngen_eq` settling); silently skipped when `ngen_eq_eff == 0`. `:final` = end of run. Each recorded phase writes `{prefix}.oracle.{phase}.tsv`; when only `[:final]` is recorded, the legacy `{prefix}.oracle.tsv` is also written for back-compat. `SimResult.oracle_records[phase]` exposes each `OracleResult`. |
 
 ### Runtime & diagnostics
 
