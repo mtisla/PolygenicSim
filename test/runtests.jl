@@ -154,7 +154,8 @@ end
         is_qtl = falses(L); is_qtl[1] = true; is_qtl[2] = true
         α = [1.0, 1.0]
         chr_start = Int32[1]; chr_end = Int32[2]
-        vt = PS.VariantTable(chr, bp, is_qtl, α, chr_start, chr_end)
+        active = trues(L)
+        vt = PS.VariantTable(chr, bp, is_qtl, α, active, chr_start, chr_end)
 
         # parent state: hap1 = (0, 1), hap2 = (1, 0). Single individual.
         pop = PS.PackedPop(L, 1)
@@ -478,8 +479,8 @@ end
     g = zeros(UInt64, pop.n_blocks)
     @noinline measure_gamete(g, H, p, vt, cfg, rng, sb) =
         @allocated PS.gamete_packed!(g, H, p, vt, cfg, rng, sb)
-    @noinline measure_mut(pop, cfg, scratch, rng) =
-        @allocated PS.mutate_packed!(pop, cfg, scratch, rng)
+    @noinline measure_mut(pop, cfg, scratch, vt, rng) =
+        @allocated PS.mutate_packed!(pop, cfg, scratch, vt, rng)
     @noinline measure_fit(w, A, env, ph, gp, lay) =
         @allocated PS.apply_fitness!(w, A, env, ph, gp, lay)
     @noinline measure_sp(rng, cumw) =
@@ -487,12 +488,12 @@ end
 
     # warm
     measure_gamete(g, pop.H, 1, vt, cfg, rng, scratch.chunk_recomb[1])
-    measure_mut(pop, cfg, scratch, rng)
+    measure_mut(pop, cfg, scratch, vt, rng)
     measure_fit(scratch.w, scratch.A, scratch.env, phase, 1, scratch.layout)
     measure_sp(rng, scratch.cumw)
 
     @test measure_gamete(g, pop.H, 1, vt, cfg, rng, scratch.chunk_recomb[1]) == 0
-    @test measure_mut(pop, cfg, scratch, rng) == 0
+    @test measure_mut(pop, cfg, scratch, vt, rng) == 0
     @test measure_fit(scratch.w, scratch.A, scratch.env, phase, 1, scratch.layout) == 0
     @test measure_sp(rng, scratch.cumw) == 0
 end
@@ -1268,6 +1269,91 @@ end
         seed=UInt64(11), n_threads=1)
     res_noor = PS.simulate(cfg_noor)
     @test res_noor.oracle === nothing
+end
+
+@testset "ISM — infinite-sites mutation model" begin
+    # 1. Validation: ISM init_distribution requires mutation_model=:infinite_sites
+    #    (and vice versa)
+    @test_throws ArgumentError PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000,
+        n_qtl=30, Uqtl=0.01,
+        mutation_model=:infinite_sites,
+        init_distribution=:beta_mutation_drift,    # mismatch
+        ngen_eq=1, output_formats=Symbol[], seed=UInt64(1)) |> PS.validate
+    @test_throws ArgumentError PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000,
+        n_qtl=30, Uqtl=0.01,
+        mutation_model=:finite_sites,
+        init_distribution=:ism_watterson,          # mismatch
+        ngen_eq=1, output_formats=Symbol[], seed=UInt64(1)) |> PS.validate
+
+    # 2. slot_capacity auto-derivation: 4 × expected Watterson S, capped at total bp.
+    cfg = PS.Config(
+        N=200, Ne=200, n_chr=2, chr_len_bp=10_000,
+        n_qtl=50, n_neutral=0, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        ngen_eq=0, ngen_dir=0, output_formats=Symbol[],
+        seed=UInt64(1))
+    PS.validate(cfg)
+    E_S = PS.expected_watterson_S(cfg)
+    @test E_S > 50      # rough lower bound for 4·200·0.02·H_{399}
+    @test E_S < 500
+    @test PS.slot_capacity(cfg) >= 64
+
+    # 3. Watterson-init sanity: SFS shape ∝ 1/p (i.e., log-uniform on
+    #    [log x_min, log x_max]). Sample many freqs and check the mean of
+    #    log(p) lands near the midpoint of [log x_min, log x_max].
+    rng = Random.Xoshiro(UInt64(42))
+    buf = Vector{Float64}(undef, 50_000)
+    twoN = 10_000
+    PS.sample_watterson_freq!(buf, rng, twoN)
+    log_x_min = -log(twoN)
+    log_x_max = log(1 - 1/twoN)
+    log_mid   = 0.5 * (log_x_min + log_x_max)
+    log_mean  = mean(log.(buf))
+    # Under uniform-log sampling, the mean of log(p) equals the midpoint of
+    # [log x_min, log x_max]. With 50k samples, |error| should be small.
+    @test isapprox(log_mean, log_mid; atol=0.05)
+
+    # 4. ISM init: gen-0 state populates active slots from Watterson, all
+    #    inactive slots have α=0, p=0, is_qtl=false.
+    res = PS.simulate(cfg)
+    L = length(res.vt)
+    # Active QTL slot count should be on the order of S₀ · Uqtl/(Uqtl+Uneu).
+    # With Uneu=0, all S₀ active sites are QTL.
+    n_active = count(res.vt.active)
+    n_qtl_active = count(res.vt.is_qtl)
+    @test n_active > 0
+    @test n_qtl_active == n_active   # all active are QTL (Uneu=0)
+    @test all(res.vt.alpha[.!res.vt.is_qtl] .== 0.0)
+    @test all(res.vt.active .| (res.vt.alpha .== 0.0))
+
+    # 5. ISM denovo cold-start: gen-0 entirely empty, settling populates SFS.
+    cfg2 = PS.Config(
+        N=200, Ne=200, n_chr=2, chr_len_bp=10_000,
+        n_qtl=50, n_neutral=0, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_denovo,
+        h2=0.5, selection_mode=:neutral,
+        ngen_eq=50, output_formats=Symbol[], seed=UInt64(7))
+    res2 = PS.simulate(cfg2)
+    n_active2 = count(res2.vt.active)
+    @test n_active2 > 0    # mutations have entered during settling
+
+    # 6. ISM run produces no unbounded allocation. The mutation kernel
+    #    should add new slots without growing the bit-packed matrix.
+    @test size(res.pop.H, 2) == 2 * cfg.N    # haplotype matrix size unchanged
+
+    # 7. FSM remains the default: a Config without mutation_model still
+    #    runs the FSM path.
+    cfg_fsm = PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000,
+        n_qtl=30, Uqtl=0.02, h2=0.5, selection_mode=:neutral,
+        ngen_eq=3, output_formats=Symbol[], seed=UInt64(2))
+    @test cfg_fsm.mutation_model === :finite_sites
+    res_fsm = PS.simulate(cfg_fsm)
+    @test all(res_fsm.vt.active)   # FSM: every slot active
 end
 
 end # @testset top-level

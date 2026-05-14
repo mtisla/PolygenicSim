@@ -22,17 +22,21 @@ using StatsBase
 """
     GenScratch
 
-Per-simulation scratch reused across generations.
+Per-simulation scratch reused across generations. The `qtl_idx` /
+`neutral_idx` / `alpha_qtl` arrays are *active-slot indices* — under FSM
+they're populated once at construction (every slot is active); under ISM
+they grow with the mutation kernel and shrink with `cleanup_ism!`.
 """
 mutable struct GenScratch
     A::Vector{Float64}
     env::Vector{Float64}
     w::Vector{Float64}
     cumw::Vector{Float64}
-    qtl_idx::Vector{Int}
-    neutral_idx::Vector{Int}          # positions where vt.is_qtl[j] is false
-    alpha_qtl::Vector{Float64}
-    genotype_buf::Matrix{UInt8}       # (n_qtl, N) per-individual genotype scratch for vectorized BV
+    qtl_idx::Vector{Int}              # active QTL slot indices
+    neutral_idx::Vector{Int}          # active neutral slot indices (FSM: all
+                                       # neutral slots; ISM: only segregating)
+    alpha_qtl::Vector{Float64}        # parallel to qtl_idx
+    genotype_buf::Matrix{UInt8}       # (n_qtl_cap, N) genotype scratch for vectorized BV
     mscratch::MutationScratch
     layout::DemeLayout
     chunk_count::Int
@@ -40,20 +44,50 @@ mutable struct GenScratch
     chunk_recomb::Vector{RecombScratch}
     chunk_offspring_lo::Vector{Int}
     chunk_offspring_hi::Vector{Int}
+    # ---- ISM-only state (empty under :finite_sites) -----------------------
+    ism_free_slots::Vector{Int}        # stack of currently-free slot indices
+    ism_hap_idx::Vector{Int}           # batch scratch for new mutation haplotypes
+    ism_alpha_buf::Vector{Float64}     # batch scratch for new mutation effect sizes
+    ism_cleanup_counter::Int           # gens since last cleanup
 end
 
 function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
                      layout::DemeLayout)
     N_total = layout.N_total
+    L = length(vt)
     qtl_idx = Int[]
     neutral_idx = Int[]
     alpha_qtl = Float64[]
-    @inbounds for j in eachindex(vt.is_qtl)
-        if vt.is_qtl[j]
-            push!(qtl_idx, j)
-            push!(alpha_qtl, vt.alpha[j])
-        else
-            push!(neutral_idx, j)
+    sizehint!(qtl_idx, L)
+    sizehint!(alpha_qtl, L)
+    sizehint!(neutral_idx, L)
+    ism_free_slots = Int[]
+    ism_on = cfg.mutation_model === :infinite_sites
+    if ism_on
+        sizehint!(ism_free_slots, L)
+        @inbounds for j in 1:L
+            if vt.active[j]
+                if vt.is_qtl[j]
+                    push!(qtl_idx, j)
+                    push!(alpha_qtl, vt.alpha[j])
+                else
+                    push!(neutral_idx, j)
+                end
+            else
+                push!(ism_free_slots, j)
+            end
+        end
+        # Reverse free-slot stack so smaller indices pop first (slight
+        # cache-locality win on subsequent BV/mutation passes).
+        reverse!(ism_free_slots)
+    else
+        @inbounds for j in 1:L
+            if vt.is_qtl[j]
+                push!(qtl_idx, j)
+                push!(alpha_qtl, vt.alpha[j])
+            else
+                push!(neutral_idx, j)
+            end
         end
     end
     cc = _resolve_chunk_count(cfg)
@@ -68,8 +102,19 @@ function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
         lo[k] = (k - 1) * chunk_size + 1
         hi[k] = min(k * chunk_size, N_total)
     end
-    n_qtl = length(qtl_idx)
-    genotype_buf = zeros(UInt8, max(1, n_qtl), N_total)
+    # Under ISM the QTL active count grows during the run; size genotype_buf
+    # for L (the slot capacity) so it never reallocates.
+    n_qtl_cap = ism_on ? L : length(qtl_idx)
+    genotype_buf = zeros(UInt8, max(1, n_qtl_cap), N_total)
+    # Pre-size ISM batch buffers to ~2× expected per-gen mutation count.
+    if ism_on
+        expected_M = ceil(Int, 2 * 2 * N_total * total_U(cfg))
+        ism_hap_idx = Vector{Int}(undef, 0); sizehint!(ism_hap_idx, max(64, expected_M))
+        ism_alpha_buf = Vector{Float64}(undef, 0); sizehint!(ism_alpha_buf, max(64, expected_M))
+    else
+        ism_hap_idx = Int[]
+        ism_alpha_buf = Float64[]
+    end
     return GenScratch(
         zeros(Float64, N_total),
         zeros(Float64, N_total),
@@ -85,6 +130,10 @@ function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
         chunk_rngs,
         chunk_recomb,
         lo, hi,
+        ism_free_slots,
+        ism_hap_idx,
+        ism_alpha_buf,
+        0,
     )
 end
 
@@ -223,7 +272,7 @@ function step_generation_dense!(pop::DensePop, vt::VariantTable, cfg::Config,
             end
         end
     end
-    mutate_dense!(pop, cfg, scratch, rng)
+    mutate_dense!(pop, cfg, scratch, vt, rng)
     swap_buffers!(pop)
     return nothing
 end
@@ -263,10 +312,98 @@ function step_generation_packed!(pop::PackedPop, vt::VariantTable, cfg::Config,
             end
         end
     end
-    mutate_packed!(pop, cfg, scratch, rng)
+    mutate_packed!(pop, cfg, scratch, vt, rng)
     swap_buffers!(pop)
     return nothing
 end
 
+# =============================================================================
+# ISM cleanup — every cfg.ism_cleanup_interval gens, scan active slots,
+# reclaim those that have reached popcount==0 (lost). Slots at popcount==2N
+# (fixed) are left in qtl_idx/neutral_idx contributing a constant offset
+# to BVs (the constant shift cancels in selection differentials).
+# =============================================================================
+
+"""
+    cleanup_ism!(pop, vt, scratch) -> (n_lost, n_fixed)
+
+Walk all slot indices, repopulate `qtl_idx` / `alpha_qtl` / `neutral_idx` /
+`ism_free_slots` from `vt.active` and current bit-column popcounts. Slots
+that have lost their derived allele (popcount=0) get marked inactive and
+freed; slots at fixation (popcount=2N) remain tracked but are counted in
+the returned `n_fixed`. Single sequential pass; SIMD-friendly popcount
+helper inside.
+"""
+function cleanup_ism!(pop::PackedPop, vt::VariantTable, scratch::GenScratch)
+    twoN = 2 * pop.N
+    empty!(scratch.qtl_idx)
+    empty!(scratch.alpha_qtl)
+    empty!(scratch.neutral_idx)
+    empty!(scratch.ism_free_slots)
+    n_lost = 0
+    n_fixed = 0
+    L = length(vt)
+    @inbounds for j in 1:L
+        if vt.active[j]
+            n1 = popcount_slot_packed(pop.H, j, twoN)
+            if n1 == 0
+                vt.active[j] = false
+                vt.is_qtl[j] = false
+                vt.alpha[j]  = 0.0
+                push!(scratch.ism_free_slots, j)
+                n_lost += 1
+            else
+                if vt.is_qtl[j]
+                    push!(scratch.qtl_idx, j)
+                    push!(scratch.alpha_qtl, vt.alpha[j])
+                else
+                    push!(scratch.neutral_idx, j)
+                end
+                (n1 == twoN) && (n_fixed += 1)
+            end
+        else
+            push!(scratch.ism_free_slots, j)
+        end
+    end
+    scratch.ism_cleanup_counter = 0
+    return n_lost, n_fixed
+end
+
+function cleanup_ism!(pop::DensePop, vt::VariantTable, scratch::GenScratch)
+    twoN = 2 * pop.N
+    empty!(scratch.qtl_idx)
+    empty!(scratch.alpha_qtl)
+    empty!(scratch.neutral_idx)
+    empty!(scratch.ism_free_slots)
+    n_lost = 0
+    n_fixed = 0
+    L = length(vt)
+    @inbounds for j in 1:L
+        if vt.active[j]
+            n1 = popcount_slot_dense(pop.H, j, twoN)
+            if n1 == 0
+                vt.active[j] = false
+                vt.is_qtl[j] = false
+                vt.alpha[j]  = 0.0
+                push!(scratch.ism_free_slots, j)
+                n_lost += 1
+            else
+                if vt.is_qtl[j]
+                    push!(scratch.qtl_idx, j)
+                    push!(scratch.alpha_qtl, vt.alpha[j])
+                else
+                    push!(scratch.neutral_idx, j)
+                end
+                (n1 == twoN) && (n_fixed += 1)
+            end
+        else
+            push!(scratch.ism_free_slots, j)
+        end
+    end
+    scratch.ism_cleanup_counter = 0
+    return n_lost, n_fixed
+end
+
 export GenScratch, step_generation_dense!, step_generation_packed!,
-       compute_breeding_values!, fill_cumulative!, sample_parent
+       compute_breeding_values!, fill_cumulative!, sample_parent,
+       cleanup_ism!

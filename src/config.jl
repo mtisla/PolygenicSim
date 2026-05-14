@@ -37,6 +37,34 @@ Base.@kwdef struct Config
     Uqtl::Float64 = 0.02
     Uneu::Union{Float64,Nothing} = nothing
 
+    # Mutation model. Selects the per-generation mutation kernel and the
+    # gen-0 initialization semantics:
+    #   :finite_sites    — recurrent symmetric flip at a fixed pool of
+    #                      `n_qtl + n_neutral` pre-allocated sites
+    #                      (default; current behavior). Each gen draws
+    #                      Binomial(2N·n_class, μ_site) flips per pool.
+    #   :infinite_sites  — each new mutation enters at a fresh site. Site
+    #                      pool is pre-allocated with random sorted bp
+    #                      positions; new mutations grab the next free
+    #                      slot. Lost sites get reclaimed; fixed sites
+    #                      stay tracked (constant BV contribution).
+    #                      Compatible init_distribution values:
+    #                        :ism_watterson — gen-0 SFS sampled from
+    #                          neutral mutation-drift equilibrium 1/p,
+    #                          target count S₀ = 4Ne·Uqtl·Σ 1/k.
+    #                        :ism_denovo    — empty gen-0; settling
+    #                          phase populates the SFS over ~4Ne gens.
+    mutation_model::Symbol = :finite_sites
+    # ISM slot capacity. When 0 (default, auto), set to 4×E[Watterson S]
+    # for each pool. Explicit override accepts the value as L_max for the
+    # QTL+neutral combined pool. Ignored under :finite_sites.
+    ism_capacity::Int = 0
+    # ISM lost-site reclamation interval (in generations). Every
+    # ism_cleanup_interval gens, scan active slots and free those that
+    # have reached popcount=0 (loss). Smaller = more aggressive reuse
+    # but more per-gen overhead. Ignored under :finite_sites.
+    ism_cleanup_interval::Int = 20
+
     # init
     # init_distribution selects the initial per-locus allele-frequency model:
     #   :beta_mutation_drift  — Beta(θ,θ), drift-mutation eq SFS (default)
@@ -48,6 +76,13 @@ Base.@kwdef struct Config
     #                           qcseln/SimPol convention (each haploid ±1 with
     #                           prob 0.5) when init_p = 0.5.
     #   :empirical_sfs        — not yet implemented
+    #   :ism_watterson        — only valid with mutation_model=:infinite_sites.
+    #                           Gen-0 sites sampled from neutral mutation-
+    #                           drift SFS (∝ 1/p), target count
+    #                           S₀ = 4Ne·Uqtl·Σ_{k=1}^{2N-1} 1/k.
+    #   :ism_denovo           — only valid with mutation_model=:infinite_sites.
+    #                           Empty at gen 0; settling phase populates
+    #                           segregating variation from de novo mutation.
     init_distribution::Symbol = :beta_mutation_drift
     theta_override::Union{Float64,Nothing} = nothing
     asym_u::Float64 = NaN                          # used only if init_distribution == :beta_asymmetric
@@ -188,9 +223,64 @@ end
 """
     n_variants(cfg) -> Int
 
-Total number of segregating sites = n_qtl + n_neutral.
+Total number of segregating sites = n_qtl + n_neutral. Under FSM this equals
+the pre-allocated variant pool size. Under ISM, this is only an init hint
+for `:ism_watterson` (used to gate "QTL pool enabled" / "neutral pool
+enabled"); the actual slot capacity is `slot_capacity(cfg)`.
 """
 n_variants(cfg::Config) = cfg.n_qtl + cfg.n_neutral
+
+"""
+    harmonic(n) -> Float64
+
+H_n = Σ_{k=1}^{n} 1/k. Used by the Watterson estimator below.
+"""
+function harmonic(n::Integer)
+    H = 0.0
+    @inbounds for k in 1:n
+        H += 1.0 / k
+    end
+    return H
+end
+
+"""
+    expected_watterson_S(cfg) -> Float64
+
+Expected number of segregating sites in the *population* (all 2N gametes)
+under neutral mutation-drift equilibrium:
+
+    E[S] = 4 · Ne · U_total · H_{2N-1}    where H_n = Σ_{k=1}^{n} 1/k
+
+Derivation: per-gen mutational influx is 2N·U_total; mean time to absorption
+under WF for a new neutral mutation entering at frequency 1/(2N) is
+≈ 2·H_{2N-1}. Product → 4·Ne·U_total·H_{2N-1}. Used by `slot_capacity(cfg)`
+to size the ISM slot pool when `ism_capacity = 0`.
+"""
+function expected_watterson_S(cfg::Config)
+    Utot = cfg.Uqtl + effective_Uneu(cfg)
+    Utot == 0 && return 0.0
+    return 4.0 * cfg.Ne * Utot * harmonic(2 * cfg.Ne - 1)
+end
+
+"""
+    slot_capacity(cfg) -> Int
+
+Total slot capacity of the variant pool.
+- Under `:finite_sites`: `n_qtl + n_neutral`.
+- Under `:infinite_sites`: `ism_capacity` if explicitly set (>0), else
+  `4 × expected_watterson_S_pop(cfg)` capped at the total bp budget.
+"""
+function slot_capacity(cfg::Config)
+    if cfg.mutation_model === :finite_sites
+        return cfg.n_qtl + cfg.n_neutral
+    end
+    if cfg.ism_capacity > 0
+        return cfg.ism_capacity
+    end
+    auto = max(64, ceil(Int, 4.0 * expected_watterson_S(cfg)))
+    cap = cfg.n_chr * cfg.chr_len_bp
+    return min(auto, cap)
+end
 
 """
     n_demes(cfg) -> Int
@@ -322,6 +412,14 @@ function validate(cfg::Config)
     n_variants(cfg) > 0 || throw(ArgumentError("n_qtl + n_neutral must be > 0"))
     n_variants(cfg) <= cfg.n_chr * cfg.chr_len_bp ||
         throw(ArgumentError("n_qtl + n_neutral exceeds total bp ($(cfg.n_chr * cfg.chr_len_bp))"))
+    if cfg.mutation_model === :infinite_sites
+        cap = slot_capacity(cfg)
+        cap > 0 || throw(ArgumentError("ISM requires positive slot_capacity (set ism_capacity > 0 or Uqtl + Uneu > 0)"))
+        cap <= cfg.n_chr * cfg.chr_len_bp ||
+            throw(ArgumentError("ism_capacity=$(cap) exceeds total bp ($(cfg.n_chr * cfg.chr_len_bp))"))
+        cfg.expansion_factor == 1.0 ||
+            throw(ArgumentError("ISM is not yet compatible with expansion_factor > 1"))
+    end
     cfg.xovers_per_chr >= 0 ||
         throw(ArgumentError("xovers_per_chr must be >= 0"))
     cfg.Uqtl >= 0 || throw(ArgumentError("Uqtl must be >= 0"))
@@ -349,8 +447,22 @@ function validate(cfg::Config)
         throw(ArgumentError("directional_start_from must be :md or :msd"))
     cfg.backend in (:packed, :dense) ||
         throw(ArgumentError("backend must be :packed or :dense"))
-    cfg.init_distribution in (:beta_mutation_drift, :beta_asymmetric, :uniform, :fixed_p, :empirical_sfs) ||
+    cfg.init_distribution in (:beta_mutation_drift, :beta_asymmetric, :uniform, :fixed_p, :empirical_sfs, :ism_watterson, :ism_denovo) ||
         throw(ArgumentError("invalid init_distribution"))
+    cfg.mutation_model in (:finite_sites, :infinite_sites) ||
+        throw(ArgumentError("mutation_model must be :finite_sites or :infinite_sites, got $(cfg.mutation_model)"))
+    is_ism_init = cfg.init_distribution in (:ism_watterson, :ism_denovo)
+    if cfg.mutation_model === :infinite_sites
+        is_ism_init ||
+            throw(ArgumentError("mutation_model=:infinite_sites requires init_distribution ∈ (:ism_watterson, :ism_denovo), got $(cfg.init_distribution)"))
+    else
+        is_ism_init &&
+            throw(ArgumentError("init_distribution=$(cfg.init_distribution) requires mutation_model=:infinite_sites"))
+    end
+    cfg.ism_capacity >= 0 ||
+        throw(ArgumentError("ism_capacity must be >= 0 (0 = auto)"))
+    cfg.ism_cleanup_interval >= 1 ||
+        throw(ArgumentError("ism_cleanup_interval must be >= 1"))
     if cfg.init_distribution === :fixed_p
         0.0 <= cfg.init_p <= 1.0 ||
             throw(ArgumentError("init_p must be in [0, 1] for :fixed_p init"))
@@ -440,4 +552,5 @@ end
 export Config, n_variants, n_demes, n_total, theta, theta_qtl, theta_neu,
        mu_per_site, mu_per_qtl_site, mu_per_neutral_site,
        mu_per_bp, recomb_per_bp,
-       effective_Uneu, total_U, validate
+       effective_Uneu, total_U, validate,
+       slot_capacity, expected_watterson_S, harmonic

@@ -191,7 +191,11 @@ function load_native(path::AbstractString)
         end
         chr_end[c] = Int32(j)
     end
-    vt = VariantTable(chr, bp, is_qtl, α, chr_start, chr_end)
+    # Loaded states are assumed to have every slot active (snapshot semantics).
+    # Under ISM, save_native should record the active mask explicitly; for now
+    # the loader treats all loaded slots as active.
+    active = trues(L)
+    vt = VariantTable(chr, bp, is_qtl, α, active, chr_start, chr_end)
 
     pop = PackedPop(zeros(UInt64, nb, twoN), zeros(UInt64, nb, twoN), L, nb, N_per_deme * n_demes_v)
     pop.H .= H

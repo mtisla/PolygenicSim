@@ -125,14 +125,16 @@ end
 end
 
 """
-    mutate_dense!(pop, cfg, scratch, rng) -> Int
+    mutate_dense!(pop, cfg, scratch, vt, rng) -> Int
 
-Apply recurrent symmetric mutation to `pop.H_buf` using per-class rates
-derived from `cfg`. `scratch` is a `GenScratch` (loaded later in the
-module; type annotation dropped to avoid a forward reference). Returns the
-total number of flips applied.
+Apply mutation to `pop.H_buf` per `cfg.mutation_model`. Dispatches to the
+FSM recurrent-flip kernel or the ISM new-site kernel.
 """
-function mutate_dense!(pop::DensePop, cfg::Config, scratch, rng::Xoshiro)
+function mutate_dense!(pop::DensePop, cfg::Config, scratch,
+                       vt::VariantTable, rng::Xoshiro)
+    if cfg.mutation_model === :infinite_sites
+        return _mutate_dense_ism!(pop, cfg, scratch, vt, rng)
+    end
     return _apply_mutations_dense!(pop.H_buf, 2 * pop.N,
                                     scratch.qtl_idx, mu_per_qtl_site(cfg),
                                     scratch.neutral_idx, mu_per_neutral_site(cfg),
@@ -140,16 +142,179 @@ function mutate_dense!(pop::DensePop, cfg::Config, scratch, rng::Xoshiro)
 end
 
 """
-    mutate_packed!(pop, cfg, scratch, rng) -> Int
+    mutate_packed!(pop, cfg, scratch, vt, rng) -> Int
 
 Same as `mutate_dense!` but on the packed offspring buffer.
 """
-function mutate_packed!(pop::PackedPop, cfg::Config, scratch, rng::Xoshiro)
+function mutate_packed!(pop::PackedPop, cfg::Config, scratch,
+                        vt::VariantTable, rng::Xoshiro)
+    if cfg.mutation_model === :infinite_sites
+        return _mutate_packed_ism!(pop, cfg, scratch, vt, rng)
+    end
     return _apply_mutations_packed!(pop.H_buf, 2 * pop.N,
                                      scratch.qtl_idx, mu_per_qtl_site(cfg),
                                      scratch.neutral_idx, mu_per_neutral_site(cfg),
                                      rng, scratch.mscratch)
 end
 
+# =============================================================================
+# Infinite-sites mutation kernels.
+# -----------------------------------------------------------------------------
+# Each generation:
+#   M_qtl ~ Poisson(2N · Uqtl)         new derived alleles entering the QTL pool
+#   M_neu ~ Poisson(2N · Uneu)         new derived alleles entering the neutral pool
+# For each new mutation:
+#   - pop a free slot from `scratch.ism_free_slots`
+#   - choose a random haplotype h ∈ 1..2N
+#   - flip the bit at (slot, h) in H_buf (sets derived = 1 in that gamete)
+#   - update `vt.is_qtl[slot]`, `vt.alpha[slot]`, `vt.active[slot]`
+#   - push slot onto `scratch.qtl_idx` (QTL pool) or `scratch.neutral_idx`
+# Capacity exhaustion (free_slots empty) → error with actionable message.
+# =============================================================================
+
+@inline function _ism_resize_batch!(scratch, M_qtl::Int, M_neu::Int)
+    M = M_qtl + M_neu
+    if length(scratch.ism_hap_idx) < M
+        resize!(scratch.ism_hap_idx, M)
+    end
+    if length(scratch.ism_alpha_buf) < M_qtl
+        resize!(scratch.ism_alpha_buf, M_qtl)
+    end
+    return nothing
+end
+
+@inline function _ism_sample_hap_indices!(buf::AbstractVector{Int}, rng::Xoshiro,
+                                          twoN::Int, n::Int)
+    @inbounds for i in 1:n
+        buf[i] = rand(rng, 1:twoN)
+    end
+    return nothing
+end
+
+function _mutate_packed_ism!(pop::PackedPop, cfg::Config, scratch,
+                              vt::VariantTable, rng::Xoshiro)
+    twoN = 2 * pop.N
+    M_qtl = cfg.Uqtl > 0 ? rand(rng, Poisson(twoN * cfg.Uqtl)) : 0
+    Uneu  = effective_Uneu(cfg)
+    M_neu = Uneu > 0 ? rand(rng, Poisson(twoN * Uneu)) : 0
+    (M_qtl == 0 && M_neu == 0) && return 0
+    _ism_resize_batch!(scratch, M_qtl, M_neu)
+    H = pop.H_buf
+
+    # QTL pool
+    if M_qtl > 0
+        _ism_sample_hap_indices!(scratch.ism_hap_idx, rng, twoN, M_qtl)
+        sample_effects_into!(view(scratch.ism_alpha_buf, 1:M_qtl), rng, cfg)
+        @inbounds for i in 1:M_qtl
+            isempty(scratch.ism_free_slots) &&
+                error("ISM capacity exhausted (Uqtl): ism_capacity=$(length(vt)) " *
+                      "too small; increase cfg.ism_capacity")
+            slot = pop!(scratch.ism_free_slots)
+            h    = scratch.ism_hap_idx[i]
+            a    = scratch.ism_alpha_buf[i]
+            w    = ((slot - 1) >> 6) + 1
+            b    = (slot - 1) & 63
+            H[w, h] |= (UInt64(1) << b)
+            vt.is_qtl[slot] = true
+            vt.alpha[slot]  = a
+            vt.active[slot] = true
+            push!(scratch.qtl_idx, slot)
+            push!(scratch.alpha_qtl, a)
+        end
+    end
+
+    # Neutral pool
+    if M_neu > 0
+        _ism_sample_hap_indices!(scratch.ism_hap_idx, rng, twoN, M_neu)
+        @inbounds for i in 1:M_neu
+            isempty(scratch.ism_free_slots) &&
+                error("ISM capacity exhausted (Uneu): ism_capacity=$(length(vt)) " *
+                      "too small; increase cfg.ism_capacity")
+            slot = pop!(scratch.ism_free_slots)
+            h    = scratch.ism_hap_idx[i]
+            w    = ((slot - 1) >> 6) + 1
+            b    = (slot - 1) & 63
+            H[w, h] |= (UInt64(1) << b)
+            vt.is_qtl[slot] = false
+            vt.alpha[slot]  = 0.0
+            vt.active[slot] = true
+            push!(scratch.neutral_idx, slot)
+        end
+    end
+    return M_qtl + M_neu
+end
+
+function _mutate_dense_ism!(pop::DensePop, cfg::Config, scratch,
+                             vt::VariantTable, rng::Xoshiro)
+    twoN = 2 * pop.N
+    M_qtl = cfg.Uqtl > 0 ? rand(rng, Poisson(twoN * cfg.Uqtl)) : 0
+    Uneu  = effective_Uneu(cfg)
+    M_neu = Uneu > 0 ? rand(rng, Poisson(twoN * Uneu)) : 0
+    (M_qtl == 0 && M_neu == 0) && return 0
+    _ism_resize_batch!(scratch, M_qtl, M_neu)
+    H = pop.H_buf
+
+    if M_qtl > 0
+        _ism_sample_hap_indices!(scratch.ism_hap_idx, rng, twoN, M_qtl)
+        sample_effects_into!(view(scratch.ism_alpha_buf, 1:M_qtl), rng, cfg)
+        @inbounds for i in 1:M_qtl
+            isempty(scratch.ism_free_slots) &&
+                error("ISM capacity exhausted (Uqtl): ism_capacity=$(length(vt)) " *
+                      "too small; increase cfg.ism_capacity")
+            slot = pop!(scratch.ism_free_slots)
+            h    = scratch.ism_hap_idx[i]
+            a    = scratch.ism_alpha_buf[i]
+            H[slot, h] = UInt8(1)
+            vt.is_qtl[slot] = true
+            vt.alpha[slot]  = a
+            vt.active[slot] = true
+            push!(scratch.qtl_idx, slot)
+            push!(scratch.alpha_qtl, a)
+        end
+    end
+
+    if M_neu > 0
+        _ism_sample_hap_indices!(scratch.ism_hap_idx, rng, twoN, M_neu)
+        @inbounds for i in 1:M_neu
+            isempty(scratch.ism_free_slots) &&
+                error("ISM capacity exhausted (Uneu): ism_capacity=$(length(vt)) " *
+                      "too small; increase cfg.ism_capacity")
+            slot = pop!(scratch.ism_free_slots)
+            h    = scratch.ism_hap_idx[i]
+            H[slot, h] = UInt8(1)
+            vt.is_qtl[slot] = false
+            vt.alpha[slot]  = 0.0
+            vt.active[slot] = true
+            push!(scratch.neutral_idx, slot)
+        end
+    end
+    return M_qtl + M_neu
+end
+
+# =============================================================================
+# Popcount over one variant slot — used by ISM cleanup to detect lost
+# (popcount==0) and fixed (popcount==2N) sites.
+# =============================================================================
+
+@inline function popcount_slot_packed(H::Matrix{UInt64}, slot::Int, twoN::Int)
+    w = ((slot - 1) >> 6) + 1
+    b = (slot - 1) & 63
+    mask = UInt64(1) << b
+    cnt = 0
+    @inbounds @simd for k in 1:twoN
+        cnt += Int((H[w, k] & mask) != 0)
+    end
+    return cnt
+end
+
+@inline function popcount_slot_dense(H::Matrix{UInt8}, slot::Int, twoN::Int)
+    cnt = 0
+    @inbounds @simd for k in 1:twoN
+        cnt += Int(H[slot, k])
+    end
+    return cnt
+end
+
 export MutationScratch, mutate_dense!, mutate_packed!,
-       _apply_mutations_packed!, _apply_mutations_dense!
+       _apply_mutations_packed!, _apply_mutations_dense!,
+       popcount_slot_packed, popcount_slot_dense

@@ -444,9 +444,12 @@ Threaded over individuals when `Threads.nthreads() > 1`.
 """
 function fill_genotype_buf_dense!(G::Matrix{UInt8}, H::Matrix{UInt8},
                                      qtl_idx::Vector{Int}, N::Integer;
-                                     chunk_count::Integer = 0)
-    n_qtl = size(G, 1)
+                                     chunk_count::Integer = 0,
+                                     n_qtl_actual::Integer = length(qtl_idx))
+    n_qtl = Int(n_qtl_actual)
     n_qtl == 0 && return nothing
+    n_qtl <= size(G, 1) ||
+        throw(BoundsError(G, "n_qtl_actual=$n_qtl > size(G,1)=$(size(G, 1))"))
     Nint = Int(N)
     cc = chunk_count > 0 ? Int(chunk_count) : _parallel_chunks(Nint)
     if is_contiguous_qtl_idx(qtl_idx, n_qtl)
@@ -517,9 +520,12 @@ per-bit shifts. Threaded over individuals when `Threads.nthreads() > 1`.
 """
 function fill_genotype_buf_packed!(G::Matrix{UInt8}, H::Matrix{UInt64},
                                       qtl_idx::Vector{Int}, N::Integer;
-                                      chunk_count::Integer = 0)
-    n_qtl = size(G, 1)
+                                      chunk_count::Integer = 0,
+                                      n_qtl_actual::Integer = length(qtl_idx))
+    n_qtl = Int(n_qtl_actual)
     n_qtl == 0 && return nothing
+    n_qtl <= size(G, 1) ||
+        throw(BoundsError(G, "n_qtl_actual=$n_qtl > size(G,1)=$(size(G, 1))"))
     Nint = Int(N)
     cc = chunk_count > 0 ? Int(chunk_count) : _parallel_chunks(Nint)
     if is_contiguous_qtl_idx(qtl_idx, n_qtl)
@@ -660,9 +666,12 @@ when `Threads.nthreads() > 1`.
 """
 function matvec_bv!(A::Vector{Float64}, G::Matrix{UInt8},
                      alpha_qtl::Vector{Float64}, N::Integer;
-                     chunk_count::Integer = 0)
+                     chunk_count::Integer = 0,
+                     n_qtl_actual::Integer = length(alpha_qtl))
     Nint = Int(N)
-    n_qtl = size(G, 1)
+    n_qtl = Int(n_qtl_actual)
+    n_qtl <= size(G, 1) ||
+        throw(BoundsError(G, "n_qtl_actual=$n_qtl > size(G,1)=$(size(G, 1))"))
     cc = chunk_count > 0 ? Int(chunk_count) : _parallel_chunks(Nint)
     if cc == 1
         _matvec_bv_range!(A, G, alpha_qtl, 1, Nint, n_qtl)

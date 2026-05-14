@@ -304,7 +304,8 @@ function load_plink(prefix::AbstractString;
         chr_end[c] = Int32(j)
     end
 
-    vt = VariantTable(chr, bp, is_qtl, α, chr_start, chr_end)
+    active = trues(L)   # PLINK loader: assume every loaded site is active
+    vt = VariantTable(chr, bp, is_qtl, α, active, chr_start, chr_end)
 
     # Read .bed and randomize phase.
     H = read_bed_to_dense(prefix * ".bed", L, N, rng)

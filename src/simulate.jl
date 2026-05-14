@@ -161,6 +161,14 @@ function simulate(cfg::Config)
         else
             step!(pop, vt, cfg, phase, scratch, rng, gen_in_phase)
         end
+        # ISM lost-site reclamation. Slots that have reached popcount=0
+        # are returned to `ism_free_slots`; fixed sites stay in qtl_idx.
+        if cfg.mutation_model === :infinite_sites
+            scratch.ism_cleanup_counter += 1
+            if scratch.ism_cleanup_counter >= cfg.ism_cleanup_interval
+                cleanup_ism!(pop, vt, scratch)
+            end
+        end
         if n_int > 0 && (gen % n_int == 0 || gen == total_gens)
             # Within-deme weighted-average diagnostics. For panmictic
             # (n_demes=1) this reduces to the pooled value.
