@@ -43,20 +43,6 @@ struct OracleResult
     dc_null_sd::Matrix{Float64}
     dc_Z::Matrix{Float64}
     dc_perm_p::Matrix{Float64}
-    # dc_avg — alternative cross-tail test using the genome-wide pair mean as
-    # the reference instead of the within-tail (LL+HH) average:
-    #   dc_avg_delta = B̄_LH − B̄_avg
-    # where B̄_avg is the per-pair mean of α_j·R_jk·α_k over ALL off-diagonal
-    # in-scope pairs (not just the L and H tail blocks). Because B̄_avg is
-    # averaged over O(p²) pairs its variance under sign-flip null is
-    # negligible vs B̄_LH's — so Var(δ_avg) ≈ Var(B̄_LH), which is roughly
-    # half Var(dc_current). Net: ~√2 higher z-stat for the same signal.
-    # Two-tailed sign-flip perm_p, same convention as dc.
-    dc_avg_delta::Matrix{Float64}
-    dc_avg_null_mean::Matrix{Float64}
-    dc_avg_null_sd::Matrix{Float64}
-    dc_avg_Z::Matrix{Float64}
-    dc_avg_perm_p::Matrix{Float64}
     # rho_pearson — Pearson correlation of the studentized per-locus marginal
     # Bulmer effect B_std_j against logit(p_pol_j), one per scope.
     #   B_j         = α_j · Σ_{k ≠ j, mask[j,k]} R_meta[j,k] · α_k
@@ -70,22 +56,9 @@ struct OracleResult
     rho_pearson_Z::Vector{Float64}
     rho_pearson_perm_p::Vector{Float64}
     # === Regression-family directional tests, paired (no-r) vs (with-r) ===
-    # Six tests in three pairs. Each pair compares an LD-vs-frequency signal
+    # Two tests in two pairs. Each pair compares an LD-vs-frequency signal
     # without vs with log r_jk as nuisance covariate.
     #
-    # T_bilin  — weighted-sum (no r): (1/N) Σ_{j<k,mask} (p_pol_j−½)(p_pol_k−½)·B_jk
-    # T_bilin_r — weighted-sum (with r): same with the bilinear weight
-    #   residualized against (1, log r_jk) before forming the sum.
-    T_bilin::Vector{Float64}
-    T_bilin_null_mean::Vector{Float64}
-    T_bilin_null_sd::Vector{Float64}
-    T_bilin_Z::Vector{Float64}
-    T_bilin_perm_p::Vector{Float64}
-    T_bilin_r::Vector{Float64}
-    T_bilin_r_null_mean::Vector{Float64}
-    T_bilin_r_null_sd::Vector{Float64}
-    T_bilin_r_Z::Vector{Float64}
-    T_bilin_r_perm_p::Vector{Float64}
     # T_slope    — β slope of B_jk on |Δp_pol|, intercept only.
     # T_slope_r  — β slope of B_jk on |Δp_pol|, with log r_jk covariate.
     T_slope::Vector{Float64}

@@ -9,6 +9,39 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-14
+
+### Changed (BREAKING)
+- **Dropped `dc_avg` from `OracleResult`** (5 fields:
+  `dc_avg_delta/null_mean/null_sd/Z/perm_p`). The cross-tail-vs-pair-mean
+  variant was consistently null in our v9+ regime panel — never fired at
+  p<0.05 across stabilizing, neutral, or directional conditions — and
+  added noise to the multi-scope summary. `dc` (against the within-tail
+  LL+HH mean) is retained as the only `Δ_cross` flavor.
+- **Dropped `T_bilin` and `T_bilin_r`** from the regression-family
+  directional tests (10 fields). The bilinear weight
+  `(p_pol_j−½)(p_pol_k−½)` integrated over all in-scope pairs and
+  diluted any directional asymmetry; never fired at p<0.05 in our
+  test runs, and elevated the noise-floor false-positive rate at
+  the `:init` phase. `T_slope`/`T_slope_r` and `T_asym`/`T_asym_r`
+  are retained as the two complementary regression detectors.
+- **`ρ_pearson` standardization now uses empirical-mean sd** from the
+  same sign-flip null draws (instead of analytical-mean=0 + RMS).
+  Per-locus `B_j` is centered by `mean_b(B_j_null_b)` and divided by
+  `std(B_j_null_b)` (Bessel-corrected). At `n_perm = 1000` the
+  numerical difference vs the analytical-mean form is negligible
+  (<0.5%) but the standardization is now symmetric with the
+  perm-p computation.
+
+### TSV output
+- `{prefix}.oracle.tsv` (and `.{phase}.tsv`) no longer includes the
+  `dca*` or `T_bilin*` rows. Downstream aggregators keyed on column
+  names should drop those keys.
+
+### Tests
+- 404 tests pass (was 404). No tests directly referenced the removed
+  fields, so the count is unchanged.
+
 ## [0.8.2] — 2026-05-14
 
 ### Added
