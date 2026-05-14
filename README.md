@@ -744,6 +744,61 @@ oracle = PS.oracle_stats(result;
 PS.write_oracle_tsv("recompute", oracle)
 ```
 
+### Multi-phase recording — compare regimes in one run
+
+For directional studies that need a neutral baseline and a stabilizing
+equilibrium reference alongside the post-shift state, set
+`oracle_phases` to a subset of `{:init, :settled, :final}`:
+
+```julia
+cfg = PS.Config(
+    N=5_000, Ne=5_000, n_chr=10, chr_len_bp=1_000_000,
+    n_qtl=1_000, Uqtl=0.02,
+    mutation_model=:infinite_sites,
+    init_distribution=:ism_watterson,
+    h2=0.7,
+    selection_mode=:directional, directional_start_from=:msd,
+    vs_over_vp0=20.0, shift_sd=4.0,
+    ngen_eq=25_000, ngen_dir=50,
+    output_formats=Symbol[:summary, :oracle],
+    oracle_phases=Symbol[:init, :settled, :final],
+    oracle_n_perm=1_000, oracle_cutoffs=[10, 20, 50],
+    output_prefix="dir_v16", seed=UInt64(1),
+)
+res = PS.simulate(cfg)
+
+res.oracle_records[:init]      # gen 0, Watterson SFS (neutral baseline)
+res.oracle_records[:settled]   # gen 25_000, MSD equilibrium under stabilizing
+res.oracle_records[:final]     # gen 25_050, post-directional shift
+```
+
+Each phase emits `{prefix}.oracle.{phase}.tsv`. When only `[:final]`
+is recorded (the default), the legacy `{prefix}.oracle.tsv` is also
+written for back-compat with v0.7.x aggregation scripts.
+
+**What each phase reveals.** From a publication-scale run with the
+config above (15.7 min wall on a 4-thread machine):
+
+| Test | INIT (neutral) | SETTLED (stabilizing) | FINAL (directional) |
+|---|---|---|---|
+| `B` (Bulmer) | 0/6 (null) | **6/6 ✓ negative** | 1/6 |
+| `dc` cutoff=20% | 2/6 (noise) | 0/6 | **4/6 ✓** |
+| `ρ_pearson` | 0/6 | 0/6 | **6/6 ✓ Z=+2.8 to +3.3** |
+| `T_slope` / `T_asym` | 0/6 | 0/6 | 1/6 / 0/6 |
+
+So:
+- **`B`** is the stabilizing-selection signature (fires only under MSD eq).
+- **`ρ_pearson`** is the directional-selection signature (fires only after
+  the shift, all six scopes, very strong Z).
+- **`dc` at the 20% cutoff** corroborates the directional regime at small
+  windows.
+- **`INIT`** establishes the neutral noise floor at the run's seed —
+  any test firing here at the same intensity as `FINAL` indicates the
+  signal is sampling noise, not selection.
+
+See `examples/multiphase_oracle.jl` for a runnable demo (≈1 min at the
+demo scale, ≈16 min at the publication scale shown above).
+
 **Expected cost** (Julia BLAS, 4-thread): ~2 s for `p_qtl = 2000`,
 ~8 s for `p_qtl = 5000` (panmictic), `n_perm = 1000`. Peak Float64
 fast-path memory ≈ `3·p²` doubles + `N·p` — about 3 GB at `p=10000` on a
