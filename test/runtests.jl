@@ -1430,6 +1430,56 @@ end
     @test :final in keys(res_noseet.oracle_records)
 end
 
+@testset "Oracle — new pair/q25 stats + oracle_r_controls gate" begin
+    cfg = PS.Config(
+        N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
+        n_qtl=60, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5, selection_mode=:directional,
+        directional_start_from=:msd,
+        vs_over_vp0=20.0, shift_sd=2.0,
+        ngen_eq=20, ngen_dir=10,
+        output_formats=Symbol[:oracle],
+        oracle_n_perm=100, oracle_cutoffs=[50],
+        output_prefix=tempname(),
+        seed=UInt64(1), n_threads=1)
+    res = PS.simulate(cfg)
+    o = res.oracle
+    # The three new tests are populated for every scope.
+    @test length(o.rho_pair_pol_fix) == length(o.scope_names)
+    @test length(o.rho_pair_pol_rep) == length(o.scope_names)
+    @test length(o.rho_pearson_q25)  == length(o.scope_names)
+    # At least one scope should produce a finite value (small N may give NaN
+    # at scopes with too few pairs, so we only require any).
+    @test any(isfinite, o.rho_pair_pol_fix)
+    @test any(isfinite, o.rho_pair_pol_rep)
+    @test any(isfinite, o.rho_pearson_q25)
+    # Default behavior: _r variants skipped (all NaN).
+    @test all(isnan, o.T_slope_r)
+    @test all(isnan, o.T_asym_r)
+
+    # Opt-in: oracle_r_controls=true re-enables _r computation.
+    cfg2 = PS.Config(
+        N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
+        n_qtl=60, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5, selection_mode=:directional,
+        directional_start_from=:msd,
+        vs_over_vp0=20.0, shift_sd=2.0,
+        ngen_eq=20, ngen_dir=10,
+        output_formats=Symbol[:oracle],
+        oracle_n_perm=100, oracle_cutoffs=[50],
+        oracle_r_controls=true,
+        output_prefix=tempname(),
+        seed=UInt64(1), n_threads=1)
+    res2 = PS.simulate(cfg2)
+    o2 = res2.oracle
+    @test any(isfinite, o2.T_slope_r)
+    @test any(isfinite, o2.T_asym_r)
+end
+
 @testset "ISM — infinite-sites mutation model" begin
     # 1. Validation: ISM init_distribution requires mutation_model=:infinite_sites
     #    (and vice versa)

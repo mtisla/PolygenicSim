@@ -9,6 +9,49 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-14
+
+### Added — three new directional statistics
+- **`rho_pair_pol_fix`** — Pearson correlation over in-scope pairs of
+  signed `α_j·α_k·R_jk` against polarized `|p_pol_j − p_pol_k|`. Sign-flip
+  null permutes only α; polarized freq stays at observed values.
+- **`rho_pair_pol_rep`** — same observed statistic, but the sign-flip
+  null *also* repolarizes p_pol_j → 1 − p_pol_j whenever ε_j = −1.
+  `y_perm[j,k,b] = |p_pol_j ± p_pol_k − constant|` depending on the
+  per-pair sign product. All five Pearson sums vary per perm.
+- **`rho_pearson_q25`** — variant of `rho_pearson` where the per-locus
+  marginal `B_j` is restricted to the bottom 25 % (most-negative) of
+  α_j·α_k·R_jk partner contributions per locus. Standardize via the
+  empirical sign-flip null (mean + Bessel sd, like the updated
+  `rho_pearson`), then correlate with `logit(p_pol_j)` with
+  per-perm repolarization. Threaded over loci (Threads.@threads) to
+  amortize the O(p² · n_perm) partial-sort cost.
+
+Each new test contributes 5 fields to `OracleResult` (`{stat}`,
+`{stat}_null_mean`, `_null_sd`, `_Z`, `_perm_p`). All appear in
+`{prefix}.oracle.tsv` and the per-phase TSVs.
+
+### Changed (BREAKING)
+- **`Config.oracle_r_controls::Bool` defaults to `false`**. The
+  recombination-rate-controlled regression variants (`T_slope_r`,
+  `T_asym_r`) are no longer computed by default — their OracleResult
+  fields populate as `NaN`. Under panmictic + uniform-recomb regimes
+  the `_r` values matched the bare versions to within ~1 % across
+  v9+ runs, so the default was net cost without information. The
+  computation code is preserved; set `oracle_r_controls = true` to
+  re-enable (useful for spatial / non-uniform-recomb regimes).
+
+### Performance
+- `oracle_stats` adds ~10–60 s per call at v16-scale (p ≈ 4000,
+  n_perm=1000) for the three new tests, offset by ~10–20 s saved
+  from skipping the `_r` variants. Net overhead is roughly 0–40 s
+  per call depending on scope count.
+
+### Tests
+- 414 pass (was 404, +10 for the new "Oracle — new pair/q25 stats +
+  oracle_r_controls gate" testset: new-field population, default
+  `_r` skip, opt-in `_r` recovery, per-scope NaN handling).
+
 ## [0.9.0] — 2026-05-14
 
 ### Changed (BREAKING)
