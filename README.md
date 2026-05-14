@@ -20,6 +20,7 @@ This package implements **Phases 1, 2, 4, 5** of the spec in
 - [Multi-rep workflow](#multi-rep-workflow)
 - [Configuration reference](#configuration-reference)
 - [Mutation rates](#mutation-rates)
+- [Mutation model](#mutation-model)
 - [Initial allele frequencies](#initial-allele-frequencies)
 - [Recombination and LD](#recombination-and-ld)
 - [Generations](#generations)
@@ -198,12 +199,16 @@ the value used when the kwarg is omitted.
 
 ### Mutation
 
-See [Mutation rates](#mutation-rates) for full discussion.
+See [Mutation rates](#mutation-rates) and [Mutation model](#mutation-model)
+for full discussion.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `Uqtl` | `Float64` | `0.02` | Per-gamete rate of QTL-targeting mutations. |
 | `Uneu` | `Float64?` | `nothing` | Per-gamete rate of neutral-targeting mutations. `nothing` auto-derives `Uqtl · n_neutral / n_qtl` (uniform per-site rate). Set explicitly only for non-uniform per-site rates. |
+| `mutation_model` | `Symbol` | `:finite_sites` | `:finite_sites` (recurrent symmetric flip at a fixed pool of `n_qtl + n_neutral` sites) or `:infinite_sites` (each new mutation enters at a fresh slot; lost sites reclaimed). See [Mutation model](#mutation-model). |
+| `ism_capacity` | `Int` | `0` | ISM slot-pool capacity. `0` = auto: `4 × expected_watterson_S(cfg)`, capped by total bp. Ignored under `:finite_sites`. |
+| `ism_cleanup_interval` | `Int` | `20` | Generations between ISM lost-site reclamation passes. Smaller = more aggressive slot reuse, more per-gen overhead. Ignored under `:finite_sites`. |
 
 ### Init (initial allele frequencies)
 
@@ -212,7 +217,7 @@ full description of each mode.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `init_distribution` | `Symbol` | `:beta_mutation_drift` | Per-locus initial-freq model. Options: `:beta_mutation_drift` (Beta(θ,θ) drift-mutation eq), `:uniform` (U(0,1) per locus), `:beta_asymmetric` (Beta(4Ne·v, 4Ne·u)), `:fixed_p` (every locus at `init_p`), `:empirical_sfs` (stub — not implemented). |
+| `init_distribution` | `Symbol` | `:beta_mutation_drift` | Per-locus initial-freq model. FSM options: `:beta_mutation_drift` (Beta(θ,θ) drift-mutation eq), `:uniform` (U(0,1) per locus), `:beta_asymmetric` (Beta(4Ne·v, 4Ne·u)), `:fixed_p` (every locus at `init_p`), `:empirical_sfs` (stub — not implemented). ISM options (require `mutation_model=:infinite_sites`): `:ism_watterson` (Watterson SFS warm-start, ~`4Ne·U_total·H_{2N−1}` sites at gen 0), `:ism_denovo` (cold start, settling populates the SFS). |
 | `theta_override` | `Float64?` | `nothing` | Override `θ` for `:beta_mutation_drift`. When unset, `θ = 4·Ne·μ_per_site`. |
 | `asym_u` | `Float64` | `NaN` | Per-site 0→1 mutation rate for `:beta_asymmetric`. Required when this mode is used. |
 | `asym_v` | `Float64` | `NaN` | Per-site 1→0 mutation rate for `:beta_asymmetric`. Required when this mode is used. |
@@ -327,6 +332,53 @@ or GWAS analysis, so the configuration is rejected at `validate`.
 
 ---
 
+## Mutation model
+
+`mutation_model` selects how new mutations are introduced each generation:
+
+| Model | Semantics | When to use |
+|---|---|---|
+| `:finite_sites` *(default)* | Recurrent symmetric flip at a fixed pool of `n_qtl + n_neutral` sites. Each gen draws `M ~ Binomial(2N · n_sites, μ_site)` flips per pool. The site pool and SFS shape are bounded by the initial Beta(θ,θ) draw. | Matches `bulmer.slim` / SLiM's per-site recurrent model. Cleaner for stabilizing-eq diagnostics; bounded memory. |
+| `:infinite_sites` | Each new mutation enters at a fresh slot (no recurrent / back-mutation). Lost sites get reclaimed every `ism_cleanup_interval` gens; fixed sites stay tracked as constant BV offsets. The SFS is the neutral `f(p) ∝ 1/p` density at equilibrium. | Matches coalescent / msprime conventions. Cleaner for directional adaptation — mutation pressure doesn't fight selected-allele frequency changes. |
+
+**Bit-packed layout under ISM.** The slot pool is pre-allocated at
+`L_max = slot_capacity(cfg)` with sorted random bp positions per
+chromosome. New mutations inherit a free slot's bp; the bit-packed
+recombination kernel works unchanged. `slot_capacity` auto-resolves to
+`max(64, ceil(4 × expected_watterson_S(cfg)))` capped at total bp; set
+`ism_capacity` explicitly to override.
+
+**Init modes paired with ISM** (set via `init_distribution`):
+- `:ism_watterson` — gen-0 warm-start: `S₀ ~ Poisson(expected_watterson_S(cfg))`
+  active sites split between QTL/neutral pools by `Uqtl : Uneu`. Active
+  slots get derived-allele frequencies from `f(p) ∝ 1/p` over
+  `[1/(2N), 1−1/(2N)]`. Skips the ~4Ne-gen burn-in to reach mutation-drift
+  equilibrium.
+- `:ism_denovo` — gen-0 cold-start: no segregating variation at gen 0;
+  the settling phase populates the SFS de novo via the ISM mutation
+  kernel. Realistic but slow to reach equilibrium.
+
+```julia
+# QTL-only ISM run with Watterson warm-start, signed-exponential effects
+PS.Config(
+    N=5000, Ne=5000, n_qtl=1000, n_neutral=0,
+    Uqtl=0.005,
+    mutation_model=:infinite_sites,
+    init_distribution=:ism_watterson,
+    effect_distribution=:signed_exponential, effect_scale=0.03,
+    h2=0.99, selection_mode=:directional, vs=100.0, sel_grad=0.1,
+    ngen_eq=25_000, ngen_dir=200,
+)
+```
+
+**Cost vs FSM.** At equivalent `Uqtl`, ISM holds roughly twice as many
+sites polymorphic at any moment (1/p tail vs FSM's U-shaped Beta(θ,θ)),
+which scales `L_max` and the bit-packed matrix accordingly. Wall-time
+overhead is ≈ `L_max_ISM / L_FSM` — typically 1.5–3× for matched-`Uqtl`
+configs. Constraint: ISM is not yet compatible with `expansion_factor > 1`.
+
+---
+
 ## Initial allele frequencies
 
 `init_distribution` selects the per-locus initial allele-frequency model.
@@ -340,11 +392,13 @@ which adds binomial sampling noise on top of the configured distribution.
 
 | Mode | Math | When to use |
 |---|---|---|
-| `:beta_mutation_drift` | `Beta(θ, θ)` with `θ = 4·Ne·μ` | **Default**. Symmetric drift-mutation eq SFS; U-shaped (most mass near 0 and 1) when `θ < 1`. |
-| `:uniform` | `U(0, 1)` per locus | Flat across the frequency spectrum. |
-| `:beta_asymmetric` | `Beta(4·Ne·v, 4·Ne·u)` | Asymmetric mutation eq with `u = asym_u` (per-site 0→1) and `v = asym_v` (per-site 1→0). |
-| `:fixed_p` | Every locus at `p = init_p` | qcseln/SimPol-style: every locus's expected freq is `init_p` (default `0.5`), with binomial sampling per gene copy. |
-| `:empirical_sfs` | Sample from empirical SFS | **Stub — throws on use.** Reserved for future support of real-dataset SFS init. |
+| `:beta_mutation_drift` | `Beta(θ, θ)` with `θ = 4·Ne·μ` | **Default (FSM)**. Symmetric drift-mutation eq SFS; U-shaped (most mass near 0 and 1) when `θ < 1`. |
+| `:uniform` | `U(0, 1)` per locus | FSM. Flat across the frequency spectrum. |
+| `:beta_asymmetric` | `Beta(4·Ne·v, 4·Ne·u)` | FSM. Asymmetric mutation eq with `u = asym_u` (per-site 0→1) and `v = asym_v` (per-site 1→0). |
+| `:fixed_p` | Every locus at `p = init_p` | FSM. qcseln/SimPol-style: every locus's expected freq is `init_p` (default `0.5`), with binomial sampling per gene copy. |
+| `:empirical_sfs` | Sample from empirical SFS | FSM. **Stub — throws on use.** Reserved for future support of real-dataset SFS init. |
+| `:ism_watterson` | `S₀ ~ Poisson(4·Ne·U_total·H_{2N−1})` active sites, freqs ∝ 1/p | ISM warm-start. See [Mutation model](#mutation-model). Requires `mutation_model = :infinite_sites`. |
+| `:ism_denovo` | Empty at gen 0 | ISM cold-start. Settling populates the SFS de novo. Requires `mutation_model = :infinite_sites`. |
 
 ### Per-mode detail
 

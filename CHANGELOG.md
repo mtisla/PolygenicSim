@@ -9,6 +9,50 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-14
+
+### Added
+- **`mutation_model = :infinite_sites` (ISM).** New opt-in mutation kernel
+  alongside the default `:finite_sites`. Each new mutation enters at a
+  fresh slot (no recurrent / back-mutation). Lost sites are reclaimed
+  every `ism_cleanup_interval` gens; fixed sites stay tracked as
+  constant BV offsets. Two new `init_distribution` values gated on ISM:
+  - `:ism_watterson` — seeds a Watterson SFS at gen 0
+    (`E[S₀] = 4·Ne·U_total·H_{2N−1}`, frequencies sampled from neutral
+    `1/p` density). Splits between QTL/neutral pools by `Uqtl : Uneu`.
+  - `:ism_denovo` — empty at gen 0; settling phase populates the SFS
+    de novo.
+  New Config knobs: `mutation_model`, `ism_capacity` (auto-derived as
+  `4 × expected_watterson_S(cfg)` when 0), `ism_cleanup_interval`.
+  Vectorized hot path: batched `randexp!` / `rand!` into pre-sized
+  scratch in `GenScratch`, popcount-based cleanup.
+- **`expected_watterson_S(cfg)` and `slot_capacity(cfg)`** helpers
+  exposing the Watterson estimator and the resolved ISM pool size.
+- **Vectorized effect-size sampler** `sample_effects_into!(buf, rng, cfg)`
+  using `randexp!` / `randn!` into a pre-allocated buffer. Used by ISM
+  init and the ISM mutation kernel.
+
+### Changed (BREAKING)
+- **`VariantTable` gained an `active::BitVector` field** between `alpha`
+  and `chr_start`. Under FSM every slot is active by construction; under
+  ISM the field is dynamic. External code that constructs `VariantTable`
+  positionally must add the `active` argument.
+- **`mutate_packed!` and `mutate_dense!` now take a `VariantTable`
+  argument** between `scratch` and `rng`: `mutate_packed!(pop, cfg,
+  scratch, vt, rng)`. Internal dispatch on `cfg.mutation_model`.
+
+### Verified
+- v12 ISM (`Uqtl=0.005`, `:ism_watterson`) vs v11 FSM (`Uqtl=0.005`,
+  `:beta_mutation_drift`) at h²=0.99, 25k+200 gen, VS=100, sel_grad=0.1:
+  ISM response is 2.4× larger (+1.29 vs +0.55 BV units), `dc` fires at
+  5/6 windows at cutoff=20% under ISM vs 1/6 under FSM. ~2× wall-time
+  overhead (345 s vs 162 s) from larger `L_max = 3916`.
+
+### Tests
+- `374` tests pass (was `360`), `+14` for the new ISM testset
+  covering validation, Watterson SFS shape, gen-0 active count,
+  cold-start de novo populate, and FSM default preservation.
+
 ## [0.7.2] — 2026-05-13
 
 ### Added
