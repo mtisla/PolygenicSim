@@ -1446,11 +1446,13 @@ end
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
     o = res.oracle
-    # q10 and q25 populated for every scope.
+    # q05, q10, q25 populated for every scope.
+    @test length(o.rho_pearson_q05) == length(o.scope_names)
     @test length(o.rho_pearson_q10) == length(o.scope_names)
     @test length(o.rho_pearson_q25) == length(o.scope_names)
     # At least one scope should produce a finite value (small N may give NaN
     # at scopes with too few pairs, so we only require any).
+    @test any(isfinite, o.rho_pearson_q05)
     @test any(isfinite, o.rho_pearson_q10)
     @test any(isfinite, o.rho_pearson_q25)
     # Default behavior: _r variant skipped (all NaN).

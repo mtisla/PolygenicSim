@@ -9,6 +9,31 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-05-15
+
+### Added — `rho_pearson_q05`
+- **`rho_pearson_q05`** — same construction as `rho_pearson_q10` / `q25`
+  but with `q = 0.05` (bottom 5 % of per-locus partner contributions).
+  Sharpest tail-focus in the family. In the v20 3-seed sweep at the v18
+  config it produced the highest median Z at narrow α²-weighted windows
+  (median Z = +2.85 at win_5pct vs +2.55 for q25), with clean nulls at
+  both gen-0 (Watterson) and gen-25k (MSD eq).
+
+### Tried and dropped during 0.11.1 development
+- **`skew_B`** (skewness of signed pair B over in-scope pairs) and a
+  **`skew_B_q90dp`** variant (restricted to |Δp_pol| ≥ 0.9): the v20
+  3-seed sweep showed `skew_B` is not directional-specific — it fires
+  at the MSD-eq SETTLED state (seed 1 perm_p = 0.001 at narrow windows)
+  and shows inconsistent sign at FINAL across seeds (positive at seed 3
+  where directional should give negative). The fixed-mask `_q90dp`
+  variant additionally fires at gen-0 Watterson because the structural
+  tail asymmetry of the rare × common subset isn't reproducible by
+  per-pair sign flips. Both removed before commit.
+
+### Tests
+- Added `rho_pearson_q05` finite-output checks to the Oracle q10/q25
+  + r_controls testset; test count 410 → 413.
+
 ## [0.11.0] — 2026-05-14
 
 ### Changed — BREAKING: oracle output schema

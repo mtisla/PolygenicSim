@@ -1124,6 +1124,8 @@ function oracle_stats(result::SimResult;
             # rho_pearson_q10 (5)
             nv(), nv(), nv(), nv(), nv(),
             # rho_pearson_q25 (5)
+            nv(), nv(), nv(), nv(), nv(),
+            # rho_pearson_q05 (5)
             nv(), nv(), nv(), nv(), nv())
     end
 
@@ -1188,6 +1190,9 @@ function oracle_stats(result::SimResult;
     Rq10_nsd = fill(NaN, n_scopes); Rq10_Z = fill(NaN, n_scopes); Rq10_p = fill(NaN, n_scopes)
     Rq25_obs = fill(NaN, n_scopes); Rq25_nm = fill(NaN, n_scopes)
     Rq25_nsd = fill(NaN, n_scopes); Rq25_Z = fill(NaN, n_scopes); Rq25_p = fill(NaN, n_scopes)
+    # rho_pearson at q=0.05 (bottom 5 % per-locus tail).
+    Rq05_obs = fill(NaN, n_scopes); Rq05_nm = fill(NaN, n_scopes)
+    Rq05_nsd = fill(NaN, n_scopes); Rq05_Z = fill(NaN, n_scopes); Rq05_p = fill(NaN, n_scopes)
 
     if !failed
         for s in 1:n_scopes
@@ -1228,8 +1233,12 @@ function oracle_stats(result::SimResult;
         Tsr_obs .= treg.T_slope_r;        Tsr_nm  .= treg.T_slope_r_null_mean
         Tsr_nsd .= treg.T_slope_r_null_sd; Tsr_Z  .= treg.T_slope_r_Z; Tsr_p  .= treg.T_slope_r_perm_p
 
-        # Quantile-restricted per-locus rho_pearson_q10 + rho_pearson_q25, one per scope.
+        # Quantile-restricted per-locus rho_pearson_q05 / q10 / q25, one per scope.
         for s in 1:n_scopes
+            rq05 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.05)
+            Rq05_obs[s] = rq05.rho;     Rq05_nm[s] = rq05.null_mean
+            Rq05_nsd[s] = rq05.null_sd; Rq05_Z[s]  = rq05.Z
+            Rq05_p[s]   = rq05.perm_p
             rq10 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.10)
             Rq10_obs[s] = rq10.rho;     Rq10_nm[s] = rq10.null_mean
             Rq10_nsd[s] = rq10.null_sd; Rq10_Z[s]  = rq10.Z
@@ -1251,7 +1260,8 @@ function oracle_stats(result::SimResult;
                          Ts_obs,  Ts_nm,  Ts_nsd,  Ts_Z,  Ts_p,
                          Tsr_obs, Tsr_nm, Tsr_nsd, Tsr_Z, Tsr_p,
                          Rq10_obs, Rq10_nm, Rq10_nsd, Rq10_Z, Rq10_p,
-                         Rq25_obs, Rq25_nm, Rq25_nsd, Rq25_Z, Rq25_p)
+                         Rq25_obs, Rq25_nm, Rq25_nsd, Rq25_Z, Rq25_p,
+                         Rq05_obs, Rq05_nm, Rq05_nsd, Rq05_Z, Rq05_p)
 end
 
 """
@@ -1329,6 +1339,11 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                           oracle.rho_pearson_q25_null_sd,
                           oracle.rho_pearson_q25_Z,
                           oracle.rho_pearson_q25_perm_p),
+            ("rho_pearson_q05", oracle.rho_pearson_q05,
+                          oracle.rho_pearson_q05_null_mean,
+                          oracle.rho_pearson_q05_null_sd,
+                          oracle.rho_pearson_q05_Z,
+                          oracle.rho_pearson_q05_perm_p),
         )
         for (prefix, obs, nm, nsd, z, pp) in reg_specs
             for (s, name) in enumerate(oracle.scope_names)

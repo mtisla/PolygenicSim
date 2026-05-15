@@ -88,6 +88,13 @@ struct OracleResult
     rho_pearson_q25_null_sd::Vector{Float64}
     rho_pearson_q25_Z::Vector{Float64}
     rho_pearson_q25_perm_p::Vector{Float64}
+    # rho_pearson_q05 — same construction as q10/q25 but bottom 5 % of
+    # per-locus partner contributions. Sharper tail than q10.
+    rho_pearson_q05::Vector{Float64}
+    rho_pearson_q05_null_mean::Vector{Float64}
+    rho_pearson_q05_null_sd::Vector{Float64}
+    rho_pearson_q05_Z::Vector{Float64}
+    rho_pearson_q05_perm_p::Vector{Float64}
 end
 
 export OracleResult
