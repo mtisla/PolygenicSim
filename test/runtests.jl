@@ -1163,7 +1163,6 @@ end
     # Scope ordering: [win_10pct, win_25pct, within, genome]
     @test or.scope_names == ["win_10pct", "win_25pct", "within", "genome"]
     @test or.windows_pct == [10.0, 25.0]
-    @test or.cutoffs == [20, 50]
     @test or.p_qtl >= 3
     @test or.n_total == 200
     @test or.n_demes == 1
@@ -1173,15 +1172,11 @@ end
     @test all(isfinite, or.B)
     @test all(p -> 0 < p <= 1, or.B_perm_p)
 
-    # Δ_cross: every scope x cutoff cell has finite metadata
-    n_scopes = length(or.scope_names)
-    n_cut = length(or.cutoffs)
-    @test size(or.dc_delta) == (n_scopes, n_cut)
-    @test size(or.dc_perm_p) == (n_scopes, n_cut)
-    # When nL, nH >= 2 the dc fields are populated; permit some NaNs for cells
-    # that fall below the L/H thresholds at small p_qtl.
-    n_populated = count(isfinite, or.dc_delta)
-    @test n_populated >= 1  # at least one cell computed
+    # rho_pearson family populated at every scope (at least one finite cell each)
+    @test any(isfinite, or.rho_pearson)
+    @test any(isfinite, or.rho_pearson_q05)
+    @test any(isfinite, or.rho_pearson_q10)
+    @test any(isfinite, or.rho_pearson_q25)
 
     # TSV side-effect: file exists and has expected header
     tsv = cfg.output_prefix * ".oracle.tsv"
@@ -1190,7 +1185,7 @@ end
     @test lines[1] == "key\tvalue"
     @test any(l -> startswith(l, "meta.p_qtl\t"), lines)
     @test any(l -> startswith(l, "B_within\t"),   lines)
-    @test any(l -> startswith(l, "dc20_delta_within\t"), lines)
+    @test any(l -> startswith(l, "rho_pearson_Z_within\t"), lines)
 
     # Standalone API: same defaults, different n_perm/windows override.
     or2 = PS.oracle_stats(res; n_perm=20, windows_pct=[5.0],
@@ -1395,7 +1390,7 @@ end
         N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
         Uqtl=0.02, h2=0.5, ngen_eq=3,
         output_formats=Symbol[:oracle],
-        oracle_n_perm=50, oracle_cutoffs=[50],
+        oracle_n_perm=50,
         output_prefix=tempname(), seed=UInt64(1), n_threads=1)
     res_def = PS.simulate(cfg_def)
     @test sort(collect(keys(res_def.oracle_records))) == [:final]
@@ -1410,7 +1405,7 @@ end
         ngen_eq=5, ngen_dir=3,
         output_formats=Symbol[:oracle],
         oracle_phases=Symbol[:init, :settled, :final],
-        oracle_n_perm=50, oracle_cutoffs=[50],
+        oracle_n_perm=50,
         output_prefix=tempname(), seed=UInt64(1), n_threads=1)
     res_all = PS.simulate(cfg_all)
     @test sort(collect(keys(res_all.oracle_records))) == [:final, :init, :settled]
@@ -1422,7 +1417,7 @@ end
         Uqtl=0.02, h2=0.5, ngen=3,
         output_formats=Symbol[:oracle],
         oracle_phases=Symbol[:init, :settled, :final],
-        oracle_n_perm=50, oracle_cutoffs=[50],
+        oracle_n_perm=50,
         output_prefix=tempname(), seed=UInt64(1), n_threads=1)
     res_noseet = PS.simulate(cfg_noseet)
     @test :init in keys(res_noseet.oracle_records)
@@ -1430,7 +1425,7 @@ end
     @test :final in keys(res_noseet.oracle_records)
 end
 
-@testset "Oracle — q10/q25 stats + oracle_r_controls gate" begin
+@testset "Oracle — q05/q10/q25 tail-restricted rho_pearson stats" begin
     cfg = PS.Config(
         N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
         n_qtl=60, Uqtl=0.02,
@@ -1441,7 +1436,7 @@ end
         vs_over_vp0=20.0, shift_sd=2.0,
         ngen_eq=20, ngen_dir=10,
         output_formats=Symbol[:oracle],
-        oracle_n_perm=100, oracle_cutoffs=[50],
+        oracle_n_perm=100,
         output_prefix=tempname(),
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
@@ -1450,32 +1445,10 @@ end
     @test length(o.rho_pearson_q05) == length(o.scope_names)
     @test length(o.rho_pearson_q10) == length(o.scope_names)
     @test length(o.rho_pearson_q25) == length(o.scope_names)
-    # At least one scope should produce a finite value (small N may give NaN
-    # at scopes with too few pairs, so we only require any).
+    # At least one scope should produce a finite value.
     @test any(isfinite, o.rho_pearson_q05)
     @test any(isfinite, o.rho_pearson_q10)
     @test any(isfinite, o.rho_pearson_q25)
-    # Default behavior: _r variant skipped (all NaN).
-    @test all(isnan, o.T_slope_r)
-
-    # Opt-in: oracle_r_controls=true re-enables _r computation.
-    cfg2 = PS.Config(
-        N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
-        n_qtl=60, Uqtl=0.02,
-        mutation_model=:infinite_sites,
-        init_distribution=:ism_watterson,
-        h2=0.5, selection_mode=:directional,
-        directional_start_from=:msd,
-        vs_over_vp0=20.0, shift_sd=2.0,
-        ngen_eq=20, ngen_dir=10,
-        output_formats=Symbol[:oracle],
-        oracle_n_perm=100, oracle_cutoffs=[50],
-        oracle_r_controls=true,
-        output_prefix=tempname(),
-        seed=UInt64(1), n_threads=1)
-    res2 = PS.simulate(cfg2)
-    o2 = res2.oracle
-    @test any(isfinite, o2.T_slope_r)
 end
 
 @testset "ISM — infinite-sites mutation model" begin

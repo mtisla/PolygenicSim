@@ -9,6 +9,43 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-05-15
+
+### Changed — BREAKING: oracle output schema slimmed down to the working set
+The v20 3-seed sweep (Uqtl=0.02, h2=0.7, VS/VP=20, shift=4σ, 25k+50 gen)
+established that under panmictic + uniform recombination, the
+`rho_pearson` family (`rho_pearson`, `q05`, `q10`, `q25`) plus Bulmer's
+`B` are the only stats with both clean nulls (gen-0 Watterson, gen-25k
+MSD eq) AND consistent firing under directional selection across seeds.
+The other stats fail one or both criteria:
+- **`T_slope` / `T_slope_r`**: weak signal — fires only in the strong-
+  realization seed at v18 config (Z = −2.84 within at seed 1, but
+  Z = +0.30 at seed 2 and Z = −1.64 at seed 3).
+- **`dc<cutoff>` family**: gen-0 false positives (seed 1 within Z = +3.0
+  at dc10 under pure Watterson neutrality, perm_p = 0.003), and inconsistent
+  direction at FINAL across seeds.
+- **`oracle_cutoffs`**, **`oracle_r_controls`** Config knobs become
+  vestigial when dc and T_slope_r are removed.
+
+**Removed from `OracleResult`** (~25 fields total):
+- All 13 `dc_*` fields (Int and Float matrices indexed by scope × cutoff).
+- All 10 `T_slope` / `T_slope_r` fields.
+- The `cutoffs::Vector{Int}` metadata field.
+
+**Removed from `Config`**:
+- `oracle_cutoffs::Vector{Int}` (was `[20, 50]`).
+- `oracle_r_controls::Bool` (was `false`).
+
+**Removed from `src/oracle.jl`** (~400 lines):
+- `_delta_cross_one`, `_oracle_regression_tests`, `_quadform_signflip!`,
+  `_summarize_perm_null` — all only used by dc / T_slope.
+
+**Removed TSV keys**: every `dc<cutoff>_<field>_<scope>` and every
+`T_slope[_r]_<field>_<scope>` row no longer appears in `.oracle.<phase>.tsv`.
+
+### Tests
+- Existing testsets updated to match the new schema. Test count: 413 → 410.
+
 ## [0.11.1] — 2026-05-15
 
 ### Added — `rho_pearson_q05`

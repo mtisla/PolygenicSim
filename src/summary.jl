@@ -76,9 +76,8 @@ const _CONFIG_CATEGORIES = (
                        :save_settled),
     "loading"     => (:load_from, :load_plink_prefix, :load_demography),
     "oracle"      => (:oracle_windows_pct, :oracle_n_perm,
-                       :oracle_memory_path_threshold, :oracle_cutoffs,
-                       :oracle_precision, :oracle_phases,
-                       :oracle_r_controls),
+                       :oracle_memory_path_threshold,
+                       :oracle_precision, :oracle_phases),
 )
 
 # Compile-time sanity check: every Config field appears in some category.

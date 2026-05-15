@@ -189,21 +189,9 @@ Base.@kwdef struct Config
     #       doubles (D_buf + Dm_buf + R_meta) plus X (N×p); at p=10000 that's
     #       ~3 GB which comfortably fits modern workstation RAM. Tune down on
     #       memory-constrained machines, up on 32+GB hosts.
-    #   `oracle_cutoffs`     — Δ_cross frequency cutoffs (percent). 20 and
-    #       50 match the R reference; pair (L, H) groups are
-    #       {p_pol < c%} and {p_pol > (1-c%)}.
     oracle_windows_pct::Vector{Float64} = [5.0, 10.0, 25.0, 50.0]
     oracle_n_perm::Int = 1000
     oracle_memory_path_threshold::Int = 10000
-    oracle_cutoffs::Vector{Int} = [20, 50]
-    # When false (default), the recombination-rate-controlled regression
-    # variants (`T_slope_r`, `T_asym_r`) are skipped; their OracleResult
-    # fields populate as NaN. Set true to opt back in to the full _r
-    # computation (useful for spatial / non-uniform-recomb regimes where
-    # log r_jk could be a confound). Default is false because under
-    # panmictic + uniform-recomb the _r values match the bare versions
-    # to within ~1% across our test runs.
-    oracle_r_controls::Bool = false
     # Phases at which to record oracle statistics. Effective only when
     # `:oracle ∈ output_formats`. Each entry must be one of:
     #   :init    — gen 0, immediately after init + V_E computation.
@@ -513,10 +501,6 @@ function validate(cfg::Config)
     for w in cfg.oracle_windows_pct
         (0 < w <= 100) ||
             throw(ArgumentError("oracle_windows_pct entries must be in (0, 100], got $w"))
-    end
-    for c in cfg.oracle_cutoffs
-        (1 <= c <= 50) ||
-            throw(ArgumentError("oracle_cutoffs entries must be in [1, 50], got $c"))
     end
     cfg.oracle_precision in (:Float64, :Float32) ||
         throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
