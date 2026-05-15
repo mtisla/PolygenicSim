@@ -9,6 +9,40 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-05-15
+
+### Added — combined per-locus tail × frequency-separation filters (anchored at dp80)
+Three new `rho_pearson` variants that layer the per-locus bottom-q%
+partner filter (q05 / q10 / q25) on top of the dp80 mask (top 80 % of
+pairs by |Δp_pol|):
+- **`rho_pearson_q05_dp80`** — top 80 % by |Δp_pol|, per locus bottom 5 %.
+- **`rho_pearson_q10_dp80`** — top 80 % by |Δp_pol|, per locus bottom 10 %.
+- **`rho_pearson_q25_dp80`** — top 80 % by |Δp_pol|, per locus bottom 25 %.
+
+Rationale: q-family captures the per-locus LD-tail signature; dp80
+removes the mid-|Δp_pol| dilution band. Combining them concentrates on
+the loci × partner subset where directional sweeps generate the
+strongest negative LD. Implementation reuses `_rho_pearson_q25_one`
+with the dp-filtered mask — no new helper functions.
+
+v20 3-seed sweep results (median Z at FINAL):
+| scope     | dp80  | q05_dp80 | **q10_dp80** | q25_dp80 |
+|-----------|-------|----------|--------------|----------|
+| win_5pct  | +2.80 | +3.26    | **+3.33**    | +2.91    |
+| win_25pct | +2.57 | +2.35    | **+2.70**    | +2.60    |
+
+`q10_dp80` is the new top performer at narrow α²-weighted windows;
+beats the best of the pure q- or dp- families.
+
+Other dp cutoffs (dp50, dp90) were trialled and dropped:
+- **dp50** (drop bottom 50 %): too aggressive — pure q05_dp50 trailed
+  q05_dp80 by 0.6–1.3 Z across scopes in the v20 sweep.
+- **dp90** (drop bottom 10 %): too lax — q05_dp90 and q25_dp90 lost
+  +0.2 to +0.5 Z to their dp80 counterparts at 5 of 6 cells.
+
+### Tests
+- Added finite-output checks for the three new fields. Test count: 420 → 426.
+
 ## [0.13.0] — 2026-05-15
 
 ### Added — per-stat scope subset config + dp80 (combined release)

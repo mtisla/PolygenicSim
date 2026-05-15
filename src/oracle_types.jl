@@ -71,6 +71,27 @@ struct OracleResult
     rho_pearson_dp80_null_sd::Vector{Float64}
     rho_pearson_dp80_Z::Vector{Float64}
     rho_pearson_dp80_perm_p::Vector{Float64}
+    # Combined q × dp filters anchored at dp80: per-locus bottom-q% of partner
+    # contributions, restricted to the top 80 % of pairs by |Δp_pol|. The v20
+    # 3-seed sweep showed dp80 is the sweet spot for the frequency-separation
+    # filter (dp50 too aggressive, dp90 too lax); only the per-locus quantile
+    # varies among the family. Sign-flip null repolarizes logit per perm;
+    # the dp80 mask is built at observed polarization and stays fixed.
+    rho_pearson_q05_dp80::Vector{Float64}
+    rho_pearson_q05_dp80_null_mean::Vector{Float64}
+    rho_pearson_q05_dp80_null_sd::Vector{Float64}
+    rho_pearson_q05_dp80_Z::Vector{Float64}
+    rho_pearson_q05_dp80_perm_p::Vector{Float64}
+    rho_pearson_q10_dp80::Vector{Float64}
+    rho_pearson_q10_dp80_null_mean::Vector{Float64}
+    rho_pearson_q10_dp80_null_sd::Vector{Float64}
+    rho_pearson_q10_dp80_Z::Vector{Float64}
+    rho_pearson_q10_dp80_perm_p::Vector{Float64}
+    rho_pearson_q25_dp80::Vector{Float64}
+    rho_pearson_q25_dp80_null_mean::Vector{Float64}
+    rho_pearson_q25_dp80_null_sd::Vector{Float64}
+    rho_pearson_q25_dp80_Z::Vector{Float64}
+    rho_pearson_q25_dp80_perm_p::Vector{Float64}
 end
 
 export OracleResult

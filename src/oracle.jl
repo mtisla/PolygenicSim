@@ -783,7 +783,10 @@ function oracle_stats(result::SimResult;
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q05 (5)
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q10 (5)
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q25 (5)
-            nv(), nv(), nv(), nv(), nv())              # rho_pearson_dp80 (5)
+            nv(), nv(), nv(), nv(), nv(),              # rho_pearson_dp80 (5)
+            nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q05_dp80 (5)
+            nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q10_dp80 (5)
+            nv(), nv(), nv(), nv(), nv())              # rho_pearson_q25_dp80 (5)
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -829,6 +832,13 @@ function oracle_stats(result::SimResult;
     Rq25_nsd  = fill(NaN, n_scopes); Rq25_Z   = fill(NaN, n_scopes); Rq25_p   = fill(NaN, n_scopes)
     Rdp80_obs = fill(NaN, n_scopes); Rdp80_nm = fill(NaN, n_scopes)
     Rdp80_nsd = fill(NaN, n_scopes); Rdp80_Z  = fill(NaN, n_scopes); Rdp80_p  = fill(NaN, n_scopes)
+    # Combined per-locus q × |Δp_pol| filter stats, all anchored at dp80:
+    Q05D80_obs = fill(NaN, n_scopes); Q05D80_nm = fill(NaN, n_scopes)
+    Q05D80_nsd = fill(NaN, n_scopes); Q05D80_Z  = fill(NaN, n_scopes); Q05D80_p  = fill(NaN, n_scopes)
+    Q10D80_obs = fill(NaN, n_scopes); Q10D80_nm = fill(NaN, n_scopes)
+    Q10D80_nsd = fill(NaN, n_scopes); Q10D80_Z  = fill(NaN, n_scopes); Q10D80_p  = fill(NaN, n_scopes)
+    Q25D80_obs = fill(NaN, n_scopes); Q25D80_nm = fill(NaN, n_scopes)
+    Q25D80_nsd = fill(NaN, n_scopes); Q25D80_Z  = fill(NaN, n_scopes); Q25D80_p  = fill(NaN, n_scopes)
 
     if !failed
         # Polarized freqs reused for the dp80 mask construction.
@@ -853,16 +863,27 @@ function oracle_stats(result::SimResult;
             Rq25_nsd[s] = rq25.null_sd; Rq25_Z[s]  = rq25.Z
             Rq25_p[s]   = rq25.perm_p
 
-            # dp80: build filtered mask by ANDing scope mask with
-            # |Δp_pol_obs| ≥ x, where x is the 20th percentile of in-scope
-            # |Δp_pol| values. Skip the scope if it has fewer than 5
-            # in-scope pairs (insufficient for a percentile).
+            # dp80 mask: AND scope mask with |Δp_pol_obs| ≥ 20th percentile
+            # of in-scope |Δp_pol| values. `nothing` return ⇒ scope has
+            # fewer than 5 in-scope pairs.
             dp80_mask = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
             if dp80_mask !== nothing
                 rdp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask)
                 Rdp80_obs[s] = rdp80.rho;     Rdp80_nm[s] = rdp80.null_mean
                 Rdp80_nsd[s] = rdp80.null_sd; Rdp80_Z[s]  = rdp80.Z
                 Rdp80_p[s]   = rdp80.perm_p
+                rq05d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.05)
+                Q05D80_obs[s] = rq05d80.rho;     Q05D80_nm[s] = rq05d80.null_mean
+                Q05D80_nsd[s] = rq05d80.null_sd; Q05D80_Z[s]  = rq05d80.Z
+                Q05D80_p[s]   = rq05d80.perm_p
+                rq10d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.10)
+                Q10D80_obs[s] = rq10d80.rho;     Q10D80_nm[s] = rq10d80.null_mean
+                Q10D80_nsd[s] = rq10d80.null_sd; Q10D80_Z[s]  = rq10d80.Z
+                Q10D80_p[s]   = rq10d80.perm_p
+                rq25d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.25)
+                Q25D80_obs[s] = rq25d80.rho;     Q25D80_nm[s] = rq25d80.null_mean
+                Q25D80_nsd[s] = rq25d80.null_sd; Q25D80_Z[s]  = rq25d80.Z
+                Q25D80_p[s]   = rq25d80.perm_p
             end
         end
     end
@@ -874,7 +895,10 @@ function oracle_stats(result::SimResult;
                          Rq05_obs,  Rq05_nm,  Rq05_nsd,  Rq05_Z,  Rq05_p,
                          Rq10_obs,  Rq10_nm,  Rq10_nsd,  Rq10_Z,  Rq10_p,
                          Rq25_obs,  Rq25_nm,  Rq25_nsd,  Rq25_Z,  Rq25_p,
-                         Rdp80_obs, Rdp80_nm, Rdp80_nsd, Rdp80_Z, Rdp80_p)
+                         Rdp80_obs, Rdp80_nm, Rdp80_nsd, Rdp80_Z, Rdp80_p,
+                         Q05D80_obs, Q05D80_nm, Q05D80_nsd, Q05D80_Z, Q05D80_p,
+                         Q10D80_obs, Q10D80_nm, Q10D80_nsd, Q10D80_Z, Q10D80_p,
+                         Q25D80_obs, Q25D80_nm, Q25D80_nsd, Q25D80_Z, Q25D80_p)
 end
 
 """
@@ -932,6 +956,21 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                                 oracle.rho_pearson_dp80_null_sd,
                                 oracle.rho_pearson_dp80_Z,
                                 oracle.rho_pearson_dp80_perm_p),
+            ("rho_pearson_q05_dp80", oracle.rho_pearson_q05_dp80,
+                                oracle.rho_pearson_q05_dp80_null_mean,
+                                oracle.rho_pearson_q05_dp80_null_sd,
+                                oracle.rho_pearson_q05_dp80_Z,
+                                oracle.rho_pearson_q05_dp80_perm_p),
+            ("rho_pearson_q10_dp80", oracle.rho_pearson_q10_dp80,
+                                oracle.rho_pearson_q10_dp80_null_mean,
+                                oracle.rho_pearson_q10_dp80_null_sd,
+                                oracle.rho_pearson_q10_dp80_Z,
+                                oracle.rho_pearson_q10_dp80_perm_p),
+            ("rho_pearson_q25_dp80", oracle.rho_pearson_q25_dp80,
+                                oracle.rho_pearson_q25_dp80_null_mean,
+                                oracle.rho_pearson_q25_dp80_null_sd,
+                                oracle.rho_pearson_q25_dp80_Z,
+                                oracle.rho_pearson_q25_dp80_perm_p),
         )
         for (pfx, obs, nm, nsd, z, pp) in rho_specs
             for (s, name) in enumerate(oracle.scope_names)

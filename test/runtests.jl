@@ -1445,16 +1445,22 @@ end
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
     o = res.oracle
-    # q05, q10, q25, dp80 populated for every scope.
+    # q05, q10, q25, dp80, and the combined q*_dp* family populated for every scope.
     @test length(o.rho_pearson_q05) == length(o.scope_names)
     @test length(o.rho_pearson_q10) == length(o.scope_names)
     @test length(o.rho_pearson_q25) == length(o.scope_names)
     @test length(o.rho_pearson_dp80) == length(o.scope_names)
+    @test length(o.rho_pearson_q05_dp80) == length(o.scope_names)
+    @test length(o.rho_pearson_q10_dp80) == length(o.scope_names)
+    @test length(o.rho_pearson_q25_dp80) == length(o.scope_names)
     # At least one scope should produce a finite value.
     @test any(isfinite, o.rho_pearson_q05)
     @test any(isfinite, o.rho_pearson_q10)
     @test any(isfinite, o.rho_pearson_q25)
     @test any(isfinite, o.rho_pearson_dp80)
+    @test any(isfinite, o.rho_pearson_q05_dp80)
+    @test any(isfinite, o.rho_pearson_q10_dp80)
+    @test any(isfinite, o.rho_pearson_q25_dp80)
 end
 
 @testset "Oracle — per-stat scope subset (B_scopes / rho_scopes)" begin
