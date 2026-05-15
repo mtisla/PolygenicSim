@@ -60,6 +60,17 @@ struct OracleResult
     rho_pearson_q25_null_sd::Vector{Float64}
     rho_pearson_q25_Z::Vector{Float64}
     rho_pearson_q25_perm_p::Vector{Float64}
+    # rho_pearson_dp80 — rho_pearson restricted to pairs with high polarized
+    # frequency separation. The scope mask is AND-ed with |p_pol_j − p_pol_k|
+    # ≥ x, where x is the 20th percentile of in-scope pair |Δp_pol_obs|
+    # values (so the top 80% of pairs by |Δp_pol| are kept). The filter is
+    # built at observed polarization and held fixed across permutations; the
+    # logit predictor still repolarizes per perm.
+    rho_pearson_dp80::Vector{Float64}
+    rho_pearson_dp80_null_mean::Vector{Float64}
+    rho_pearson_dp80_null_sd::Vector{Float64}
+    rho_pearson_dp80_Z::Vector{Float64}
+    rho_pearson_dp80_perm_p::Vector{Float64}
 end
 
 export OracleResult

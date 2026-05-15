@@ -192,6 +192,25 @@ Base.@kwdef struct Config
     oracle_windows_pct::Vector{Float64} = [5.0, 10.0, 25.0, 50.0]
     oracle_n_perm::Int = 1000
     oracle_memory_path_threshold::Int = 10000
+    # Per-stat scope subset config (v0.13.0).
+    # Each entry is one of: `:all` (compute every scope) or an explicit scope
+    # symbol like `:win_5pct`, `:win_10pct`, `:win_25pct`, `:win_50pct`,
+    # `:within`, `:genome`. If `:all` appears anywhere in the list, every
+    # scope is computed for that stat family. Otherwise only listed scopes
+    # are computed; remaining scopes are NaN in the output struct + TSV.
+    #
+    # Default scope choices follow the v20 3-seed sweep findings:
+    #   B is informative at broad scopes (Bulmer's effect averages many
+    #     pairs; narrow-window B is high-variance and not useful in our
+    #     experiments). Default to wide scopes only.
+    #   rho_pearson family fires at narrow α²-weighted windows
+    #     (median Z = +2.85 at win_5pct; signal washes out by genome).
+    #     Default to narrow scopes only.
+    # Use `[:all]` for either field to recover the v0.12 behavior.
+    oracle_B_scopes::Vector{Symbol} =
+        Symbol[:win_50pct, :within, :genome]
+    oracle_rho_scopes::Vector{Symbol} =
+        Symbol[:win_5pct, :win_10pct, :win_25pct]
     # Phases at which to record oracle statistics. Effective only when
     # `:oracle ∈ output_formats`. Each entry must be one of:
     #   :init    — gen 0, immediately after init + V_E computation.
@@ -504,6 +523,33 @@ function validate(cfg::Config)
     end
     cfg.oracle_precision in (:Float64, :Float32) ||
         throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
+    # Validate scope-list FORMAT only (each entry must be `:all`, `:within`,
+    # `:genome`, or `:win_<N>pct`). We don't require the scope to exist in
+    # `oracle_windows_pct` — unsupported scopes are silently dropped at
+    # oracle_stats time. This way the default `[:win_50pct, :within, :genome]`
+    # still works when a user configures non-default oracle_windows_pct.
+    _validate_scope_sym = function (sym::Symbol, field::String)
+        sym in (:all, :within, :genome) && return
+        s = String(sym)
+        if startswith(s, "win_") && endswith(s, "pct")
+            mid = s[5:end-3]
+            if tryparse(Float64, mid) !== nothing
+                return
+            end
+        end
+        throw(ArgumentError("$field entry $sym is not a valid scope " *
+              "(expected :all, :within, :genome, or :win_<N>pct)"))
+    end
+    for sc in cfg.oracle_B_scopes
+        _validate_scope_sym(sc, "oracle_B_scopes")
+    end
+    for sc in cfg.oracle_rho_scopes
+        _validate_scope_sym(sc, "oracle_rho_scopes")
+    end
+    isempty(cfg.oracle_B_scopes) &&
+        throw(ArgumentError("oracle_B_scopes is empty; use [:all] for all scopes"))
+    isempty(cfg.oracle_rho_scopes) &&
+        throw(ArgumentError("oracle_rho_scopes is empty; use [:all] for all scopes"))
     isempty(cfg.oracle_phases) &&
         throw(ArgumentError("oracle_phases must contain at least one of :init, :settled, :final"))
     for ph in cfg.oracle_phases

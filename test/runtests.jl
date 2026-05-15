@@ -1155,6 +1155,8 @@ end
         output_prefix=tempname(),
         oracle_n_perm=50,  # small to keep the test quick
         oracle_windows_pct=[10.0, 25.0],
+        oracle_B_scopes=[:all],
+        oracle_rho_scopes=[:all],
         seed=UInt64(42), n_threads=1)
     res = PS.simulate(cfg)
     @test res.oracle !== nothing
@@ -1168,11 +1170,11 @@ end
     @test or.n_demes == 1
     @test or.VA_meta > 0
 
-    # B at every scope should be finite
+    # With oracle_B_scopes=[:all] every scope has finite B.
     @test all(isfinite, or.B)
     @test all(p -> 0 < p <= 1, or.B_perm_p)
 
-    # rho_pearson family populated at every scope (at least one finite cell each)
+    # With oracle_rho_scopes=[:all] each rho family has at least one finite cell.
     @test any(isfinite, or.rho_pearson)
     @test any(isfinite, or.rho_pearson_q05)
     @test any(isfinite, or.rho_pearson_q10)
@@ -1205,6 +1207,7 @@ end
         output_formats=Symbol[:oracle],
         output_prefix=tempname(),
         oracle_n_perm=30, oracle_windows_pct=[20.0],
+        oracle_B_scopes=[:all],
         seed=UInt64(7), n_threads=1)
     res2D = PS.simulate(cfg2D)
     @test res2D.oracle !== nothing
@@ -1236,6 +1239,7 @@ end
         output_prefix=tempname(),
         oracle_n_perm=50,
         oracle_windows_pct=[10.0, 25.0],
+        oracle_B_scopes=[:all],
         oracle_precision=:Float32,
         seed=UInt64(42), n_threads=1)
     res_f32 = PS.simulate(cfg_f32)
@@ -1441,14 +1445,71 @@ end
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
     o = res.oracle
-    # q05, q10, q25 populated for every scope.
+    # q05, q10, q25, dp80 populated for every scope.
     @test length(o.rho_pearson_q05) == length(o.scope_names)
     @test length(o.rho_pearson_q10) == length(o.scope_names)
     @test length(o.rho_pearson_q25) == length(o.scope_names)
+    @test length(o.rho_pearson_dp80) == length(o.scope_names)
     # At least one scope should produce a finite value.
     @test any(isfinite, o.rho_pearson_q05)
     @test any(isfinite, o.rho_pearson_q10)
     @test any(isfinite, o.rho_pearson_q25)
+    @test any(isfinite, o.rho_pearson_dp80)
+end
+
+@testset "Oracle — per-stat scope subset (B_scopes / rho_scopes)" begin
+    # Verify that scope subsetting NaNs out the right entries.
+    cfg = PS.Config(
+        N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
+        n_qtl=60, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5,
+        ngen_eq=10,
+        output_formats=Symbol[:oracle],
+        oracle_n_perm=50,
+        oracle_windows_pct=[10.0, 25.0],
+        oracle_B_scopes=[:within, :genome],
+        oracle_rho_scopes=[:win_10pct],
+        output_prefix=tempname(),
+        seed=UInt64(7), n_threads=1)
+    res = PS.simulate(cfg)
+    o = res.oracle
+    # scope_names is [win_10pct, win_25pct, within, genome]
+    @test o.scope_names == ["win_10pct", "win_25pct", "within", "genome"]
+    # B masked: win_10pct and win_25pct should be NaN, within + genome finite
+    @test isnan(o.B[1]) && isnan(o.B[2])
+    @test isfinite(o.B[3]) && isfinite(o.B[4])
+    # rho_pearson masked: only win_10pct finite, others NaN
+    @test isfinite(o.rho_pearson[1])
+    @test isnan(o.rho_pearson[2]) && isnan(o.rho_pearson[3]) && isnan(o.rho_pearson[4])
+
+    # `:all` recovers the v0.12 behavior.
+    cfg2 = PS.Config(
+        N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
+        n_qtl=60, Uqtl=0.02,
+        mutation_model=:infinite_sites,
+        init_distribution=:ism_watterson,
+        h2=0.5,
+        ngen_eq=10,
+        output_formats=Symbol[:oracle],
+        oracle_n_perm=50,
+        oracle_windows_pct=[10.0, 25.0],
+        oracle_B_scopes=[:all],
+        oracle_rho_scopes=[:all],
+        output_prefix=tempname(),
+        seed=UInt64(7), n_threads=1)
+    o2 = PS.simulate(cfg2).oracle
+    @test all(isfinite, o2.B)
+    @test any(isfinite, o2.rho_pearson)
+
+    # Validation: bogus scope symbol should throw.
+    @test_throws ArgumentError PS.Config(
+        N=50, Ne=50, n_chr=1, chr_len_bp=10_000, n_qtl=30,
+        Uqtl=0.02, h2=0.5, ngen_eq=1,
+        output_formats=Symbol[:oracle],
+        oracle_B_scopes=[:not_a_scope],
+        seed=UInt64(1)) |> PS.validate
 end
 
 @testset "ISM — infinite-sites mutation model" begin

@@ -9,6 +9,68 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-05-15
+
+### Added — per-stat scope subset config + dp80 (combined release)
+- **`oracle_B_scopes::Vector{Symbol}`** — controls which scopes B is
+  reported at. `[:all]` ≡ every scope (back-compat). Default is now
+  `[:win_50pct, :within, :genome]` (B's signal is broad; narrow-window
+  B is high-variance per the v20 3-seed sweep).
+- **`oracle_rho_scopes::Vector{Symbol}`** — controls which scopes the
+  rho_pearson family (`rho_pearson`, `rho_pearson_q05/q10/q25`,
+  `rho_pearson_dp80`) is reported at. `[:all]` ≡ every scope. Default
+  is now `[:win_5pct, :win_10pct, :win_25pct]` (directional sweeps
+  fire at narrow α²-weighted windows in v20; signal washes out by
+  genome scope).
+- **`rho_pearson_dp80`** — rho_pearson restricted to pairs with the
+  top 80% by polarized frequency separation `|p_pol_j − p_pol_k|`
+  (drop bottom 20%). v20 3-seed sweep at FINAL: median Z = +2.80 at
+  win_5pct (vs +2.85 for q05, +2.76 for base) and dp80 dominates the
+  q-family at all wider scopes (win_25pct: dp80 +2.57 vs q25 +2.17;
+  within: dp80 +1.87 vs q25 +1.48). Clean nulls at SETTLED.
+
+### Changed — BREAKING: default scope reporting
+- Out-of-the-box: B is computed only at wide scopes, rho family only
+  at narrow scopes. Users wanting the v0.12.0 behavior should pass
+  `oracle_B_scopes=[:all]` and `oracle_rho_scopes=[:all]`.
+- Realistic speedup at the default config: ~40-50% wall-clock for
+  full oracle_stats since the rho family doesn't run at the 3 wider
+  scopes.
+
+### Performance — partial-sort optimization in q-family
+- `_rho_pearson_q25_one` no longer calls `partialsort!` per
+  permutation. Replaced with a pre-sorted `|c_obs|` (descending +
+  ascending) scan that collects the q_n smallest under each perm in
+  O(n_in) without log-factor sort overhead. Math is unchanged. The
+  loop allocates two extra `sortperm` buffers per locus (one-time);
+  per-perm cost drops by ~2× empirically.
+
+### Tests
+- Added `oracle_B_scopes` / `oracle_rho_scopes` validation paths and
+  scope-mask round-trip checks. Test count: 412 → 420.
+
+## [0.12.1] — 2026-05-15
+
+### Added — `rho_pearson_dp80`
+- **`rho_pearson_dp80`** — `rho_pearson` restricted to pairs with high
+  polarized frequency separation. The scope mask is AND-ed with
+  `|p_pol_j − p_pol_k| ≥ x`, where `x` is the **20th percentile** of
+  in-scope pair `|Δp_pol_obs|` values (so the top 80 % of pairs by
+  |Δp_pol| are kept, the bottom 20 % dropped). Targets the "rare-+ ×
+  common-+" pair structure where directional sweeps generate the
+  strongest negative LD, while skipping the mid-range |Δp_pol| band
+  where the v20 sweep showed FINAL has reduced variance vs SETTLED
+  (a directional-specific structural change). Filter is built at
+  observed polarization and fixed under sign-flip; the logit predictor
+  still repolarizes per perm. Calibrated for use *alongside* the
+  q05/q10/q25 family (different selector — frequency-separation vs
+  per-locus LD-magnitude).
+- New helper `_dp_filtered_mask(mask, p_pol, drop_q)` in `src/oracle.jl`.
+
+### Tests
+- Added `rho_pearson_dp80` finite-output check to the Oracle
+  q05/q10/q25 testset; test count 410 → 412.
+
 ## [0.12.0] — 2026-05-15
 
 ### Changed — BREAKING: oracle output schema slimmed down to the working set

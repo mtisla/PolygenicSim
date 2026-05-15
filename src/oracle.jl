@@ -57,6 +57,16 @@ function _format_scope_name(frac::Float64)
 end
 
 # Build the list of scope names: windows + "within" + "genome".
+# Resolve a user-supplied scope subset (vector of Symbols, possibly
+# containing `:all`) into a Bool mask aligned with `scope_names`.
+function _resolve_scope_mask(scope_names::Vector{String}, requested::Vector{Symbol})
+    if any(==(:all), requested)
+        return trues(length(scope_names))
+    end
+    req_strs = Set{String}(String(s) for s in requested)
+    return BitVector(name in req_strs for name in scope_names)
+end
+
 function _build_scope_names(windows_pct::Vector{Float64})
     names = String[_format_scope_name(w) for w in windows_pct]
     push!(names, "within")
@@ -332,6 +342,32 @@ function _oracle_fast_path(::Type{T}, X::Matrix{T}, α::Vector{T},
             raw_signs, is_failed)
 end
 
+# Build a filtered mask by AND-ing the given scope mask with
+# `|p_pol[j] − p_pol[k]| ≥ x_threshold`, where `x_threshold` is the
+# `drop_q`-quantile of |Δp_pol_obs| over in-scope pairs (so the top
+# `(1−drop_q)` fraction by |Δp_pol| are kept). Returns the new BitMatrix or
+# `nothing` if the in-scope pair count is too small for a stable percentile.
+function _dp_filtered_mask(mask::BitMatrix, p_pol::Vector{Float64},
+                            drop_q::Float64)
+    p = size(mask, 1)
+    dps = Float64[]
+    @inbounds for k in 2:p, j in 1:(k-1)
+        if mask[j, k]
+            push!(dps, abs(p_pol[j] - p_pol[k]))
+        end
+    end
+    length(dps) < 5 && return nothing
+    x_threshold = quantile(dps, drop_q)
+    out = falses(p, p)
+    @inbounds for k in 2:p, j in 1:(k-1)
+        if mask[j, k] && abs(p_pol[j] - p_pol[k]) >= x_threshold
+            out[j, k] = true
+            out[k, j] = true
+        end
+    end
+    return out
+end
+
 # rho_pearson — Pearson correlation of the studentized per-locus marginal
 # Bulmer effect against logit(p_pol_j). Direction-aware: sign(ρ) > 0 under
 # positive directional selection, < 0 under negative directional selection.
@@ -526,8 +562,15 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
         p_pol[j] = α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
     end
 
+    # Per-perm partial-sort optimization: pre-sort |c_obs| and sign(c_obs)
+    # once per locus. Under sign-flip, |c_perm[i]| = |c_obs[i]| is invariant;
+    # only the perm sign matters. The q_n smallest c_perm values are:
+    #   - all entries with eff_sign(b, i) = −1, sorted by |c_obs[i]| descending
+    #   - if fewer than q_n, fill rest with smallest |c_obs[i]| among entries
+    #     with eff_sign(b, i) = +1.
+    # eff_sign(b, i) = ε_j[b] · ε_k_i[b] · sign(c_obs[i]).
+    # Walking pre-sorted permutations of indices avoids partialsort! per perm.
     Threads.@threads for j in 1:p
-        # Per-thread scratch
         partner_k = Int[]; sizehint!(partner_k, p)
         c_obs_j   = Float64[]; sizehint!(c_obs_j, p)
         @inbounds for k in 1:p
@@ -539,6 +582,7 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
         n_in < 4 && continue
         q_n = max(1, ceil(Int, q * n_in))
 
+        # Observed bottom-q_n sum (one partialsort is fine, it's not per-perm)
         c_sorted = copy(c_obs_j)
         partialsort!(c_sorted, 1:q_n)
         s_obs = 0.0
@@ -547,17 +591,42 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
         end
         Bj_obs[j] = s_obs
 
-        c_perm = Vector{Float64}(undef, n_in)
+        # Precompute for the perm loop
+        abs_c  = Vector{Float64}(undef, n_in)
+        sign_c = Vector{Int8}(undef, n_in)
+        @inbounds @simd for i in 1:n_in
+            abs_c[i]  = abs(c_obs_j[i])
+            sign_c[i] = c_obs_j[i] >= 0 ? Int8(1) : Int8(-1)
+        end
+        order_desc = sortperm(abs_c; rev=true)   # indices: largest |c| first
+        order_asc  = sortperm(abs_c)             # indices: smallest |c| first
+
         @inbounds for b in 1:n_perm
             ej = Float64(raw_signs[j, b])
-            @simd for i in 1:n_in
-                ek = Float64(raw_signs[partner_k[i], b])
-                c_perm[i] = ej * ek * c_obs_j[i]
-            end
-            partialsort!(c_perm, 1:q_n)
             s = 0.0
-            @simd for i in 1:q_n
-                s += c_perm[i]
+            collected = 0
+            # Pass 1: descending |c| order. Collect entries that are negative
+            # under perm (eff_sign = ε_j · ε_k · sign(c_obs) = −1).
+            for idx in order_desc
+                ek = Float64(raw_signs[partner_k[idx], b])
+                if ej * ek * Float64(sign_c[idx]) < 0
+                    s -= abs_c[idx]
+                    collected += 1
+                    collected == q_n && break
+                end
+            end
+            # Pass 2: if we didn't reach q_n with negatives, fill with smallest
+            # positive-under-perm entries (ascending |c| order).
+            if collected < q_n
+                need = q_n - collected
+                for idx in order_asc
+                    ek = Float64(raw_signs[partner_k[idx], b])
+                    if ej * ek * Float64(sign_c[idx]) > 0
+                        s += abs_c[idx]
+                        need -= 1
+                        need == 0 && break
+                    end
+                end
             end
             Bj_null[j, b] = s
         end
@@ -699,6 +768,9 @@ function oracle_stats(result::SimResult;
 
     scope_names = _build_scope_names(windows_pct)
     n_scopes = length(scope_names)
+    # Per-stat scope masks. `:all` ⇒ all scopes; else only listed scopes.
+    is_B_scope   = _resolve_scope_mask(scope_names, cfg.oracle_B_scopes)
+    is_rho_scope = _resolve_scope_mask(scope_names, cfg.oracle_rho_scopes)
 
     if p < 3
         @info "oracle_stats: <3 polymorphic QTLs ($(p)); returning NA result."
@@ -710,7 +782,8 @@ function oracle_stats(result::SimResult;
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson (5)
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q05 (5)
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q10 (5)
-            nv(), nv(), nv(), nv(), nv())              # rho_pearson_q25 (5)
+            nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q25 (5)
+            nv(), nv(), nv(), nv(), nv())              # rho_pearson_dp80 (5)
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -734,6 +807,10 @@ function oracle_stats(result::SimResult;
         fill!(B, NaN); fill!(B_perm_p, NaN)
     else
         for s in 1:n_scopes
+            if !is_B_scope[s]
+                B[s] = NaN; B_perm_p[s] = NaN
+                continue
+            end
             B[s] = VG_off_meta[s] / VA_meta
             B_null_s = view(VG_off_null_meta, :, s)
             B_perm_p[s] = (1 + count(b -> b / VA_meta <= B[s], B_null_s)) / (n_perm + 1)
@@ -742,17 +819,22 @@ function oracle_stats(result::SimResult;
 
     masks = _build_scope_masks(windows_pct, chr, bp, chr_len_bp)
 
-    rho_obs  = fill(NaN, n_scopes); rho_nm  = fill(NaN, n_scopes)
-    rho_nsd  = fill(NaN, n_scopes); rho_Z   = fill(NaN, n_scopes); rho_pp = fill(NaN, n_scopes)
-    Rq05_obs = fill(NaN, n_scopes); Rq05_nm = fill(NaN, n_scopes)
-    Rq05_nsd = fill(NaN, n_scopes); Rq05_Z  = fill(NaN, n_scopes); Rq05_p = fill(NaN, n_scopes)
-    Rq10_obs = fill(NaN, n_scopes); Rq10_nm = fill(NaN, n_scopes)
-    Rq10_nsd = fill(NaN, n_scopes); Rq10_Z  = fill(NaN, n_scopes); Rq10_p = fill(NaN, n_scopes)
-    Rq25_obs = fill(NaN, n_scopes); Rq25_nm = fill(NaN, n_scopes)
-    Rq25_nsd = fill(NaN, n_scopes); Rq25_Z  = fill(NaN, n_scopes); Rq25_p = fill(NaN, n_scopes)
+    rho_obs   = fill(NaN, n_scopes); rho_nm   = fill(NaN, n_scopes)
+    rho_nsd   = fill(NaN, n_scopes); rho_Z    = fill(NaN, n_scopes); rho_pp   = fill(NaN, n_scopes)
+    Rq05_obs  = fill(NaN, n_scopes); Rq05_nm  = fill(NaN, n_scopes)
+    Rq05_nsd  = fill(NaN, n_scopes); Rq05_Z   = fill(NaN, n_scopes); Rq05_p   = fill(NaN, n_scopes)
+    Rq10_obs  = fill(NaN, n_scopes); Rq10_nm  = fill(NaN, n_scopes)
+    Rq10_nsd  = fill(NaN, n_scopes); Rq10_Z   = fill(NaN, n_scopes); Rq10_p   = fill(NaN, n_scopes)
+    Rq25_obs  = fill(NaN, n_scopes); Rq25_nm  = fill(NaN, n_scopes)
+    Rq25_nsd  = fill(NaN, n_scopes); Rq25_Z   = fill(NaN, n_scopes); Rq25_p   = fill(NaN, n_scopes)
+    Rdp80_obs = fill(NaN, n_scopes); Rdp80_nm = fill(NaN, n_scopes)
+    Rdp80_nsd = fill(NaN, n_scopes); Rdp80_Z  = fill(NaN, n_scopes); Rdp80_p  = fill(NaN, n_scopes)
 
     if !failed
+        # Polarized freqs reused for the dp80 mask construction.
+        p_pol_obs = [α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j] for j in 1:p]
         for s in 1:n_scopes
+            is_rho_scope[s] || continue
             r = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s])
             rho_obs[s] = r.rho;     rho_nm[s] = r.null_mean
             rho_nsd[s] = r.null_sd; rho_Z[s]  = r.Z
@@ -770,16 +852,29 @@ function oracle_stats(result::SimResult;
             Rq25_obs[s] = rq25.rho;     Rq25_nm[s] = rq25.null_mean
             Rq25_nsd[s] = rq25.null_sd; Rq25_Z[s]  = rq25.Z
             Rq25_p[s]   = rq25.perm_p
+
+            # dp80: build filtered mask by ANDing scope mask with
+            # |Δp_pol_obs| ≥ x, where x is the 20th percentile of in-scope
+            # |Δp_pol| values. Skip the scope if it has fewer than 5
+            # in-scope pairs (insufficient for a percentile).
+            dp80_mask = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
+            if dp80_mask !== nothing
+                rdp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask)
+                Rdp80_obs[s] = rdp80.rho;     Rdp80_nm[s] = rdp80.null_mean
+                Rdp80_nsd[s] = rdp80.null_sd; Rdp80_Z[s]  = rdp80.Z
+                Rdp80_p[s]   = rdp80.perm_p
+            end
         end
     end
 
     return OracleResult(windows_pct, scope_names, p, N_total,
                          length(unique(deme_labels)), VA_meta, n_perm, use_memory,
                          B, B_perm_p,
-                         rho_obs,  rho_nm,  rho_nsd,  rho_Z,  rho_pp,
-                         Rq05_obs, Rq05_nm, Rq05_nsd, Rq05_Z, Rq05_p,
-                         Rq10_obs, Rq10_nm, Rq10_nsd, Rq10_Z, Rq10_p,
-                         Rq25_obs, Rq25_nm, Rq25_nsd, Rq25_Z, Rq25_p)
+                         rho_obs,   rho_nm,   rho_nsd,   rho_Z,   rho_pp,
+                         Rq05_obs,  Rq05_nm,  Rq05_nsd,  Rq05_Z,  Rq05_p,
+                         Rq10_obs,  Rq10_nm,  Rq10_nsd,  Rq10_Z,  Rq10_p,
+                         Rq25_obs,  Rq25_nm,  Rq25_nsd,  Rq25_Z,  Rq25_p,
+                         Rdp80_obs, Rdp80_nm, Rdp80_nsd, Rdp80_Z, Rdp80_p)
 end
 
 """
@@ -832,6 +927,11 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                                 oracle.rho_pearson_q25_null_sd,
                                 oracle.rho_pearson_q25_Z,
                                 oracle.rho_pearson_q25_perm_p),
+            ("rho_pearson_dp80", oracle.rho_pearson_dp80,
+                                oracle.rho_pearson_dp80_null_mean,
+                                oracle.rho_pearson_dp80_null_sd,
+                                oracle.rho_pearson_dp80_Z,
+                                oracle.rho_pearson_dp80_perm_p),
         )
         for (pfx, obs, nm, nsd, z, pp) in rho_specs
             for (s, name) in enumerate(oracle.scope_names)
