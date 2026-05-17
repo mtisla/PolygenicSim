@@ -100,7 +100,25 @@ function simulate(cfg::Config)
     #   (b) ngen_eq + ngen_dir — two-phase model. Phase A settles for ngen_eq
     #       gens, Phase B runs for ngen_dir gens. With load_from, Phase A is
     #       skipped (loaded state IS the settled eq).
-    ngen_eq_eff, ngen_dir_eff = if cfg.ngen > 0
+    # Workflow A detection: :neutral + :twoD_recent + recap_first. Under
+    # this combo, the coalescent provides full mutation-drift equilibrium
+    # at gen 0 (panmictic, since :twoD_recent's deep history is panmictic),
+    # so we skip the full forward settling phase. We then run
+    # `recap_burnin_structured` forward generations under the structured
+    # layout to develop the recent demographic structure. ngen_eq is
+    # ignored (with @info).
+    workflow_A = (cfg.recap_first &&
+                   cfg.selection_mode === :neutral &&
+                   cfg.demography === :twoD_recent &&
+                   !is_loaded)
+    ngen_eq_eff, ngen_dir_eff = if workflow_A
+        burnin = cfg.recap_burnin_structured   # already resolved in validate()
+        if cfg.ngen_eq > 0
+            @info "Workflow A (neutral + :twoD_recent + recap_first): " *
+                  "ignoring ngen_eq=$(cfg.ngen_eq); using recap_burnin_structured=$burnin g of structured-neutral forward"
+        end
+        (burnin, 0)
+    elseif cfg.ngen > 0
         (0, cfg.ngen)
     else
         (is_loaded ? 0 : cfg.ngen_eq, cfg.ngen_dir)
@@ -111,12 +129,32 @@ function simulate(cfg::Config)
     total_gens = ngen_eq_eff + ngen_dir_eff
     phase_A, phase_B = _build_phase_plan(cfg, mean_A0, V_P0, Vs, sigma_E, layout)
 
-    # ---- recent-structure onset gen (Q5 strict validation) --------------
+    # ---- recent-structure onset gen --------------------------------------
+    # Phase 5 BREAKING CHANGE for :twoD_recent semantics:
+    #   - Workflow A (above): structure fires at gen 1 (immediately) and
+    #     the whole forward run is structured.
+    #   - Two-phase mode (ngen_eq > 0): structure-onset at
+    #     `ngen_eq_eff - n_recent + 1` — last n_recent gens of SETTLING,
+    #     so the structured epoch precedes any :directional shift.
+    #     Previously: `total_gens - n_recent + 1` (spanned settling AND
+    #     post-shift). Breaking change for :directional + :twoD_recent
+    #     users with ngen_dir > 0.
+    #   - Single-knob mode (cfg.ngen > 0): preserved current semantics
+    #     — structure at last n_recent of total_gens.
     structure_onset_gen = 0
     if twoD_recent_fresh
-        cfg.n_recent <= total_gens ||
-            error("demography=:twoD_recent: n_recent=$(cfg.n_recent) > total_gens=$(total_gens); use :twoD_perp for fully-structured runs.")
-        structure_onset_gen = total_gens - cfg.n_recent + 1
+        if workflow_A
+            structure_onset_gen = 1
+        elseif cfg.ngen > 0
+            cfg.n_recent <= total_gens ||
+                error("demography=:twoD_recent: n_recent=$(cfg.n_recent) > ngen=$(total_gens)")
+            structure_onset_gen = total_gens - cfg.n_recent + 1
+        else
+            cfg.n_recent <= ngen_eq_eff ||
+                error("demography=:twoD_recent: n_recent=$(cfg.n_recent) > ngen_eq=$(ngen_eq_eff); " *
+                      "the recent-structure phase must fit within settling (Workflow B semantics)")
+            structure_onset_gen = ngen_eq_eff - cfg.n_recent + 1
+        end
     end
 
     # ---- checkpoint resolution ------------------------------------------
@@ -535,6 +573,27 @@ function _build_initial_state(cfg::Config, rng::Xoshiro)
             d.H .= pl.H_dense
             return d, pl.vt, pl.deme_id
         end
+    elseif cfg.recap_first
+        # recap_first: derive gen-0 founder haplotypes from a backward
+        # structured coalescent. Builds the VariantTable (bp positions,
+        # is_qtl flags, α) like FSM init but skips per-locus allele
+        # frequency sampling — carriage is determined by tree placement.
+        N_total = n_total(cfg)
+        vt, _ = init_variant_table_recap(rng, cfg)
+        coal_result = recapitate_for_sim(cfg, rng)
+        if cfg.backend === :packed
+            pop = PackedPop(length(vt), N_total)
+            build_gen0_pop_from_recap!(pop, vt, coal_result, rng)
+        else
+            pop = DensePop(length(vt), N_total)
+            build_gen0_pop_from_recap!(pop, vt, coal_result, rng)
+        end
+        N_per_deme = cfg.N
+        deme_id = Vector{Int}(undef, N_total)
+        @inbounds for i in 1:N_total
+            deme_id[i] = (i - 1) ÷ N_per_deme + 1
+        end
+        return pop, vt, deme_id
     else
         vt, p_init = init_variant_table(rng, cfg)
         N_total = n_total(cfg)

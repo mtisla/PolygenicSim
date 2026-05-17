@@ -37,6 +37,7 @@ v0.13.x. Phase 3 (haplotype additive-value tracking) remains deferred — see
 - [Equilibrium diagnostics](#equilibrium-diagnostics)
 - [Oracle statistics](#oracle-statistics)
 - [Ancestry recording + neutral overlay](#ancestry-recording--neutral-overlay)
+- [Recapitation-first workflow](#recapitation-first-workflow)
 - [Loading prior state](#loading-prior-state)
 - [Tests](#tests)
 - [Versioning](#versioning)
@@ -93,13 +94,14 @@ to your core count for production runs.
 
 ### 3. Bundled examples
 
-The `examples/` directory has three runnable scripts that cover the common
-configurations:
+The `examples/` directory has runnable scripts covering common configurations:
 
 ```bash
 julia --project=. --threads=4 examples/panmictic.jl       # eq + 3 directional reps
 julia --project=. --threads=4 examples/stepping_stone.jl  # 5×5 grid, 3 regimes
 julia --project=. --threads=4 examples/expansion.jl       # 10× + 4× expansion
+julia --project=. --threads=4 examples/multiphase_oracle.jl # init/settled/final oracle
+julia --project=. --threads=4 examples/recap_first.jl     # gen-0 LD with/without recap
 ```
 
 Use these as starting templates for your own runs — copy, edit, run.
@@ -349,6 +351,8 @@ See [Ancestry recording + neutral overlay](#ancestry-recording--neutral-overlay)
 | `record_ancestry` | `Bool` | `false` | When `true`, the simulator logs an edge table (parent_node → child_node, bp-range, chr) every generation so neutral mutations can be overlaid post-hoc without forward-simulating them. Adds ≲15% to per-gen wall-time at production scale; recording is a pure side-channel (`pop.H` is bit-identical with/without it for fixed seed). |
 | `ancestry_simplify_interval` | `Int` | `100` | Generations between `simplify!` passes that drop edges with no living descendants. Lower = tighter sustained memory; higher = more peak edges between passes. SLiM's default is 100. |
 | `save_ancestry` | `Bool` | `false` | Gate the `{prefix}.anc.zst` disk write. Default off — opt in explicitly when you need the ancestry on disk (e.g., for overlay in a different session). In-session overlay via `overlay_neutral_mutations(res.ancestry; ...)` works regardless because the recorder is always exposed on `SimResult.ancestry`. Has no effect when `record_ancestry=false`. |
+| `recap_first` | `Bool` | `false` | Generate gen-0 founder haplotypes from a backward structured-coalescent simulation instead of independent per-locus Bernoulli sampling. Produces realistic Hill-Robertson LD between linked QTLs at gen 0 (~26× higher than the independent-sampling default at typical scales). Requires `init_distribution = :from_recap`. See [Recapitation-first workflow](#recapitation-first-workflow). |
+| `recap_burnin_structured` | `Int` | `0` | Workflow A only (neutral + `:twoD_recent` + `recap_first`): number of structured-neutral forward gens to run after the coalescent. `0` resolves to `n_recent` in `validate()`. Used to produce the recent demographic structure when `ngen_eq` is skipped. |
 
 ### Oracle statistics (only used when `:oracle ∈ output_formats`)
 
@@ -1116,6 +1120,163 @@ the simulator is using for QTLs.
 | `write_neutral_mutations(prefix, table)` | Write `{prefix}.neutral.zst` (PSNV binary format). |
 | `read_neutral_mutations(path)` | Load `{prefix}.neutral.zst` back into a table. |
 | `write_merged_genotype_plink(prefix, res, table; include_qtl=true, include_neutral=true, pheno=nothing)` | Fuse QTL + neutral sites into one PLINK panel. Returns a NamedTuple `(bed, bim, fam, effects, n_sites, n_qtl, n_neutral)`. |
+
+---
+
+## Recapitation-first workflow
+
+When `recap_first = true`, the simulator builds the gen-0 founder
+population by **running a backward structured-coalescent simulation
+first** and placing QTL mutations on the resulting tree, rather than
+drawing per-locus allele frequencies independently.
+
+The headline benefit: gen-0 QTL–QTL linkage disequilibrium reflects
+real coalescent shared ancestry (the Hill–Robertson `1/(1+4Nrd)`
+formula), instead of the zero-LD baseline that independent Bernoulli
+draws produce. At a typical scale (N=100, n_qtl=200, chr_len=500kb),
+this lifts mean pairwise r² from ~0.004 (sampling noise) to ~0.10
+(real LD) — a 25× boost.
+
+### When to use it
+
+- **Validating fine-mapping / GWAS pipelines.** Fine-mapping
+  algorithms (SuSiE, FINEMAP, etc.) are LD-decomposition tools; their
+  credible-set sizes and PIPs are shaped by LD structure. Realistic
+  gen-0 LD makes the simulated panel behave like real data.
+- **Skipping long burn-ins for neutral runs.** For `:neutral`
+  demography, the coalescent provides the full mutation-drift
+  equilibrium — no need for thousands of forward generations to settle.
+- **Realistic neutral-overlay panels.** Pairs naturally with
+  `overlay_neutral_mutations` (recapitation provides the ancestry the
+  overlay needs).
+
+### Quickstart
+
+```julia
+cfg = PS.Config(
+    N=500, Ne=500, n_chr=10, chr_len_bp=1_000_000,
+    n_qtl=4_000, n_neutral=0,
+    Uqtl=0.0,                          # no forward mutation needed under recap-first neutral
+    h2=0.7,
+    selection_mode=:directional, vs_over_vp0=20.0, shift_sd=4.0,
+    ngen_eq=15_000, ngen_dir=50,
+    recap_first=true,
+    init_distribution=:from_recap,
+    seed=UInt64(1),
+    output_formats=[:plink, :summary],
+)
+res = PS.simulate(cfg)
+```
+
+Pre-shift QTL haplotypes are seeded from the coalescent; the forward
+simulation then settles for `ngen_eq` and shifts for `ngen_dir`
+generations as usual.
+
+### Demography routing
+
+| Forward `demography` | Coalescent run | Forward sim |
+|---|---|---|
+| `:panmictic` | panmictic | panmictic |
+| `:twoD_perp` | structured (island, uses `migration_rate`) | structured |
+| `:twoD_recent` | **panmictic** (deep history is panmictic) | recent structure applied during forward sim per Workflow A or B |
+
+Under `:twoD_recent` the deep coalescent history is panmictic by
+construction; the recent structured epoch is produced by the forward
+simulator.
+
+### Workflow A: skip the full neutral settling phase
+
+When `selection_mode = :neutral` **and** `demography = :twoD_recent`
+**and** `recap_first = true`, the simulator detects that no forward
+settling is needed:
+
+```
+Recap (panmictic)
+    └─→ forward sim for `recap_burnin_structured` g
+        (structured-neutral burn-in)
+        └─→ DONE
+```
+
+`cfg.ngen_eq` is silently overridden (with an `@info` log) and the
+forward sim runs for `recap_burnin_structured` generations only —
+default `n_recent` (e.g., 100). All forward gens are structured.
+
+This is a major wall-clock saving: a typical `ngen_eq = 25_000`
+forward settling phase reduces to ~100 forward gens after recap.
+
+### Workflow B: structure-onset precedes the shift (BREAKING change)
+
+For `:stabilizing` and `:directional` + `:twoD_recent`, the structure
+onset has been moved from `total_gens − n_recent + 1` to
+`ngen_eq_eff − n_recent + 1`. Now the structured epoch always
+completes **before** any `:directional` shift fires — matching the
+biologically meaningful interpretation of "recent structure."
+
+- `:stabilizing` (`ngen_dir = 0`): identical to old behavior.
+- `:directional` with `ngen_dir > 0`: **breaking change** — the
+  structured 100 gens used to span the shift and extend into the
+  directional phase. Now they sit entirely in the last 100 gens of
+  settling. Set `n_recent = ngen_eq + ngen_dir` to recover the old
+  total-gens window (if anyone needs it for back-compat).
+
+This change is universal (applies whether `recap_first` is on or
+off).
+
+### Configuration
+
+```julia
+cfg = PS.Config(
+    # ... usual fields ...
+    recap_first = true,                       # opt in
+    init_distribution = :from_recap,          # required
+    recap_burnin_structured = 0,              # Workflow A only; 0 → n_recent
+)
+```
+
+**Strict validation** (rejected at `validate(cfg)`):
+- `recap_first = true` without `init_distribution = :from_recap`.
+- `init_distribution = :from_recap` without `recap_first = true`.
+- `recap_first = true` combined with `load_from` or `load_plink_prefix`.
+- `:twoD_recent` with two-phase mode and `n_recent > ngen_eq` (the
+  structured epoch must fit within settling).
+
+### What's inside
+
+`src/structured_coalescent.jl` and `src/recap.jl` provide the
+underlying Hudson ARG simulator (segment-based, msprime semantics)
+and the orchestration:
+
+- `recapitate_panmictic(; n_chr, chr_len_bp, K, Ne, r_per_bp, seed)`
+  and `recapitate_structured(...)` — standalone multi-chromosome
+  drivers that run independently per chromosome via
+  `@threads :dynamic`. Thread-deterministic via per-chr seed
+  scrambling.
+- `CoalescentResult` — merged edges (globally-unique node ids), node
+  times, sample-leaf set.
+- `place_one_qtl` — picks an edge proportional to branch length at
+  each QTL's bp, derives carriers from descendant leaves.
+
+The standalone coalescent is exposed for users who want recapitation
+output without running a forward sim (e.g., direct comparison against
+msprime). For most users, just set `recap_first = true` and let
+`simulate()` handle it.
+
+### Performance
+
+Single backward coalescent at production scale (N=5000, K=10000,
+n_chr=10, chr_len=1Mbp, r=1e-8, 4 threads):
+
+- **~1.5 seconds**, ~720K edges
+- Multi-chr `@threads :dynamic` gives ~2.76× speedup over single-thread
+- Memory ~50 MB peak across all chromosomes
+
+End-to-end `recap_first` via `simulate()` adds negligible overhead
+beyond the coalescent itself plus the QTL placement step (linear in
+n_qtl × edges-per-bp).
+
+For comparison, generating equivalent neutral-equilibrium diversity
+through forward simulation alone takes thousands of generations (and
+many minutes per replicate at this scale).
 
 ---
 

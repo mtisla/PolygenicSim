@@ -2106,4 +2106,713 @@ end
     @test res.cfg.ngen_dir == 0      # cfg unchanged
 end
 
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 1B: panmictic, no recombination.
+# Validates basic Hudson-style coalescent: K leaves coalesce to MRCA in
+# the expected time E[T_MRCA] = 4N · (1 − 1/K) generations. Each
+# coalescence emits 2 edges (full chromosome intersection, no recomb).
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — panmictic no-recomb (Phase 1B)" begin
+    # ----- Smoke: single small run completes correctly --------------------
+    state = PS.CoalescentState(4, Int8(1), 100, 10, UInt64(42))
+    PS.init_leaves!(state, 4)
+    @test state.n_active == 4
+    @test state.total_span == 400          # K · chr_len_bp = 4 · 100
+    t_mrca = PS.run_coalescent_norecomb!(state)
+    @test state.n_active == 1
+    @test state.total_span == 100          # one lineage spanning [1, 101)
+    @test length(state.edges) == 2 * (4 - 1) # 2 edges per coalescence, K-1 coals
+    @test t_mrca > 0
+
+    # ----- Node-time monotonicity -----------------------------------------
+    # Leaves have time = 0; coalescent nodes have positive times that
+    # increase with each coalescence.
+    @test all(state.node_times[1:4] .== 0.0)        # leaves
+    @test all(state.node_times[5:7] .> 0.0)         # 3 coalescent nodes
+    @test issorted(state.node_times[5:7])           # monotone increasing
+    @test state.node_times[7] ≈ t_mrca              # last node is MRCA
+
+    # ----- All edges have valid time direction ----------------------------
+    # Parent must be older (larger time) than child.
+    for e in state.edges
+        @test state.node_times[Int(e.parent_node)] > state.node_times[Int(e.child_node)]
+    end
+
+    # ----- All edges span the full chromosome -----------------------------
+    # Without recombination, every coalescence merges full-chromosome AMs,
+    # so every edge has left_bp = 1, right_bp = chr_len_bp + 1.
+    for e in state.edges
+        @test e.left_bp == 1
+        @test e.right_bp == 101                     # = chr_len_bp + 1
+    end
+
+    # ----- All leaves reach a single MRCA --------------------------------
+    # Build child → parent map by walking edges; every leaf must reach
+    # the same root.
+    parent_of = Dict{UInt32,UInt32}()
+    for e in state.edges
+        parent_of[e.child_node] = e.parent_node
+    end
+    function root_of(node)
+        while haskey(parent_of, node)
+            node = parent_of[node]
+        end
+        return node
+    end
+    roots = Set(root_of(UInt32(i)) for i in 1:4)
+    @test length(roots) == 1
+
+    # ----- Statistical: mean T_MRCA ≈ 4N · (1 − 1/K) within 2 SE ----------
+    # Run 200 reps with K=20 leaves, N=100. Expected E[T_MRCA] = 380 gens.
+    # Var(T_MRCA) ≈ Σ_{k=2}^K (4N)² / (k(k-1))² ≈ (4N)² · (π²/3 − 5/3 ⋯)
+    # but for the test we just check the empirical mean is within 2 SE.
+    N_eff = 100
+    K = 20
+    expected_tmrca = 4.0 * N_eff * (1.0 - 1.0 / K)         # = 380.0
+    nreps = 200
+    tmrcas = zeros(nreps)
+    for r in 1:nreps
+        s = PS.CoalescentState(K, Int8(1), 100, N_eff, UInt64(1000 + r))
+        PS.init_leaves!(s, K)
+        tmrcas[r] = PS.run_coalescent_norecomb!(s)
+    end
+    sample_mean = sum(tmrcas) / nreps
+    sample_sd = sqrt(sum((tmrcas .- sample_mean) .^ 2) / (nreps - 1))
+    sem = sample_sd / sqrt(nreps)
+    z_score = (sample_mean - expected_tmrca) / sem
+    @test abs(z_score) < 3.0                              # within 3 SE
+
+    # ----- Determinism: same seed → same edges, same T_MRCA --------------
+    s1 = PS.CoalescentState(10, Int8(2), 1000, 50, UInt64(99))
+    PS.init_leaves!(s1, 10)
+    t1 = PS.run_coalescent_norecomb!(s1)
+    s2 = PS.CoalescentState(10, Int8(2), 1000, 50, UInt64(99))
+    PS.init_leaves!(s2, 10)
+    t2 = PS.run_coalescent_norecomb!(s2)
+    @test t1 == t2
+    @test length(s1.edges) == length(s2.edges)
+    @test all(s1.edges[i].parent_node == s2.edges[i].parent_node &&
+               s1.edges[i].child_node == s2.edges[i].child_node
+               for i in eachindex(s1.edges))
+end
+
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 1C: full Hudson ARG with recombination.
+# Validates against analytical predictions:
+#   - Total branch length per bp matches 4N · H_{K-1} (Watterson) across
+#     a range of recombination rates. This is the GATE: the previous
+#     single-node-per-lineage shortcut systematically inflated TBL/bp
+#     under recomb. With the segment-based model, the mean TBL/bp is
+#     unbiased and the bias does NOT grow with r.
+#   - Stopping condition reached (total_span == chr_len_bp).
+#   - Determinism per (seed, K, N, r): bit-identical edge tables.
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — recombination + Watterson TBL (Phase 1C)" begin
+    # ----- Smoke: small recomb run completes correctly --------------------
+    state = PS.CoalescentState(6, Int8(1), 200, 20, UInt64(42))
+    PS.init_leaves!(state, 6)
+    t_mrca = PS.run_coalescent!(state, 1e-3)
+    @test state.total_span == 200                       # stopping cond reached
+    @test length(state.edges) > 6                       # more than no-recomb (K-1 coal)
+    @test t_mrca > 0
+
+    # ----- Smoke: r = 0 in run_coalescent! ≡ no-recomb path ---------------
+    s_norec = PS.CoalescentState(4, Int8(1), 100, 10, UInt64(42))
+    PS.init_leaves!(s_norec, 4)
+    t_norec = PS.run_coalescent!(s_norec, 0.0)
+    @test s_norec.n_active == 1
+    @test length(s_norec.edges) == 2 * (4 - 1)          # 2 edges per coal, K-1 coals
+
+    # ----- Determinism: same (seed, K, N, r) → same edges -----------------
+    s1 = PS.CoalescentState(10, Int8(1), 500, 30, UInt64(7))
+    PS.init_leaves!(s1, 10)
+    t1 = PS.run_coalescent!(s1, 5e-4)
+    s2 = PS.CoalescentState(10, Int8(1), 500, 30, UInt64(7))
+    PS.init_leaves!(s2, 10)
+    t2 = PS.run_coalescent!(s2, 5e-4)
+    @test t1 == t2
+    @test length(s1.edges) == length(s2.edges)
+    @test all(s1.edges[i].parent_node == s2.edges[i].parent_node &&
+               s1.edges[i].child_node == s2.edges[i].child_node &&
+               s1.edges[i].left_bp == s2.edges[i].left_bp &&
+               s1.edges[i].right_bp == s2.edges[i].right_bp
+               for i in eachindex(s1.edges))
+
+    # ----- All edges have valid time direction ---------------------------
+    # In the segment model, every emitted edge represents an actual
+    # coalescent event at the bp covered: parent_time > child_time always.
+    for e in s1.edges
+        @test s1.node_times[Int(e.parent_node)] > s1.node_times[Int(e.child_node)]
+    end
+
+    # ----- Validation gate: TBL/bp matches Watterson across r values ------
+    # Previously, the single-node-per-lineage shortcut produced
+    # +16-21% inflation that GREW with r. With the segment model, the
+    # mean should be unbiased and stable across r.
+    K = 30
+    N_eff = 100
+    chr_len = 1000
+    H = sum(1.0/k for k in 1:(K-1))
+    expected = 4.0 * N_eff * H
+    nreps = 100
+    for r in (0.0, 1e-6, 1e-5, 1e-4)
+        tbls = zeros(nreps)
+        for rep in 1:nreps
+            s = PS.CoalescentState(K, Int8(1), chr_len, N_eff, UInt64(2000 + rep))
+            PS.init_leaves!(s, K)
+            PS.run_coalescent!(s, r)
+            total = 0.0
+            for e in s.edges
+                elen = s.node_times[Int(e.parent_node)] - s.node_times[Int(e.child_node)]
+                total += elen * Float64(e.right_bp - e.left_bp)
+            end
+            tbls[rep] = total / Float64(chr_len)
+        end
+        sample_mean = sum(tbls) / nreps
+        sample_sd = sqrt(sum((tbls .- sample_mean) .^ 2) / (nreps - 1))
+        sem = sample_sd / sqrt(nreps)
+        z = (sample_mean - expected) / sem
+        @test abs(z) < 3.5    # within 3.5 SE (loose to absorb high-r variance)
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 2: multi-deme demography + migration.
+# Validates the structured (island-model) backward coalescent. Each lineage
+# migrates between demes at rate `migration_rate`; coalescence happens only
+# WITHIN the same deme. Validation: 2-deme symmetric coalescent recovers
+# F_ST ≈ 1/(1 + 4N · m) within a sensible tolerance.
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — demography + migration (Phase 2)" begin
+    # Helper: in a no-recomb tree, find the MRCA time for every leaf pair.
+    function pairwise_mrca_times(state::PS.CoalescentState, K::Int)
+        # Build child → parent map (no recomb ⇒ each non-root has one parent).
+        parent = Dict{UInt32,UInt32}()
+        for e in state.edges
+            parent[e.child_node] = e.parent_node
+        end
+        # For each leaf, build the chain of ancestors (set of node ids).
+        ancestor_set = Dict{UInt32,Set{UInt32}}()
+        for i in 1:K
+            s = Set{UInt32}()
+            node = UInt32(i)
+            push!(s, node)
+            while haskey(parent, node)
+                node = parent[node]
+                push!(s, node)
+            end
+            ancestor_set[UInt32(i)] = s
+        end
+        T = zeros(Float64, K, K)
+        for i in 1:K
+            chain_i = ancestor_set[UInt32(i)]
+            node = UInt32(i)
+            # Walk i's ancestry upward, checking j's ancestor set.
+            for j in (i+1):K
+                set_j = ancestor_set[UInt32(j)]
+                # Walk i's chain to find first common ancestor.
+                walk = UInt32(i)
+                while !(walk in set_j)
+                    walk = parent[walk]
+                end
+                t = state.node_times[Int(walk)]
+                T[i, j] = t
+                T[j, i] = t
+            end
+        end
+        return T
+    end
+
+    # ----- Smoke: 2-deme structured coalescent completes -----------------
+    K_per_deme = [10, 10]
+    K_total = sum(K_per_deme)
+    N_per_deme = [50, 50]
+    mig = 0.01
+    state = PS.CoalescentState(K_total, Int8(1), 100, N_per_deme, mig, UInt64(42))
+    PS.init_leaves!(state, K_per_deme)
+    @test state.n_active == K_total
+    @test state.deme_count == K_per_deme
+    @test state.N_per_deme == N_per_deme
+    @test state.migration_rate == mig
+    t_mrca = PS.run_coalescent!(state, 0.0)
+    @test state.n_active == 1                       # single MRCA reached
+    @test state.total_span == 100                   # all bp resolved
+    @test t_mrca > 0
+
+    # ----- Determinism: same seed → same edges in structured run --------
+    s1 = PS.CoalescentState(K_total, Int8(1), 100, N_per_deme, mig, UInt64(99))
+    PS.init_leaves!(s1, K_per_deme)
+    t1 = PS.run_coalescent!(s1, 0.0)
+    s2 = PS.CoalescentState(K_total, Int8(1), 100, N_per_deme, mig, UInt64(99))
+    PS.init_leaves!(s2, K_per_deme)
+    t2 = PS.run_coalescent!(s2, 0.0)
+    @test t1 == t2
+    @test length(s1.edges) == length(s2.edges)
+
+    # ----- Validation: T_w < T_b under low-to-moderate migration --------
+    # Within-deme pairs should coalesce faster on average than between-deme
+    # pairs (which must first migrate to the same deme).
+    K_per = [15, 15]
+    Kt = sum(K_per)
+    N_per = [100, 100]
+    m = 0.002
+    nreps = 100
+    Tw_sum = 0.0; Tw_count = 0
+    Tb_sum = 0.0; Tb_count = 0
+    for rep in 1:nreps
+        s = PS.CoalescentState(Kt, Int8(1), 100, N_per, m, UInt64(5000 + rep))
+        PS.init_leaves!(s, K_per)
+        PS.run_coalescent!(s, 0.0)
+        T = pairwise_mrca_times(s, Kt)
+        # Leaves 1..15 are in deme 1 (init order), 16..30 in deme 2.
+        for i in 1:Kt, j in (i+1):Kt
+            same_deme = (i <= 15 && j <= 15) || (i > 15 && j > 15)
+            if same_deme
+                Tw_sum += T[i, j]; Tw_count += 1
+            else
+                Tb_sum += T[i, j]; Tb_count += 1
+            end
+        end
+    end
+    T_w = Tw_sum / Tw_count
+    T_b = Tb_sum / Tb_count
+    @test T_w > 0
+    @test T_b > 0
+    @test T_b > T_w                                 # between > within (qualitative)
+    # F_ST = 1 - T_w / T_b. For 2-deme symmetric with per-lineage
+    # backward migration rate m to the other deme:
+    #   T_w = 4N  (limit as m → ∞: panmictic 2N-individual pop)
+    #   T_b = 1/(2m) + T_w
+    #   F_ST = 1/(1 + 8Nm)
+    # For N=100, m=0.002: F_ST ≈ 0.385. (Wright's classical 1/(1+4Nm)
+    # formula uses a different m convention — forward migrant fraction
+    # — and produces ~2× our F_ST.)
+    F_ST = 1.0 - T_w / T_b
+    F_ST_theoretical = 1.0 / (1.0 + 8.0 * 100.0 * m)
+    @test 0 < F_ST < 1
+    # Within ±20% of theory: tight statistical band that confirms the
+    # migration kernel is implemented per our convention.
+    @test 0.8 * F_ST_theoretical < F_ST < 1.2 * F_ST_theoretical
+
+    # ----- Migration extreme cases --------------------------------------
+    # m = 0: between-deme pairs should NEVER coalesce. Total_span won't
+    # reach chr_len_bp; the run will stop at n_active <= 1 anyway because
+    # eventually only one lineage per deme remains and they can't coalesce.
+    # We just check that the simulation terminates without error and
+    # produces n_active >= n_demes (= 2 in this case).
+    s_nomig = PS.CoalescentState(Kt, Int8(1), 100, N_per, 0.0, UInt64(31))
+    PS.init_leaves!(s_nomig, K_per)
+    PS.run_coalescent!(s_nomig, 0.0)
+    @test s_nomig.n_active >= 1                     # at least one lineage per deme
+    # Under m=0 with 2 demes, expect exactly 2 lineages remaining (one per deme).
+    @test s_nomig.n_active == 2
+
+    # ----- Backward compat: panmictic constructor still works ----------
+    s_panmictic = PS.CoalescentState(20, Int8(1), 100, 50, UInt64(101))
+    PS.init_leaves!(s_panmictic, 20)
+    @test s_panmictic.n_active == 20
+    @test s_panmictic.deme_count == [20]
+    @test s_panmictic.N_per_deme == [50]
+    @test s_panmictic.migration_rate == 0.0
+    PS.run_coalescent!(s_panmictic, 0.0)
+    @test s_panmictic.n_active == 1                 # full coalescence
+end
+
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 3a: multi-chromosome threaded driver.
+# Each chromosome runs an independent Hudson ARG in parallel via
+# `@threads :dynamic`; results are merged into a CoalescentResult with
+# globally-unique node ids. Validates:
+#   - Per-chr determinism: same (seed, n_chr) → bit-identical edges
+#     regardless of thread count.
+#   - Chromosome independence: every edge carries its own chr tag;
+#     edges in one chr never reference node ids from another (except
+#     for shared leaves 1..K).
+#   - Node-id remapping correctness.
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — multi-chromosome driver (Phase 3a)" begin
+    # ----- Smoke: panmictic 3-chr run completes ---------------------------
+    res = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                    r_per_bp=1e-3, seed=UInt64(42))
+    @test res.n_chr == 3
+    @test res.chr_len_bp == 500
+    @test res.n_demes == 1
+    @test res.sample_nodes == UInt32.(1:10)
+    @test length(res.edges) > 0
+    @test Int(res.next_node) > 10                   # internal nodes allocated
+
+    # Every chr appears in the edge table.
+    chrs_seen = Set{Int8}()
+    for e in res.edges
+        push!(chrs_seen, e.chr)
+    end
+    @test sort(collect(chrs_seen)) == Int8[1, 2, 3]
+
+    # Every leaf is reachable via at least one edge in some chr (sanity).
+    children_seen = Set{UInt32}()
+    for e in res.edges
+        push!(children_seen, e.child_node)
+    end
+    @test all(UInt32(i) in children_seen for i in 1:10)
+
+    # ----- Determinism: same seed → bit-identical edges -------------------
+    res2 = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                     r_per_bp=1e-3, seed=UInt64(42))
+    @test res.edges == res2.edges
+    @test res.node_times == res2.node_times
+    @test res.next_node == res2.next_node
+
+    # ----- Thread independence: parallel and serial paths agree ---------
+    res_serial = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                           r_per_bp=1e-3, seed=UInt64(42),
+                                           use_threads=false)
+    @test res.edges == res_serial.edges
+    @test res.node_times == res_serial.node_times
+
+    # ----- Chr independence: no cross-chr edges --------------------------
+    # Within each chromosome, all nodes (leaves + internals) should have
+    # consistent chr tags. Specifically: every node id > K (= internal)
+    # should appear only in edges of one chr.
+    K = 10
+    node_to_chrs = Dict{UInt32,Set{Int8}}()
+    for e in res.edges
+        if e.parent_node > UInt32(K)
+            push!(get!(node_to_chrs, e.parent_node, Set{Int8}()), e.chr)
+        end
+        if e.child_node > UInt32(K)
+            push!(get!(node_to_chrs, e.child_node, Set{Int8}()), e.chr)
+        end
+    end
+    @test all(length(s) == 1 for s in values(node_to_chrs))
+
+    # ----- Different seeds → different output ---------------------------
+    res_other = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                          r_per_bp=1e-3, seed=UInt64(99))
+    @test res.edges != res_other.edges
+
+    # ----- Structured (multi-deme) multi-chr driver --------------------
+    res_str = PS.recapitate_structured(n_chr=2, chr_len_bp=300,
+                                          K_per_deme=[5, 5],
+                                          N_per_deme=[20, 20],
+                                          migration_rate=0.01,
+                                          r_per_bp=1e-3,
+                                          seed=UInt64(7))
+    @test res_str.n_chr == 2
+    @test res_str.n_demes == 2
+    @test length(res_str.sample_nodes) == 10
+    @test length(res_str.edges) > 0
+    # Determinism for structured too.
+    res_str2 = PS.recapitate_structured(n_chr=2, chr_len_bp=300,
+                                           K_per_deme=[5, 5],
+                                           N_per_deme=[20, 20],
+                                           migration_rate=0.01,
+                                           r_per_bp=1e-3,
+                                           seed=UInt64(7))
+    @test res_str.edges == res_str2.edges
+
+    # ----- Validation: per-chr branch length consistent with single-chr --
+    # Run each chromosome ALONE (single-chr) and compare its TBL/bp
+    # against the corresponding chr's TBL/bp in the multi-chr run.
+    # They should match exactly (since each chr is bit-identical under
+    # the same chr-specific seed).
+    n_chr = 3; chr_len = 400; K = 8; Ne = 15
+    res_mc = PS.recapitate_panmictic(n_chr=n_chr, chr_len_bp=chr_len, K=K, Ne=Ne,
+                                        r_per_bp=5e-4, seed=UInt64(1234))
+    for c in 1:n_chr
+        chr_seed = UInt64(1234) ⊻ (UInt64(c) * 0x9E3779B97F4A7C15)
+        s = PS.CoalescentState(K, Int8(c), chr_len, Ne, chr_seed)
+        PS.init_leaves!(s, K)
+        PS.run_coalescent!(s, 5e-4)
+        # Count edges in the multi-chr result that are tagged with this chr.
+        mc_edges_this_chr = [e for e in res_mc.edges if e.chr == Int8(c)]
+        @test length(mc_edges_this_chr) == length(s.edges)
+        # Compare TBL/bp (independent of node-id remapping).
+        tbl_solo = sum(e -> (s.node_times[Int(e.parent_node)] -
+                              s.node_times[Int(e.child_node)]) *
+                              (e.right_bp - e.left_bp), s.edges) / chr_len
+        tbl_mc = sum(e -> (res_mc.node_times[Int(e.parent_node)] -
+                            res_mc.node_times[Int(e.child_node)]) *
+                            (e.right_bp - e.left_bp), mc_edges_this_chr) / chr_len
+        @test tbl_solo ≈ tbl_mc atol=1e-9
+    end
+end
+
+# ---------------------------------------------------------------------------
+# recap_first Config integration (Phase 4): wires the standalone Hudson
+# ARG into simulate() to produce gen-0 founder haplotypes with realistic
+# coalescent LD between QTLs. Validates:
+#   - Strict Config validation (recap_first ↔ :from_recap pairing).
+#   - End-to-end simulate() run completes and produces a polymorphic
+#     gen-0 panel.
+#   - Headline: QTL-QTL r² with recap_first is much larger than without
+#     (10x+ at typical scales).
+#   - Determinism: same (seed, n_threads) → bit-identical pop.H.
+# ---------------------------------------------------------------------------
+@testset "recap_first Config integration (Phase 4)" begin
+    # ----- Strict validation paths ----------------------------------------
+    # recap_first=true without :from_recap → reject.
+    @test_throws ArgumentError PS.validate(PS.Config(;
+        N=10, n_qtl=10, recap_first=true,
+        init_distribution=:beta_mutation_drift,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # :from_recap without recap_first → reject.
+    @test_throws ArgumentError PS.validate(PS.Config(;
+        N=10, n_qtl=10, init_distribution=:from_recap,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # recap_first + :from_recap → accepted.
+    PS.validate(PS.Config(;
+        N=10, n_qtl=10, recap_first=true,
+        init_distribution=:from_recap,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # recap_first + load_from → reject.
+    @test_throws ArgumentError PS.validate(PS.Config(;
+        N=10, n_qtl=10, recap_first=true,
+        init_distribution=:from_recap,
+        load_from="dummy.psim.zst",
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+
+    # ----- End-to-end smoke: simulate() with recap_first runs ------------
+    cfg_smoke = PS.Config(;
+        N=30, Ne=30, n_chr=1, chr_len_bp=10_000,
+        n_qtl=60, n_neutral=0,
+        Uqtl=0.0,
+        recap_first=true, init_distribution=:from_recap,
+        selection_mode=:neutral,
+        ngen_eq=1, seed=UInt64(7),
+        output_formats=Symbol[:summary], n_int=0,
+    )
+    res_s = PS.simulate(cfg_smoke)
+    @test res_s.summary.n_qtl_polymorphic > 0
+    @test size(res_s.pop.H, 2) == 2 * cfg_smoke.N
+
+    # Some QTLs carry the derived allele (pop.H has nonzero bits).
+    @test count(!iszero, res_s.pop.H) > 0
+
+    # ----- Determinism: same seed → bit-identical gen-0 pop.H -----------
+    cfg_det = PS.Config(;
+        N=20, Ne=20, n_chr=2, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0, Uqtl=0.0,
+        recap_first=true, init_distribution=:from_recap,
+        selection_mode=:neutral, ngen_eq=1,
+        seed=UInt64(99),
+        output_formats=Symbol[], n_int=0,
+    )
+    res_d1 = PS.simulate(cfg_det)
+    res_d2 = PS.simulate(cfg_det)
+    @test res_d1.pop.H == res_d2.pop.H
+    @test res_d1.vt.alpha == res_d2.vt.alpha
+    @test res_d1.vt.bp == res_d2.vt.bp
+
+    # ----- Different seeds → different gen-0 state ----------------------
+    cfg_d3 = PS.Config(; (k => v for (k, v) in pairs((;
+        N=20, Ne=20, n_chr=2, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0, Uqtl=0.0,
+        recap_first=true, init_distribution=:from_recap,
+        selection_mode=:neutral, ngen_eq=1,
+        seed=UInt64(123),
+        output_formats=Symbol[], n_int=0)))...)
+    res_d3 = PS.simulate(cfg_d3)
+    @test res_d1.pop.H != res_d3.pop.H
+
+    # ----- HEADLINE: QTL-QTL r² with recap_first >> without ------------
+    # At gen 0, independent per-locus Bernoulli sampling produces ~zero
+    # LD between QTLs (just sampling noise). With recap_first, the
+    # coalescent shared ancestry produces realistic Hill-Robertson LD.
+    cfg_kw_base = (
+        N=100, Ne=100, n_chr=1, chr_len_bp=500_000,
+        n_qtl=200, n_neutral=0,
+        selection_mode=:neutral, ngen_eq=1, seed=UInt64(11),
+        output_formats=Symbol[], n_int=0,
+    )
+    # Without recap (default init).
+    cfg_nr = PS.Config(; cfg_kw_base..., Uqtl=0.02)
+    res_nr = PS.simulate(cfg_nr)
+    # With recap_first.
+    cfg_rc = PS.Config(; cfg_kw_base..., Uqtl=0.0,
+                          recap_first=true, init_distribution=:from_recap)
+    res_rc = PS.simulate(cfg_rc)
+
+    function pairwise_r2_qtls(pop, twoN; max_pairs=200)
+        L = pop.L
+        # Allele counts per QTL.
+        counts = zeros(Float64, L)
+        for j in 1:L
+            word = ((j - 1) >> 6) + 1
+            bit = UInt64(1) << ((j - 1) & 63)
+            for c in axes(pop.H, 2)
+                if (pop.H[word, c] & bit) != 0
+                    counts[j] += 1
+                end
+            end
+        end
+        freqs = counts ./ twoN
+        # Build dense L × 2N matrix (sub-sampling polymorphic QTLs).
+        poly = findall(p -> 0.05 < p < 0.95, freqs)
+        n_poly = length(poly)
+        nsamp = min(n_poly, 30)
+        nsamp < 5 && return Float64[]
+        sample_idx = poly[1:nsamp]
+        M = zeros(Float64, nsamp, twoN)
+        for (idx, j) in enumerate(sample_idx)
+            word = ((j - 1) >> 6) + 1
+            bit = UInt64(1) << ((j - 1) & 63)
+            for c in 1:twoN
+                M[idx, c] = (pop.H[word, c] & bit) != 0 ? 1.0 : 0.0
+            end
+        end
+        r2s = Float64[]
+        for i in 1:nsamp, k in (i+1):nsamp
+            length(r2s) >= max_pairs && break
+            p1 = freqs[sample_idx[i]]; p2 = freqs[sample_idx[k]]
+            pij = sum(M[i, :] .* M[k, :]) / twoN
+            D = pij - p1 * p2
+            denom = p1 * (1-p1) * p2 * (1-p2)
+            denom > 0 || continue
+            push!(r2s, D^2 / denom)
+        end
+        return r2s
+    end
+
+    twoN = 2 * 100
+    r2_nr = pairwise_r2_qtls(res_nr.pop, twoN)
+    r2_rc = pairwise_r2_qtls(res_rc.pop, twoN)
+    mean_r2_nr = sum(r2_nr) / length(r2_nr)
+    mean_r2_rc = sum(r2_rc) / length(r2_rc)
+    @test mean_r2_nr < 0.02              # near zero — independent sampling
+    @test mean_r2_rc > 0.03              # substantially larger — coalescent LD
+    @test mean_r2_rc > 3.0 * mean_r2_nr  # at least 3× ratio
+end
+
+# ---------------------------------------------------------------------------
+# Phase 5: :twoD_recent workflow routing.
+#
+# Validates the two semantic changes to simulate()'s phase orchestration:
+#
+# Workflow A — `:neutral` + `:twoD_recent` + `recap_first`: skip the full
+# `ngen_eq` settling phase, just run `recap_burnin_structured` g of
+# structured-neutral forward sim. The coalescent provides full
+# mutation-drift equilibrium at gen 0, so the long settling burn-in is
+# redundant.
+#
+# Workflow B (universal) — `:twoD_recent` structure-onset moves from
+# `total_gens − n_recent + 1` to `ngen_eq_eff − n_recent + 1`. For
+# `:stabilizing` (ngen_dir=0) this is identical to old behavior. For
+# `:directional` + `ngen_dir > 0`, this is a BREAKING change: the
+# structured epoch now precedes the shift event (was: spanned settling
+# and post-shift period).
+# ---------------------------------------------------------------------------
+@testset "Phase 5: :twoD_recent workflow routing" begin
+    # ----- Workflow A: neutral + twoD_recent + recap_first skips ngen_eq --
+    # Final gen should equal recap_burnin_structured (default = n_recent),
+    # NOT cfg.ngen_eq (which is ignored with an @info).
+    cfg_A = PS.Config(;
+        N=10, Ne=10, n_chr=1, chr_len_bp=5_000,
+        n_qtl=20, n_neutral=0, Uqtl=0.0,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.02,
+        selection_mode=:neutral,
+        ngen_eq=10_000,           # absurdly large; should be IGNORED
+        recap_first=true, init_distribution=:from_recap,
+        seed=UInt64(42),
+        output_formats=Symbol[:summary], output_prefix=tempname(),
+        n_int=0, n_threads=1,
+    )
+    res_A = PS.simulate(cfg_A)
+    # ngen_eq=10_000 ignored; run uses recap_burnin_structured (== n_recent = 3).
+    @test res_A.final_gen == 3
+    @test maximum(res_A.deme_id) == 4         # 2×2 = 4 demes (structure applied)
+
+    # Explicit recap_burnin_structured value is respected.
+    cfg_A_burnin = PS.Config(;
+        N=10, Ne=10, n_chr=1, chr_len_bp=5_000,
+        n_qtl=20, n_neutral=0, Uqtl=0.0,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.02,
+        selection_mode=:neutral,
+        ngen_eq=0,
+        recap_first=true, init_distribution=:from_recap,
+        recap_burnin_structured=7,
+        seed=UInt64(42),
+        output_formats=Symbol[], n_int=0, n_threads=1,
+    )
+    res_A_burnin = PS.simulate(cfg_A_burnin)
+    @test res_A_burnin.final_gen == 7
+    @test maximum(res_A_burnin.deme_id) == 4
+
+    # recap_burnin_structured = 0 sentinel resolves to n_recent in validate().
+    cfg_A_sentinel = PS.Config(;
+        N=10, Ne=10, n_chr=1, chr_len_bp=5_000,
+        n_qtl=20, n_neutral=0, Uqtl=0.0,
+        demography=:twoD_recent, grid_size=2, n_recent=4,
+        migration_rate=0.02,
+        selection_mode=:neutral,
+        ngen_eq=0,
+        recap_first=true, init_distribution=:from_recap,
+        recap_burnin_structured=0,   # sentinel
+        seed=UInt64(42),
+        output_formats=Symbol[], n_int=0, n_threads=1,
+    )
+    PS.validate(cfg_A_sentinel)
+    @test cfg_A_sentinel.recap_burnin_structured == 4   # resolved to n_recent
+
+    # ----- Workflow B: directional + twoD_recent moves structure before shift --
+    # With ngen_eq=10, ngen_dir=5, n_recent=3:
+    #   Old behavior: structure-onset at total_gens - n_recent + 1 = 15 - 3 + 1 = 13
+    #                 (= ngen_eq + 3, in middle of directional phase, AFTER shift at gen 11).
+    #   New behavior: structure-onset at ngen_eq - n_recent + 1 = 10 - 3 + 1 = 8
+    #                 (= last 3 gens of settling, BEFORE the shift).
+    cfg_B = PS.Config(;
+        N=10, Ne=40, n_chr=1, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.05,
+        selection_mode=:directional, vs_over_vp0=10.0, shift_sd=2.0,
+        ngen_eq=10, ngen_dir=5,
+        seed=UInt64(7),
+        output_formats=Symbol[], output_prefix=tempname(),
+        n_int=0, n_threads=1,
+    )
+    res_B = PS.simulate(cfg_B)
+    @test res_B.final_gen == 15
+    @test maximum(res_B.deme_id) == 4                # structured at end
+
+    # Validation: n_recent > ngen_eq under two-phase mode → error.
+    # (Was previously: n_recent > total_gens, looser.)
+    @test_throws ErrorException PS.simulate(PS.Config(;
+        N=10, Ne=40, n_chr=1, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5,
+        demography=:twoD_recent, grid_size=2, n_recent=8,   # > ngen_eq=5
+        migration_rate=0.05,
+        selection_mode=:directional, vs_over_vp0=10.0, shift_sd=2.0,
+        ngen_eq=5, ngen_dir=10,
+        seed=UInt64(7),
+        output_formats=Symbol[],
+    ))
+
+    # ----- Workflow A back-compat: stabilizing + :twoD_recent unchanged --
+    # ngen_eq = total_gens (since ngen_dir=0), so Workflow B's
+    # ngen_eq - n_recent + 1 reduces to old total_gens - n_recent + 1.
+    # No behavior change for :stabilizing + :twoD_recent users.
+    # (The existing "Demography — :twoD_recent" testset above already
+    # validates this; here just confirm a representative case still
+    # produces the structured end state.)
+    cfg_stab = PS.Config(;
+        N=10, Ne=40, n_chr=1, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.05,
+        selection_mode=:stabilizing, vs_over_vp0=10.0,
+        ngen_eq=10,
+        seed=UInt64(9),
+        output_formats=Symbol[], output_prefix=tempname(),
+        n_int=0, n_threads=1,
+    )
+    res_stab = PS.simulate(cfg_stab)
+    @test res_stab.final_gen == 10
+    @test maximum(res_stab.deme_id) == 4
+end
+
 end # @testset top-level

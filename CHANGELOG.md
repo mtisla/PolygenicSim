@@ -9,6 +9,107 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-05-17
+
+Recapitation-first workflow: gen-0 founder haplotypes can now be
+generated from a backward structured Hudson ARG simulation instead of
+independent per-locus Bernoulli sampling. The headline benefit is
+realistic Hill-Robertson LD between QTLs at gen 0 (~26× higher mean
+pairwise r² than the independent-sampling default at typical scales).
+
+This release consolidates six development phases on
+`feature/recap-phase1`:
+
+### Added — standalone Hudson ARG simulator
+
+- `src/structured_coalescent.jl` (~1100 LOC): segment-based pure-Julia
+  Hudson ARG with recombination and migration. msprime/tskit segment
+  semantics (each lineage holds a list of segments, each carrying its
+  own node_id; coalescence emits edges only for the intersection;
+  recombination splits segments without emitting edges).
+- Validated against analytical predictions:
+  - Watterson total branch length per bp matches `4N · H_{K−1}` within
+    3.5 SE across r ∈ {0, 1e-6, 1e-5, 1e-4}.
+  - F_ST for 2-deme symmetric matches `1/(1+8Nm)` within ±20% across
+    m ∈ {1e-3, 5e-3, 2e-2, 1e-1}. (Wright's `1/(1+4Nm)` uses a
+    forward-migrant-fraction `m` convention that's 2× ours.)
+  - K-leaf panmictic MRCA time matches `4N·(1−1/K)` within 3 SE.
+
+### Added — multi-chromosome threaded driver
+
+- `recapitate_panmictic(; n_chr, chr_len_bp, K, Ne, r_per_bp, seed)`
+  and `recapitate_structured(...)` — per-chromosome `@threads :dynamic`
+  with thread-deterministic output (chr-seeded via `seed ⊻
+  (UInt64(c) * 0x9E3779B97F4A7C15)`). Globally-unique node-id
+  remapping; leaves 1..K shared across chromosomes.
+- 2.76× speedup at 4 threads on production scale (N=5000, K=10000,
+  n_chr=10, chr_len=1Mbp); coalescent runs in ~1.5 seconds.
+
+### Added — `recap_first` Config integration
+
+- New Config fields:
+  - `recap_first::Bool = false` — opt into the workflow.
+  - `recap_burnin_structured::Int = 0` — Workflow A structured-neutral
+    forward burn-in length (resolves to `n_recent` when 0).
+  - `init_distribution = :from_recap` — new accepted value, strictly
+    paired with `recap_first = true`.
+- `src/recap.jl` orchestration: dispatches the right coalescent variant
+  based on `cfg.demography`, places QTL mutations on the tree
+  (weighted by edge branch length), derives gen-0 carriage via BFS
+  from the chosen edge's child node.
+- Wired into `simulate()`: new branch in `_build_initial_state` for
+  `cfg.recap_first`.
+
+### Added — `:twoD_recent` workflow routing
+
+- **Workflow A** (`:neutral` + `:twoD_recent` + `recap_first`): skips
+  the full `ngen_eq` forward settling phase. Runs only
+  `recap_burnin_structured` g of structured-neutral forward sim after
+  recap. The coalescent already provides full mutation-drift
+  equilibrium; long forward burn-in is unnecessary.
+
+### Changed (BREAKING) — `:twoD_recent` structure-onset semantics
+
+The structure-onset generation for `:twoD_recent` moved from
+`total_gens − n_recent + 1` to `ngen_eq_eff − n_recent + 1` (the
+Workflow B universal change — applies whether or not `recap_first` is
+on).
+
+- `:stabilizing + :twoD_recent` (ngen_dir = 0): **no behavior change**
+  (the two formulas are identical).
+- `:directional + :twoD_recent` with `ngen_dir > 0`: **breaking**. The
+  structured 100 gens previously straddled the shift event (last 100
+  gens of total_gens, spanning settling and post-shift); they now sit
+  entirely within the last 100 gens of settling, completing before the
+  shift fires. This matches the biologically meaningful interpretation
+  of "recent structure" — demographic structure is established before
+  the selection event of interest.
+- Validation tightened: `:twoD_recent` + two-phase mode now requires
+  `n_recent <= ngen_eq` (was: `n_recent <= total_gens`).
+
+Migration: users with `:directional + :twoD_recent + ngen_dir > 0`
+who specifically wanted the old "structure spans shift" semantics
+should set `n_recent = ngen_eq + ngen_dir` (and accept that this
+requires `n_recent <= ngen_eq` validation by structuring `ngen_eq`
+accordingly, OR ignore the directional phase for structure
+purposes).
+
+### Tests
+
+966 tests (was 943), all passing. New testsets cover all six phases
+of the recapitation engine plus end-to-end recap_first via simulate().
+
+### Documentation
+
+- New README section "Recapitation-first workflow" with motivation,
+  routing table, quickstart, and configuration reference.
+- New example `examples/recap_first.jl` demonstrating the gen-0 LD
+  difference between recap_first and the default.
+- `RECAPITATION_PLAN.md` documents the multi-phase implementation
+  history (foundation → segment-based recomb → structured demography
+  → multi-chr threading → Config integration → workflow routing →
+  documentation).
+
 ## [0.13.6] — 2026-05-17
 
 ### Changed (BREAKING) — `save_ancestry` defaults to `false`
