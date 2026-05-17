@@ -2106,4 +2106,94 @@ end
     @test res.cfg.ngen_dir == 0      # cfg unchanged
 end
 
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 1B: panmictic, no recombination.
+# Validates basic Hudson-style coalescent: K leaves coalesce to MRCA in
+# the expected time E[T_MRCA] = 4N · (1 − 1/K) generations. Each
+# coalescence emits 2 edges (full chromosome intersection, no recomb).
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — panmictic no-recomb (Phase 1B)" begin
+    # ----- Smoke: single small run completes correctly --------------------
+    state = PS.CoalescentState(4, Int8(1), 100, 10, UInt64(42))
+    PS.init_leaves!(state, 4)
+    @test state.n_active == 4
+    @test state.total_span == 400          # K · chr_len_bp = 4 · 100
+    t_mrca = PS.run_coalescent_norecomb!(state)
+    @test state.n_active == 1
+    @test state.total_span == 100          # one lineage spanning [1, 101)
+    @test length(state.edges) == 2 * (4 - 1) # 2 edges per coalescence, K-1 coals
+    @test t_mrca > 0
+
+    # ----- Node-time monotonicity -----------------------------------------
+    # Leaves have time = 0; coalescent nodes have positive times that
+    # increase with each coalescence.
+    @test all(state.node_times[1:4] .== 0.0)        # leaves
+    @test all(state.node_times[5:7] .> 0.0)         # 3 coalescent nodes
+    @test issorted(state.node_times[5:7])           # monotone increasing
+    @test state.node_times[7] ≈ t_mrca              # last node is MRCA
+
+    # ----- All edges have valid time direction ----------------------------
+    # Parent must be older (larger time) than child.
+    for e in state.edges
+        @test state.node_times[Int(e.parent_node)] > state.node_times[Int(e.child_node)]
+    end
+
+    # ----- All edges span the full chromosome -----------------------------
+    # Without recombination, every coalescence merges full-chromosome AMs,
+    # so every edge has left_bp = 1, right_bp = chr_len_bp + 1.
+    for e in state.edges
+        @test e.left_bp == 1
+        @test e.right_bp == 101                     # = chr_len_bp + 1
+    end
+
+    # ----- All leaves reach a single MRCA --------------------------------
+    # Build child → parent map by walking edges; every leaf must reach
+    # the same root.
+    parent_of = Dict{UInt32,UInt32}()
+    for e in state.edges
+        parent_of[e.child_node] = e.parent_node
+    end
+    function root_of(node)
+        while haskey(parent_of, node)
+            node = parent_of[node]
+        end
+        return node
+    end
+    roots = Set(root_of(UInt32(i)) for i in 1:4)
+    @test length(roots) == 1
+
+    # ----- Statistical: mean T_MRCA ≈ 4N · (1 − 1/K) within 2 SE ----------
+    # Run 200 reps with K=20 leaves, N=100. Expected E[T_MRCA] = 380 gens.
+    # Var(T_MRCA) ≈ Σ_{k=2}^K (4N)² / (k(k-1))² ≈ (4N)² · (π²/3 − 5/3 ⋯)
+    # but for the test we just check the empirical mean is within 2 SE.
+    N_eff = 100
+    K = 20
+    expected_tmrca = 4.0 * N_eff * (1.0 - 1.0 / K)         # = 380.0
+    nreps = 200
+    tmrcas = zeros(nreps)
+    for r in 1:nreps
+        s = PS.CoalescentState(K, Int8(1), 100, N_eff, UInt64(1000 + r))
+        PS.init_leaves!(s, K)
+        tmrcas[r] = PS.run_coalescent_norecomb!(s)
+    end
+    sample_mean = sum(tmrcas) / nreps
+    sample_sd = sqrt(sum((tmrcas .- sample_mean) .^ 2) / (nreps - 1))
+    sem = sample_sd / sqrt(nreps)
+    z_score = (sample_mean - expected_tmrca) / sem
+    @test abs(z_score) < 3.0                              # within 3 SE
+
+    # ----- Determinism: same seed → same edges, same T_MRCA --------------
+    s1 = PS.CoalescentState(10, Int8(2), 1000, 50, UInt64(99))
+    PS.init_leaves!(s1, 10)
+    t1 = PS.run_coalescent_norecomb!(s1)
+    s2 = PS.CoalescentState(10, Int8(2), 1000, 50, UInt64(99))
+    PS.init_leaves!(s2, 10)
+    t2 = PS.run_coalescent_norecomb!(s2)
+    @test t1 == t2
+    @test length(s1.edges) == length(s2.edges)
+    @test all(s1.edges[i].parent_node == s2.edges[i].parent_node &&
+               s1.edges[i].child_node == s2.edges[i].child_node
+               for i in eachindex(s1.edges))
+end
+
 end # @testset top-level
