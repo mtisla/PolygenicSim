@@ -823,3 +823,151 @@ function run_coalescent_norecomb!(state::CoalescentState)
     end
     return state.current_time
 end
+
+# =============================================================================
+# Multi-chromosome driver (Phase 3a).
+# -----------------------------------------------------------------------------
+# Runs the structured coalescent independently per chromosome and merges
+# the results into one edge table with globally-unique node ids.
+#
+# Each chromosome runs in parallel via `@threads :dynamic`. Per-chr
+# determinism is preserved via deterministic RNG seeding: each chr `c`
+# gets `seed ⊻ UInt64(c) * 0x9E3779B97F4A7C15`. Result is bit-identical
+# for fixed `(seed, n_chr)` regardless of thread count.
+#
+# Node-id remapping:
+#   - Leaves are SHARED across chromosomes: ids 1..K_total. Every
+#     chromosome's coalescent uses these as its initial leaf set.
+#   - Internal nodes are LOCAL per chromosome; we remap them to a
+#     global range during merging.
+# =============================================================================
+
+# Container for multi-chromosome coalescent output.
+struct CoalescentResult
+    edges::Vector{Edge}                # all edges (global node ids)
+    node_times::Vector{Float64}         # times indexed by global node id
+    sample_nodes::Vector{UInt32}        # leaf node ids 1..K_total (shared across chrs)
+    n_chr::Int
+    chr_len_bp::Int                     # currently uniform across chrs
+    n_demes::Int
+    next_node::UInt32                   # max allocated node id + 1
+end
+
+# Panmictic multi-chromosome recapitation.
+function recapitate_panmictic(; n_chr::Int, chr_len_bp::Int, K::Int, Ne::Int,
+                                r_per_bp::Float64, seed::UInt64,
+                                use_threads::Bool=true)
+    n_chr > 0 || throw(ArgumentError("n_chr must be > 0"))
+    K > 0 || throw(ArgumentError("K must be > 0"))
+    Ne > 0 || throw(ArgumentError("Ne must be > 0"))
+    chr_len_bp > 0 || throw(ArgumentError("chr_len_bp must be > 0"))
+    r_per_bp >= 0 || throw(ArgumentError("r_per_bp must be >= 0"))
+    # Run per-chromosome coalescents independently.
+    states = Vector{CoalescentState}(undef, n_chr)
+    if use_threads && n_chr > 1
+        Threads.@threads :dynamic for c in 1:n_chr
+            chr_seed = seed ⊻ (UInt64(c) * 0x9E3779B97F4A7C15)
+            s = CoalescentState(K, Int8(c), chr_len_bp, Ne, chr_seed)
+            init_leaves!(s, K)
+            run_coalescent!(s, r_per_bp)
+            states[c] = s
+        end
+    else
+        for c in 1:n_chr
+            chr_seed = seed ⊻ (UInt64(c) * 0x9E3779B97F4A7C15)
+            s = CoalescentState(K, Int8(c), chr_len_bp, Ne, chr_seed)
+            init_leaves!(s, K)
+            run_coalescent!(s, r_per_bp)
+            states[c] = s
+        end
+    end
+    return _merge_coalescent_states(states, K, chr_len_bp, 1)
+end
+
+# Structured (multi-deme island model) multi-chromosome recapitation.
+function recapitate_structured(; n_chr::Int, chr_len_bp::Int,
+                                  K_per_deme::Vector{Int},
+                                  N_per_deme::Vector{Int},
+                                  migration_rate::Float64,
+                                  r_per_bp::Float64, seed::UInt64,
+                                  use_threads::Bool=true)
+    length(K_per_deme) == length(N_per_deme) ||
+        throw(ArgumentError("K_per_deme and N_per_deme must have same length"))
+    n_chr > 0 || throw(ArgumentError("n_chr must be > 0"))
+    chr_len_bp > 0 || throw(ArgumentError("chr_len_bp must be > 0"))
+    K_total = sum(K_per_deme)
+    K_total > 0 || throw(ArgumentError("sum(K_per_deme) must be > 0"))
+    states = Vector{CoalescentState}(undef, n_chr)
+    if use_threads && n_chr > 1
+        Threads.@threads :dynamic for c in 1:n_chr
+            chr_seed = seed ⊻ (UInt64(c) * 0x9E3779B97F4A7C15)
+            s = CoalescentState(K_total, Int8(c), chr_len_bp,
+                                  N_per_deme, migration_rate, chr_seed)
+            init_leaves!(s, K_per_deme)
+            run_coalescent!(s, r_per_bp)
+            states[c] = s
+        end
+    else
+        for c in 1:n_chr
+            chr_seed = seed ⊻ (UInt64(c) * 0x9E3779B97F4A7C15)
+            s = CoalescentState(K_total, Int8(c), chr_len_bp,
+                                  N_per_deme, migration_rate, chr_seed)
+            init_leaves!(s, K_per_deme)
+            run_coalescent!(s, r_per_bp)
+            states[c] = s
+        end
+    end
+    return _merge_coalescent_states(states, K_total, chr_len_bp,
+                                      length(N_per_deme))
+end
+
+# Merge per-chromosome coalescent states into one CoalescentResult.
+# Leaves (ids 1..K) are shared; internal nodes are renumbered to global
+# ranges. Edge bp ranges and `chr` field are preserved as-is.
+function _merge_coalescent_states(states::Vector{CoalescentState},
+                                    K::Int, chr_len_bp::Int, n_demes::Int)
+    n_chr = length(states)
+    # Compute per-chr offset for internal-node ids.
+    # Chr c's internal nodes (local id > K) get global id = local id + offset[c],
+    # where offset[c] = sum of internal-node counts for chrs 1..c-1.
+    offsets = zeros(UInt32, n_chr)
+    cumulative_internal = UInt32(0)
+    for c in 1:n_chr
+        offsets[c] = cumulative_internal
+        # internal nodes for chr c = next_node_id - K
+        cumulative_internal += UInt32(Int(states[c].next_node_id) - K)
+    end
+    next_node = UInt32(K) + cumulative_internal
+
+    # Total edge count (for sizehint).
+    total_edges = 0
+    for s in states
+        total_edges += length(s.edges)
+    end
+    edges = Vector{Edge}(undef, 0)
+    sizehint!(edges, total_edges)
+
+    # Global node_times: leaves get time 0 (all chrs agree), internal
+    # nodes get times from their respective chr.
+    node_times = zeros(Float64, Int(next_node))
+
+    # Renumber and copy edges per chr.
+    for c in 1:n_chr
+        off = offsets[c]
+        s = states[c]
+        @inbounds for e in s.edges
+            parent = e.parent_node > UInt32(K) ? e.parent_node + off : e.parent_node
+            child  = e.child_node  > UInt32(K) ? e.child_node  + off : e.child_node
+            push!(edges, Edge(parent, child, e.left_bp, e.right_bp, e.chr))
+        end
+        # Internal node times for this chr.
+        @inbounds for local_id in (K + 1):Int(s.next_node_id)
+            global_id = UInt32(local_id) + off
+            node_times[Int(global_id)] = s.node_times[local_id]
+        end
+    end
+
+    sample_nodes = UInt32.(1:K)
+    return CoalescentResult(edges, node_times, sample_nodes,
+                              n_chr, chr_len_bp, n_demes, next_node)
+end

@@ -2418,4 +2418,123 @@ end
     @test s_panmictic.n_active == 1                 # full coalescence
 end
 
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 3a: multi-chromosome threaded driver.
+# Each chromosome runs an independent Hudson ARG in parallel via
+# `@threads :dynamic`; results are merged into a CoalescentResult with
+# globally-unique node ids. Validates:
+#   - Per-chr determinism: same (seed, n_chr) → bit-identical edges
+#     regardless of thread count.
+#   - Chromosome independence: every edge carries its own chr tag;
+#     edges in one chr never reference node ids from another (except
+#     for shared leaves 1..K).
+#   - Node-id remapping correctness.
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — multi-chromosome driver (Phase 3a)" begin
+    # ----- Smoke: panmictic 3-chr run completes ---------------------------
+    res = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                    r_per_bp=1e-3, seed=UInt64(42))
+    @test res.n_chr == 3
+    @test res.chr_len_bp == 500
+    @test res.n_demes == 1
+    @test res.sample_nodes == UInt32.(1:10)
+    @test length(res.edges) > 0
+    @test Int(res.next_node) > 10                   # internal nodes allocated
+
+    # Every chr appears in the edge table.
+    chrs_seen = Set{Int8}()
+    for e in res.edges
+        push!(chrs_seen, e.chr)
+    end
+    @test sort(collect(chrs_seen)) == Int8[1, 2, 3]
+
+    # Every leaf is reachable via at least one edge in some chr (sanity).
+    children_seen = Set{UInt32}()
+    for e in res.edges
+        push!(children_seen, e.child_node)
+    end
+    @test all(UInt32(i) in children_seen for i in 1:10)
+
+    # ----- Determinism: same seed → bit-identical edges -------------------
+    res2 = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                     r_per_bp=1e-3, seed=UInt64(42))
+    @test res.edges == res2.edges
+    @test res.node_times == res2.node_times
+    @test res.next_node == res2.next_node
+
+    # ----- Thread independence: parallel and serial paths agree ---------
+    res_serial = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                           r_per_bp=1e-3, seed=UInt64(42),
+                                           use_threads=false)
+    @test res.edges == res_serial.edges
+    @test res.node_times == res_serial.node_times
+
+    # ----- Chr independence: no cross-chr edges --------------------------
+    # Within each chromosome, all nodes (leaves + internals) should have
+    # consistent chr tags. Specifically: every node id > K (= internal)
+    # should appear only in edges of one chr.
+    K = 10
+    node_to_chrs = Dict{UInt32,Set{Int8}}()
+    for e in res.edges
+        if e.parent_node > UInt32(K)
+            push!(get!(node_to_chrs, e.parent_node, Set{Int8}()), e.chr)
+        end
+        if e.child_node > UInt32(K)
+            push!(get!(node_to_chrs, e.child_node, Set{Int8}()), e.chr)
+        end
+    end
+    @test all(length(s) == 1 for s in values(node_to_chrs))
+
+    # ----- Different seeds → different output ---------------------------
+    res_other = PS.recapitate_panmictic(n_chr=3, chr_len_bp=500, K=10, Ne=20,
+                                          r_per_bp=1e-3, seed=UInt64(99))
+    @test res.edges != res_other.edges
+
+    # ----- Structured (multi-deme) multi-chr driver --------------------
+    res_str = PS.recapitate_structured(n_chr=2, chr_len_bp=300,
+                                          K_per_deme=[5, 5],
+                                          N_per_deme=[20, 20],
+                                          migration_rate=0.01,
+                                          r_per_bp=1e-3,
+                                          seed=UInt64(7))
+    @test res_str.n_chr == 2
+    @test res_str.n_demes == 2
+    @test length(res_str.sample_nodes) == 10
+    @test length(res_str.edges) > 0
+    # Determinism for structured too.
+    res_str2 = PS.recapitate_structured(n_chr=2, chr_len_bp=300,
+                                           K_per_deme=[5, 5],
+                                           N_per_deme=[20, 20],
+                                           migration_rate=0.01,
+                                           r_per_bp=1e-3,
+                                           seed=UInt64(7))
+    @test res_str.edges == res_str2.edges
+
+    # ----- Validation: per-chr branch length consistent with single-chr --
+    # Run each chromosome ALONE (single-chr) and compare its TBL/bp
+    # against the corresponding chr's TBL/bp in the multi-chr run.
+    # They should match exactly (since each chr is bit-identical under
+    # the same chr-specific seed).
+    n_chr = 3; chr_len = 400; K = 8; Ne = 15
+    res_mc = PS.recapitate_panmictic(n_chr=n_chr, chr_len_bp=chr_len, K=K, Ne=Ne,
+                                        r_per_bp=5e-4, seed=UInt64(1234))
+    for c in 1:n_chr
+        chr_seed = UInt64(1234) ⊻ (UInt64(c) * 0x9E3779B97F4A7C15)
+        s = PS.CoalescentState(K, Int8(c), chr_len, Ne, chr_seed)
+        PS.init_leaves!(s, K)
+        PS.run_coalescent!(s, 5e-4)
+        # Count edges in the multi-chr result that are tagged with this chr.
+        mc_edges_this_chr = [e for e in res_mc.edges if e.chr == Int8(c)]
+        @test length(mc_edges_this_chr) == length(s.edges)
+        # Compare TBL/bp (independent of node-id remapping).
+        tbl_solo = sum(e -> (s.node_times[Int(e.parent_node)] -
+                              s.node_times[Int(e.child_node)]) *
+                              (e.right_bp - e.left_bp), s.edges) / chr_len
+        tbl_mc = sum(e -> (res_mc.node_times[Int(e.parent_node)] -
+                            res_mc.node_times[Int(e.child_node)]) *
+                            (e.right_bp - e.left_bp), mc_edges_this_chr) / chr_len
+        @test tbl_solo ≈ tbl_mc atol=1e-9
+    end
+end
+
 end # @testset top-level
