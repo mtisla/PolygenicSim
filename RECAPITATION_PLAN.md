@@ -308,43 +308,63 @@ To resume in a fresh session:
 
 ```
 git checkout feature/recap-phase1
-# Current state: Phase 2 committed (9ddc3a6). 917 tests passing.
-# Next: implement Phase 3 (multi-chromosome threading + perf optimizations).
+# Current state: Phase 3a committed (3f08cd3). 943 tests passing.
+# Next: Phase 4 (recap_first Config integration — user-facing).
+#       Phase 3b (perf opts) is deferrable.
 ```
 
-**Phase 3 — Multi-chromosome threading + perf optimizations**
+**Phase 3a — Multi-chromosome threaded driver — DONE (3f08cd3)**
+- ~150 LOC implementation + ~120 LOC tests.
+- CoalescentResult struct, recapitate_panmictic, recapitate_structured.
+- Per-chr `@threads :dynamic`, thread-deterministic via per-chr seed
+  scrambling.
+- Empirical: 2.76× speedup at 4 threads on production-scale workload
+  (K=2000, Ne=1000, n_chr=10, chr_len=1Mbp).
 
-Two parallel work items, in priority order:
+**Phase 3b — Perf optimizations (DEFERRABLE)**
 
-(a) Multi-chromosome driver (~100 LOC):
-- Each chromosome's coalescent is independent — `@threads :dynamic`
-  over chromosomes gives near-linear scaling for typical n_chr=10.
-- New wrapper: `recapitate_panmictic(n_chr, chr_len_bp, K, N, r_per_bp, seed)`
-  and structured variant. Each spawns one CoalescentState per chromosome,
-  seeded with `seed ⊻ UInt64(chr)`, runs in parallel.
-- Output: merge per-chr edges into a single `Ancestry` struct with
-  globally-unique node ids (allocate ranges per chr).
-- Validation: per-(seed, n_chr) determinism; no cross-chr LD.
+Lower priority since 3a's threading delivers most of the practical
+speedup. Quick wins when scaling needs warrant:
+- O(1) active-list (swap-and-pop) replaces O(L) `nth_active_lineage`
+  scan. Needed before K > ~2000.
+- Compile-time demography specialization (Val{1} vs Val{N}).
+- Slab allocator for Edge vector + batched RNG.
 
-(b) Performance optimizations (~400 LOC, less urgent):
-- nth_active_lineage / nth_active_lineage_in_deme are currently O(L)
-  per call → O(K²) total over the run. Replace with an O(1)
-  active-list per deme using swap-and-pop.
-- Slab allocator for the Edge vector (per-chr `sizehint!` to expected
-  count).
-- Compile-time specialization on n_demes (Val{1} vs Val{N}) to elide
-  migration branches in panmictic runs.
-- Batched RNG: pre-draw N exponentials per iteration.
-- Inline the deme_count update into operators (already done; the
-  branch on `isempty(deme_count)` is the only remaining overhead for
-  the legacy panmictic constructor — could specialize).
+**Phase 4 — `recap_first` Config integration (USER-FACING, ~300 LOC)**
 
-The optimizations are independent; Phase 3 ships with at least (a).
-The perf wins from the original plan are still on the menu but
-secondary to correctness of the orchestration.
+The standalone coalescent module is complete and validated. Phase 4
+wires it into `simulate()` as the `recap_first=true` workflow.
 
-Recommended order for Phase 3 implementation:
-1. Multi-chr driver (a) — biggest user-facing win.
-2. O(1) active-list — needed before scaling K up to 10,000+.
-3. Compile-time demography specialization — clean win, easy.
-4. Other perf opts as needed once we measure with the benchmark suite.
+Implementation steps:
+
+1. Config additions:
+   - `recap_first::Bool = false`.
+   - `recap_burnin_structured::Int = 0` (sentinel = n_recent).
+   - `init_distribution = :from_recap` (new enum value).
+2. Validation:
+   - recap_first=true && init_distribution != :from_recap → reject.
+   - recap_burnin_structured == 0 → resolve to n_recent in validate().
+   - :twoD_recent && n_recent > ngen_eq → reject.
+3. New file `src/recap.jl` (orchestration):
+   - `recapitate_for_sim(cfg) -> CoalescentResult` — picks the right
+     recapitate_panmictic/structured variant based on cfg.demography.
+   - `place_qtls_on_tree!(coalresult, vt, cfg, rng)` — pre-pick
+     n_qtl bp positions per chromosome, place each on a random edge
+     weighted by edge length × bp width. Carrier sets derived from
+     edge descendants at that bp.
+   - `derive_gen0_pop_from_tree(coalresult, qtl_carriers, cfg) -> PackedPop`
+     — write the gen-0 PackedPop.H based on which leaves carry which
+     QTL alleles.
+   - `merge_coalescent_into_ancestry!(anc, coalresult)` — make the
+     coalescent edges available for downstream neutral overlay.
+4. Wire into `simulate()`:
+   - Detect `recap_first=true` → call recapitate_for_sim → place QTLs
+     → derive gen-0 pop → continue with forward sim as usual (forward
+     sim sees a "settled" gen-0 state).
+5. Tests:
+   - Smoke: cfg with recap_first=true runs end-to-end.
+   - QTL-QTL LD at gen 0 matches Hill-Robertson `1/(1+4Nrd)` within
+     2 SE at distances 1kb, 10kb, 100kb — the headline validation.
+   - Determinism: same (cfg, seed) → bit-identical gen-0 state.
+   - Strict reject: `init_distribution = :from_recap` without
+     `recap_first` errors out.
