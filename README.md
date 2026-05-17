@@ -348,7 +348,7 @@ See [Ancestry recording + neutral overlay](#ancestry-recording--neutral-overlay)
 |---|---|---|---|
 | `record_ancestry` | `Bool` | `false` | When `true`, the simulator logs an edge table (parent_node → child_node, bp-range, chr) every generation so neutral mutations can be overlaid post-hoc without forward-simulating them. Adds ≲15% to per-gen wall-time at production scale; recording is a pure side-channel (`pop.H` is bit-identical with/without it for fixed seed). |
 | `ancestry_simplify_interval` | `Int` | `100` | Generations between `simplify!` passes that drop edges with no living descendants. Lower = tighter sustained memory; higher = more peak edges between passes. SLiM's default is 100. |
-| `save_ancestry` | `Bool` | `true` | Gate the `{prefix}.anc.zst` disk write. Set `false` for in-session overlay (`overlay_neutral_mutations(res.ancestry; ...)`) — skips the I/O when you don't need the ancestry on disk. Requires `record_ancestry=true`. |
+| `save_ancestry` | `Bool` | `false` | Gate the `{prefix}.anc.zst` disk write. Default off — opt in explicitly when you need the ancestry on disk (e.g., for overlay in a different session). In-session overlay via `overlay_neutral_mutations(res.ancestry; ...)` works regardless because the recorder is always exposed on `SimResult.ancestry`. Has no effect when `record_ancestry=false`. |
 
 ### Oracle statistics (only used when `:oracle ∈ output_formats`)
 

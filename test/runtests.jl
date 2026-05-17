@@ -1617,6 +1617,7 @@ end
         ngen_eq=20,
         record_ancestry=true,
         ancestry_simplify_interval=5,
+        save_ancestry=true,                         # opt in (default is now false)
         output_formats=Symbol[], n_int=0, seed=UInt64(7),
         output_prefix=prefix,
     )
@@ -1724,9 +1725,11 @@ end
     p_lazy = joinpath(tmp, "lazy")
     cfg_freq = PS.Config(; cfg_kw..., record_ancestry=true,
                           ancestry_simplify_interval=5,
+                          save_ancestry=true,
                           output_prefix=p_freq)
     cfg_lazy = PS.Config(; cfg_kw..., record_ancestry=true,
                           ancestry_simplify_interval=10_000,    # no mid-run simplify
+                          save_ancestry=true,
                           output_prefix=p_lazy)
     PS.simulate(cfg_freq)
     PS.simulate(cfg_lazy)

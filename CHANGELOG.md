@@ -9,6 +9,29 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.13.6] — 2026-05-17
+
+### Changed (BREAKING) — `save_ancestry` defaults to `false`
+
+`save_ancestry::Bool` default flipped from `true` → `false`. When
+`record_ancestry=true`, the `.anc.zst` is no longer written to disk
+unless the user explicitly opts in. The in-memory `SimResult.ancestry`
+recorder is unaffected — same-session overlay via
+`overlay_neutral_mutations(res.ancestry; ...)` works exactly as before
+regardless of this flag.
+
+Rationale: most workflows during current QTL-only validation don't
+need the ancestry on disk; the .anc.zst can reach hundreds of MB at
+production scale, so default-on caused surprise disk pressure. Disk
+output is one keyword toggle away (`save_ancestry=true`) when needed
+for cross-session overlay.
+
+Migration: any caller relying on `record_ancestry=true` to write
+`.anc.zst` must now also set `save_ancestry=true`.
+
+Three internal tests that read back the `.anc.zst` were updated to
+pass `save_ancestry=true` explicitly. Test count unchanged at 515.
+
 ## [0.13.5] — 2026-05-17
 
 ### Added — fraction-based site parameterization (`f_neutral`)

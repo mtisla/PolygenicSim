@@ -194,12 +194,13 @@ Base.@kwdef mutable struct Config
     # passes. Default 100 matches SLiM's tskit default.
     ancestry_simplify_interval::Int = 100
     # When `record_ancestry=true`, controls whether the edge table is
-    # serialized to `{output_prefix}.anc.zst` at end of run. Default `true`
-    # preserves current behavior. Set `false` when the goal is to overlay
-    # neutral mutations in the same Julia session via the in-memory
-    # `SimResult.ancestry` object — avoids the disk I/O cost (the edge
-    # table can be hundreds of MB at production scale).
-    save_ancestry::Bool = true
+    # serialized to `{output_prefix}.anc.zst` at end of run. Default
+    # `false` — opt in explicitly when you actually need the ancestry
+    # on disk. The in-memory `SimResult.ancestry` object is always
+    # available for same-session overlay regardless of this flag.
+    # The .anc.zst can reach hundreds of MB at production scale, so
+    # default-off avoids surprise disk pressure in QTL-only runs.
+    save_ancestry::Bool = false
 
     # output
     output_formats::Vector{Symbol} = Symbol[:plink]
