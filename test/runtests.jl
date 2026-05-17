@@ -1738,6 +1738,34 @@ end
     @test minimum(anc_freq.sample_nodes) == minimum(anc_lazy.sample_nodes)
     @test maximum(anc_freq.sample_nodes) == maximum(anc_lazy.sample_nodes)
 
+    # ----- write_merged_genotype_plink: QTL + neutral PLINK panel ---------
+    # Confirm the merged writer produces a coherent PLINK trio with the
+    # expected file sizes and site counts.
+    tbl_merge = PS.overlay_neutral_mutations(p_freq * ".anc.zst";
+                                                mu_per_bp=1e-5, seed=UInt64(13))
+    res_for_merge = PS.simulate(PS.Config(; cfg_kw...,
+                                            record_ancestry=true,
+                                            ancestry_simplify_interval=5,
+                                            save_ancestry=false,
+                                            output_prefix=joinpath(tmp, "merge_run")))
+    info = PS.write_merged_genotype_plink(joinpath(tmp, "merged"),
+                                           res_for_merge, tbl_merge)
+    @test info.n_sites == info.n_qtl + info.n_neutral
+    @test info.n_qtl > 0
+    @test info.n_neutral > 0
+    # BED size = 3-byte magic + n_sites · ceil(N/4) bytes (SNP-major).
+    expected_bed = 3 + info.n_sites * cld(cfg_kw.N, 4)
+    @test filesize(info.bed) == expected_bed
+    # BIM has one row per site; FAM has N rows.
+    @test countlines(info.bim) == info.n_sites
+    @test countlines(info.fam) == cfg_kw.N
+    # effects.tsv has header + one row per site.
+    @test countlines(info.effects) == info.n_sites + 1
+    # Validation: at least one of include_qtl / include_neutral must be true.
+    @test_throws ArgumentError PS.write_merged_genotype_plink(
+        joinpath(tmp, "bad"), res_for_merge, tbl_merge;
+        include_qtl=false, include_neutral=false)
+
     # ----- save_ancestry=false: in-memory overlay path --------------------
     # When save_ancestry=false the .anc.zst is NOT written, but the recorder
     # lives on in SimResult.ancestry and overlay can run against it directly.

@@ -24,5 +24,6 @@ include("summary.jl")
 include("simulate.jl")
 include("oracle.jl")
 include("neutral_overlay.jl")
+include("merged_genotype.jl")
 
 end # module PolygenicSim
