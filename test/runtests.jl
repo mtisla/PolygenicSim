@@ -1603,4 +1603,116 @@ end
     @test all(res_fsm.vt.active)   # FSM: every slot active
 end
 
+# ---------------------------------------------------------------------------
+# Smoke test — oracle_maf_min drops low-MAF sites from oracle statistics
+# ---------------------------------------------------------------------------
+@testset "Oracle — MAF cutoff (oracle_maf_min)" begin
+    tmp = mktempdir()
+    prefix0 = joinpath(tmp, "maf0")
+    prefix1 = joinpath(tmp, "maf01")
+
+    cfg_kw = (
+        N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+        n_qtl=300, n_neutral=0, Uqtl=0.02,
+        h2=0.5,
+        selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=40, ngen_dir=0,
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:settled],
+        oracle_n_perm=20,
+        seed=UInt64(0xC410),
+    )
+    cfg0 = PS.Config(; cfg_kw..., oracle_maf_min=0.0,  output_prefix=prefix0)
+    cfg1 = PS.Config(; cfg_kw..., oracle_maf_min=0.05, output_prefix=prefix1)
+
+    res0 = PS.simulate(cfg0)
+    res1 = PS.simulate(cfg1)
+
+    # 1. Both runs produced a settled oracle TSV.
+    f0 = prefix0 * ".oracle.settled.tsv"
+    f1 = prefix1 * ".oracle.settled.tsv"
+    @test isfile(f0)
+    @test isfile(f1)
+
+    # 2. The MAF=0.05 run reports meta.maf_min=0.05; the MAF=0 run reports 0.0.
+    function read_meta(path, key)
+        for line in eachline(path)
+            startswith(line, key * "\t") || continue
+            return split(line, '\t')[2]
+        end
+        return nothing
+    end
+    @test read_meta(f0, "meta.maf_min") == "0.0"
+    @test read_meta(f1, "meta.maf_min") == "0.05"
+
+    # 3. The filtered run keeps fewer QTLs (p_qtl) than the unfiltered.
+    p_qtl0 = parse(Int, read_meta(f0, "meta.p_qtl"))
+    p_qtl1 = parse(Int, read_meta(f1, "meta.p_qtl"))
+    @test p_qtl1 < p_qtl0
+    @test p_qtl1 > 0      # not everything got filtered
+
+    # 4. Validation: maf_min outside [0, 0.5) is rejected.
+    @test_throws ArgumentError PS.validate(
+        PS.Config(; cfg_kw..., oracle_maf_min=0.5, output_prefix=prefix0))
+    @test_throws ArgumentError PS.validate(
+        PS.Config(; cfg_kw..., oracle_maf_min=-0.01, output_prefix=prefix0))
+end
+
+# ---------------------------------------------------------------------------
+# Smoke test — Float (t½-multiple) checkpoints with save_at_checkpoints=false
+# ---------------------------------------------------------------------------
+@testset "Checkpoints — Float t½ multiples, oracle-only emission" begin
+    tmp = mktempdir()
+    prefix = joinpath(tmp, "thalf")
+    # Tiny config; we only care that file plumbing is correct.
+    cfg = PS.Config(
+        N=80, Ne=80, n_chr=1, chr_len_bp=20_000,
+        n_qtl=60, n_neutral=0, Uqtl=0.02,
+        h2=0.5,
+        selection_mode=:directional, directional_start_from=:msd,
+        vs_over_vp0=20.0, shift_sd=2.0, t_shift=0,
+        ngen_eq=20, ngen_dir=0,                    # ngen_dir auto-inferred
+        checkpoints=[0.5, 1.0],                    # Float => t½ multiples
+        save_at_checkpoints=false,                 # oracle TSVs only
+        output_formats=Symbol[:oracle],
+        oracle_phases=Symbol[:settled, :final],
+        oracle_n_perm=10,                          # tiny for speed
+        seed=UInt64(0xC401),
+        output_prefix=prefix)
+    res = PS.simulate(cfg)
+
+    # 1. The two checkpoint oracle TSVs exist with the expected suffix.
+    cp1 = prefix * ".oracle.0.5_thalf.tsv"
+    cp2 = prefix * ".oracle.1.0_thalf.tsv"
+    @test isfile(cp1)
+    @test isfile(cp2)
+
+    # 2. The settled oracle still exists; final exists too.
+    @test isfile(prefix * ".oracle.settled.tsv")
+    @test isfile(prefix * ".oracle.final.tsv")
+
+    # 3. No population snapshot was written at the checkpoints
+    #    (save_at_checkpoints=false). We only have oracle TSVs + the
+    #    snapshot from the natural end-of-run "no checkpoint" emission.
+    @test isempty(filter(p -> occursin("_gen", basename(p)) &&
+                              endswith(p, ".psim.zst"),
+                          readdir(tmp; join=true)))
+
+    # 4. meta.gen row recorded inside each checkpoint TSV.
+    function read_meta_gen(path)
+        for line in eachline(path)
+            startswith(line, "meta.gen\t") || continue
+            return parse(Int, split(line, '\t')[2])
+        end
+        return -1
+    end
+    g1 = read_meta_gen(cp1)
+    g2 = read_meta_gen(cp2)
+    @test g1 > cfg.ngen_eq          # checkpoint lies in Phase B
+    @test g2 > g1                    # t½=1.0 is further out than t½=0.5
+    @test g2 ≈ 2 * (g1 - cfg.ngen_eq) + cfg.ngen_eq  atol=1
+    # ngen_dir was inferred to reach the max(c)·t_half
+    @test res.cfg.ngen_dir == 0      # cfg unchanged
+end
+
 end # @testset top-level

@@ -73,12 +73,13 @@ const _CONFIG_CATEGORIES = (
     "phases"      => (:ngen_eq, :ngen_dir, :ngen),
     "runtime"     => (:backend, :seed, :n_threads, :n_int),
     "output"      => (:output_formats, :output_prefix, :checkpoints,
-                       :save_settled),
+                       :save_settled, :save_at_checkpoints),
     "loading"     => (:load_from, :load_plink_prefix, :load_demography),
     "oracle"      => (:oracle_windows_pct, :oracle_n_perm,
                        :oracle_memory_path_threshold,
                        :oracle_precision, :oracle_phases,
-                       :oracle_B_scopes, :oracle_rho_scopes),
+                       :oracle_B_scopes, :oracle_rho_scopes,
+                       :oracle_maf_min),
 )
 
 # Compile-time sanity check: every Config field appears in some category.

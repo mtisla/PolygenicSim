@@ -322,7 +322,8 @@ Pick one of the two models; setting both is an error.
 | `ngen_eq` | `Int` | `0` | Two-phase: settling/eq generations (neutral, MSD, or pre-shift). |
 | `ngen_dir` | `Int` | `0` | Two-phase: additional post-shift generations for `:directional`. |
 | `ngen` | `Int` | `0` | Single-knob: exact run length; no settling. `:directional` shift fires at gen 1. |
-| `checkpoints` | `Vector{Int}` \| `Vector{Float64}` \| `nothing` | `nothing` | Absolute gens (`Int`) or multiples of `t_½` (`Float64`) at which to write checkpoint output. |
+| `checkpoints` | `Vector{Int}` \| `Vector{Float64}` \| `nothing` | `nothing` | `Int` = absolute gens. `Float64` = multiples of `t_½` in Phase B, with `t_½` computed from realized V_A/V_P at the **end of the settling phase** (requires `selection_mode=:directional`). At each checkpoint gen the oracle statistics are computed and written to `{prefix}.oracle.{c}_thalf.tsv` (Float) or `{prefix}.oracle.gen{N}.tsv` (Int). When only Float checkpoints are set and `ngen_dir == 0`, `ngen_dir_eff` is auto-inferred from `max(checkpoints)`. |
+| `save_at_checkpoints` | `Bool` | `false` | When `true`, also write the full population snapshot (psim/PLINK per `output_formats`) at each Float checkpoint. When `false` (default), Float checkpoints emit *only* the oracle TSV — useful for trajectory analysis without the I/O cost of per-gen genotype dumps. Int checkpoints always emit a snapshot (legacy). |
 
 ### Output
 
@@ -344,6 +345,7 @@ See [Oracle statistics](#oracle-statistics) for details.
 | `oracle_cutoffs` | `Vector{Int}` | `[20, 50]` | Δ_cross polarized-frequency cutoffs (%). |
 | `oracle_precision` | `Symbol` | `:Float64` | `:Float64` \| `:Float32` (sgemm, ~1.4× faster at `p_qtl ≥ 4000`). |
 | `oracle_phases` | `Vector{Symbol}` | `[:final]` | Subset of `:init`, `:settled`, `:final`. `:init` = gen 0 baseline before any selection acts. `:settled` = end of Phase A (`ngen_eq` settling); silently skipped when `ngen_eq_eff == 0`. `:final` = end of run. Each recorded phase writes `{prefix}.oracle.{phase}.tsv`; when only `[:final]` is recorded, the legacy `{prefix}.oracle.tsv` is also written for back-compat. `SimResult.oracle_records[phase]` exposes each `OracleResult`. |
+| `oracle_maf_min` | `Float64` | `0.0` | MAF cutoff applied to all per-site oracle statistics. A site `j` is kept iff `min(p_j, 1 − p_j) ≥ oracle_maf_min`. Default `0.0` retains the original "polymorphic only" behavior. Set to e.g. `0.01` to mirror typical GWAS / fine-mapping filtering (drops singletons / near-monomorphic sites whose per-locus stats are unstable on empirical data). Recorded in the TSV as `meta.maf_min`. |
 
 ### Runtime & diagnostics
 
@@ -862,6 +864,49 @@ fast-path memory ≈ `3·p²` doubles + `N·p` — about 3 GB at `p=10000` on a
 ~1.4× faster (8.7 s → 6.0 s) with ~45% less memory (2.8 GB → 1.6 GB).
 B values agree with Float64 to 5+ decimals — well below report precision
 and the `n_perm = 1000` perm-p quantization floor.
+
+### MAF filter
+
+`oracle_maf_min` drops low-MAF sites from every oracle statistic before any
+window / quantile / Δp filter runs. The default `0.0` keeps every polymorphic
+site (back-compat). For GWAS / fine-mapping-style analyses, set e.g. `0.01`
+to match the empirical convention of dropping singletons and near-monomorphic
+variants whose per-locus tests are unstable:
+
+```julia
+cfg = PS.Config(
+    ..., output_formats=[:oracle],
+    oracle_maf_min = 0.01,        # require MAF ≥ 1%
+)
+```
+
+The applied cutoff is recorded in each oracle TSV as `meta.maf_min`, alongside
+`meta.gen` and `meta.p_qtl` (now reflects the post-filter site count).
+
+### t½-multiple checkpoints (oracle trajectory)
+
+To compute oracle statistics at multiple timepoints during Phase B without
+re-running the simulator, pass `checkpoints` as a `Vector{Float64}` of
+t_½ multiples:
+
+```julia
+cfg = PS.Config(
+    ..., selection_mode = :directional,
+    ngen_eq = 15_000,
+    ngen_dir = 0,                        # optional; auto-inferred from max(checkpoints)
+    checkpoints = [0.5, 1.0, 2.0],       # in units of t_½_settled
+    save_at_checkpoints = false,         # oracle TSVs only (no genotype dumps)
+    output_formats = [:oracle],
+    oracle_phases  = [:settled, :final],
+)
+```
+
+`t_½_settled = ln(2) · (V_P + V_S) / (h² · V_P)` is computed at the end of
+Phase A from realized V_A/V_P. Each checkpoint emits
+`{prefix}.oracle.{c}_thalf.tsv` (e.g. `0.5_thalf`, `1.0_thalf`, `2.0_thalf`),
+with `meta.gen` recording the resolved absolute generation. Setting
+`save_at_checkpoints=true` additionally writes the full genotype snapshot
+(psim/PLINK) at each checkpoint.
 
 ---
 

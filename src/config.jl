@@ -156,8 +156,23 @@ Base.@kwdef struct Config
     ngen_dir::Int = 0
     ngen::Int = 0
 
-    # checkpoints — Vector{Int} (absolute gens) or Vector{Float64} (multiples of t½)
+    # checkpoints — Vector{Int} (absolute gens) or Vector{Float64} (multiples
+    # of t½, computed at the END of the settling phase from realized V_A/V_P
+    # and resolved to integer gens via `round(Int, c · t_half_settled)`).
+    # Float checkpoints are required to be in Phase B (selection_mode=:directional).
+    # When only Float checkpoints are specified, `ngen_dir` may be left at 0
+    # and is auto-inferred as `max(c) · t_half_settled`.
+    # At each checkpoint generation, the oracle statistics are always computed
+    # and written to `{prefix}.oracle.{c}_thalf.tsv` (Float) or
+    # `{prefix}.oracle.gen{N}.tsv` (Int). The population snapshot (psim/PLINK)
+    # is additionally written only when `save_at_checkpoints == true`.
     checkpoints::Union{Vector{Int},Vector{Float64},Nothing} = nothing
+
+    # When true, also write a population snapshot (psim/PLINK per output_formats)
+    # at each checkpoint gen. When false (default), checkpoints emit only the
+    # oracle TSV — useful for oracle-trajectory analysis without the I/O cost
+    # of full genotype dumps.
+    save_at_checkpoints::Bool = false
 
     # output
     output_formats::Vector{Symbol} = Symbol[:plink]
@@ -192,6 +207,14 @@ Base.@kwdef struct Config
     oracle_windows_pct::Vector{Float64} = [5.0, 10.0, 25.0, 50.0]
     oracle_n_perm::Int = 1000
     oracle_memory_path_threshold::Int = 10000
+    # MAF cutoff applied to all oracle per-site statistics. A site `j` is
+    # kept iff its in-population allele frequency `p_j` satisfies
+    # `min(p_j, 1 - p_j) >= oracle_maf_min`. Default 0.0 = no MAF filter
+    # (back-compat). Set to e.g. 0.01 to match common GWAS / fine-mapping
+    # filtering on empirical data (drops singletons / near-monomorphic
+    # variants whose per-locus test statistics are unstable). Applied in
+    # `_extract_qtl_genotypes` *before* any window/q-quantile/dp filter.
+    oracle_maf_min::Float64 = 0.0
     # Per-stat scope subset config (v0.13.0).
     # Each entry is one of: `:all` (compute every scope) or an explicit scope
     # symbol like `:win_5pct`, `:win_10pct`, `:win_25pct`, `:win_50pct`,
@@ -523,6 +546,8 @@ function validate(cfg::Config)
     end
     cfg.oracle_precision in (:Float64, :Float32) ||
         throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
+    (0.0 <= cfg.oracle_maf_min < 0.5) ||
+        throw(ArgumentError("oracle_maf_min must be in [0, 0.5), got $(cfg.oracle_maf_min)"))
     # Validate scope-list FORMAT only (each entry must be `:all`, `:within`,
     # `:genome`, or `:win_<N>pct`). We don't require the scope to exist in
     # `oracle_windows_pct` — unsupported scopes are silently dropped at
@@ -563,6 +588,16 @@ function validate(cfg::Config)
     cfg.ngen >= 0 || throw(ArgumentError("ngen must be >= 0"))
     if cfg.ngen > 0 && (cfg.ngen_eq > 0 || cfg.ngen_dir > 0)
         throw(ArgumentError("set either `ngen` (single-knob mode) OR `ngen_eq`/`ngen_dir` (two-phase mode), not both"))
+    end
+    # Float (t½-multiple) checkpoints require directional mode (a settling phase
+    # to anchor t_half_settled to). They may also infer `ngen_dir` if it is 0.
+    if cfg.checkpoints !== nothing && eltype(cfg.checkpoints) <: AbstractFloat
+        cfg.selection_mode === :directional ||
+            throw(ArgumentError("Float-typed checkpoints (t½ multiples) require selection_mode=:directional; got $(cfg.selection_mode)"))
+        cfg.ngen_eq > 0 ||
+            throw(ArgumentError("Float-typed checkpoints (t½ multiples) require ngen_eq > 0 (settling phase needed to compute t_half_settled)"))
+        all(c -> c > 0, cfg.checkpoints) ||
+            throw(ArgumentError("Float-typed checkpoints must all be > 0; got $(cfg.checkpoints)"))
     end
     cfg.n_int >= -1 || throw(ArgumentError("n_int must be >= -1 (-1 = auto)"))
     # Phase 4 invariants (spatial)

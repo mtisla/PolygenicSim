@@ -111,8 +111,24 @@ function simulate(cfg::Config)
     end
 
     # ---- checkpoint resolution ------------------------------------------
-    checkpoint_gens = _resolve_checkpoints(cfg, total_gens, V_A0, V_P0, Vs)
+    # Int checkpoints resolve to absolute gens upfront (existing behavior).
+    # Float checkpoints (t½ multiples in Phase B) defer resolution to the end
+    # of Phase A, where we have realized V_A/V_P to compute t_half_settled.
+    float_checkpoints_pending = cfg.checkpoints !== nothing &&
+                                 eltype(cfg.checkpoints) <: AbstractFloat
+    checkpoint_gens = float_checkpoints_pending ?
+                        Int[] :
+                        _resolve_checkpoints(cfg, total_gens, V_A0, V_P0, Vs)
     checkpoint_set = Set(checkpoint_gens)
+    # checkpoint_labels: gen -> filename-suffix label, e.g. "gen500" or "0.5_thalf"
+    checkpoint_labels = Dict{Int,String}()
+    for g in checkpoint_gens
+        checkpoint_labels[g] = "gen$(g)"
+    end
+    # Track which gens were specified via Float (t½) checkpoints. Pop-snapshot
+    # emission at these gens is gated on `cfg.save_at_checkpoints`. Int
+    # checkpoints (legacy) always emit a snapshot.
+    float_checkpoint_gens = Set{Int}()
     paths = String[]
 
     # ---- summary trajectory buffer --------------------------------------
@@ -149,13 +165,17 @@ function simulate(cfg::Config)
     if record_init
         tmp = SimResult(pop, vt, deme_id, cfg, 0, nothing, String[], nothing)
         oracle_records[:init] = oracle_stats(tmp)
-        write_oracle_tsv(cfg.output_prefix, oracle_records[:init]; phase=:init)
+        write_oracle_tsv(cfg.output_prefix, oracle_records[:init]; phase=:init, gen=0, maf_min=cfg.oracle_maf_min)
     end
 
     # ---- generation loop ------------------------------------------------
+    # Use a while loop so `total_gens` can be updated at the Phase A / Phase B
+    # boundary when Float checkpoints (t½ multiples) trigger ngen_dir inference.
     step! = pop isa PackedPop ? step_generation_packed! : step_generation_dense!
     expand_step! = pop isa PackedPop ? step_generation_packed_expand! : step_generation_dense_expand!
-    for gen in 1:total_gens
+    gen = 0
+    while gen < total_gens
+        gen += 1
         # Apply recent-structure onset BEFORE this gen is stepped. Swap from
         # the pre-structure panmictic layout to the full grid, rebuild the
         # phase plan (cline kicks in), and resize per-deme work buffers.
@@ -218,10 +238,6 @@ function simulate(cfg::Config)
             vp /= max(1, L - 1)
             push!(conv_buffer, (gen=gen, B=B, var_A=vA_d, mean_p=mp, var_p=vp))
         end
-        if gen in checkpoint_set
-            cp_paths = _emit_checkpoint(cfg, pop, vt, scratch, deme_id, gen)
-            append!(paths, cp_paths)
-        end
         # `:settled` — record oracle at the boundary between Phase A and
         # Phase B (just *after* the last settling gen has been processed,
         # before any directional gen). Equivalent to the end-state of a
@@ -229,7 +245,63 @@ function simulate(cfg::Config)
         if record_settled && gen == ngen_eq_eff
             tmp = SimResult(pop, vt, deme_id, cfg, gen, nothing, paths, nothing)
             oracle_records[:settled] = oracle_stats(tmp)
-            write_oracle_tsv(cfg.output_prefix, oracle_records[:settled]; phase=:settled)
+            write_oracle_tsv(cfg.output_prefix, oracle_records[:settled]; phase=:settled, gen=gen, maf_min=cfg.oracle_maf_min)
+        end
+        # Float (t½-multiple) checkpoint resolution at end of Phase A.
+        # Uses realized V_A / V_P from the settled state for t_half_settled.
+        if float_checkpoints_pending && gen == ngen_eq_eff
+            compute_breeding_values!(scratch, pop, vt)
+            _, vA_settled = population_mean_var(scratch.A)
+            sample_env!(scratch.env, sigma_E, rng)
+            _, vP_settled = population_mean_var(scratch.A .+ scratch.env)
+            if vP_settled > 0
+                t_half_settled = log(2.0) * (vP_settled + Vs) / (cfg.h2 * vP_settled)
+                for c in cfg.checkpoints
+                    g_abs = ngen_eq_eff + max(1, round(Int, c * t_half_settled))
+                    push!(checkpoint_set, g_abs)
+                    push!(float_checkpoint_gens, g_abs)
+                    checkpoint_labels[g_abs] = "$(c)_thalf"
+                end
+                # Auto-infer ngen_dir from the largest checkpoint when caller
+                # left it at 0. Extend total_gens accordingly.
+                if cfg.ngen_dir == 0
+                    max_cp_gen = maximum(checkpoint_set)
+                    ngen_dir_eff = max_cp_gen - ngen_eq_eff
+                    total_gens = max_cp_gen
+                else
+                    # When caller specified ngen_dir explicitly, also emit
+                    # a checkpoint at the end gen so stats are computed there.
+                    end_gen = ngen_eq_eff + ngen_dir_eff
+                    if end_gen ∉ checkpoint_set
+                        push!(checkpoint_set, end_gen)
+                        checkpoint_labels[end_gen] = "gen$(end_gen)"
+                    end
+                    @info "Float checkpoints resolved" t_half_settled checkpoint_gens=sort(collect(checkpoint_set))
+                end
+            else
+                @warn "V_P_settled <= 0 at end of Phase A; Float checkpoints not resolved"
+            end
+            float_checkpoints_pending = false
+        end
+        # Checkpoint emission: oracle TSV always (when :oracle in output_formats),
+        # population snapshot only when save_at_checkpoints == true.
+        if gen in checkpoint_set
+            label = get(checkpoint_labels, gen, "gen$(gen)")
+            if :oracle in cfg.output_formats
+                tmp = SimResult(pop, vt, deme_id, cfg, gen, nothing, paths, nothing)
+                cp_oracle = oracle_stats(tmp)
+                oracle_records[Symbol(label)] = cp_oracle
+                write_oracle_tsv(cfg.output_prefix, cp_oracle;
+                                  phase=Symbol(label), gen=gen, maf_min=cfg.oracle_maf_min)
+            end
+            # Int checkpoints (legacy) always emit a population snapshot.
+            # Float (t½) checkpoints emit a snapshot only when explicitly
+            # opted-in via `save_at_checkpoints=true`.
+            is_float_cp = gen in float_checkpoint_gens
+            if (!is_float_cp) || cfg.save_at_checkpoints
+                cp_paths = _emit_checkpoint(cfg, pop, vt, scratch, deme_id, gen)
+                append!(paths, cp_paths)
+            end
         end
         # save_settled — write a Phase-A snapshot + TOML sidecar to the
         # package's data/settled cache so a follow-on directional run can
@@ -351,9 +423,9 @@ function simulate(cfg::Config)
         oracle_records[:final] = oracle_res
         if length(cfg.oracle_phases) == 1 && cfg.oracle_phases[1] === :final
             # Legacy path: only one phase recorded → emit unsuffixed TSV.
-            write_oracle_tsv(cfg.output_prefix, oracle_res)
+            write_oracle_tsv(cfg.output_prefix, oracle_res; gen=total_gens, maf_min=cfg.oracle_maf_min)
         else
-            write_oracle_tsv(cfg.output_prefix, oracle_res; phase=:final)
+            write_oracle_tsv(cfg.output_prefix, oracle_res; phase=:final, gen=total_gens, maf_min=cfg.oracle_maf_min)
         end
     end
 

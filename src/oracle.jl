@@ -78,17 +78,27 @@ end
 # pop, restricted to polymorphic-QTL sites with α ≠ 0. Returns (X, qtl_keep)
 # where `qtl_keep` is the global-variant-index list (1-indexed) of kept sites.
 function _extract_qtl_genotypes(::Type{T}, pop::PackedPop, vt::VariantTable;
-                                  p_buf::Vector{Float64}) where {T<:AbstractFloat}
+                                  p_buf::Vector{Float64},
+                                  maf_min::Float64=0.0) where {T<:AbstractFloat}
     L = pop.L
     N_total = pop.N
     @assert length(p_buf) == L
     allele_freqs!(p_buf, pop, vt)
-    # Filter: QTL && polymorphic && α ≠ 0
+    # Filter: QTL && α ≠ 0 && MAF >= maf_min.
+    # `MAF >= maf_min` with maf_min > 0 implicitly requires polymorphic
+    # (MAF = 0 only for fixed/lost sites). With maf_min == 0 we keep
+    # back-compat: drop only fixed/lost sites (strict polymorphism).
     qtl_keep = Int[]
     for j in 1:L
-        if vt.is_qtl[j] && vt.alpha[j] != 0.0 && 0.0 < p_buf[j] < 1.0
-            push!(qtl_keep, j)
+        vt.is_qtl[j] || continue
+        vt.alpha[j] != 0.0 || continue
+        p = p_buf[j]
+        if maf_min > 0.0
+            (min(p, 1.0 - p) >= maf_min) || continue
+        else
+            (0.0 < p < 1.0) || continue
         end
+        push!(qtl_keep, j)
     end
     p_qtl = length(qtl_keep)
     if p_qtl == 0
@@ -111,16 +121,23 @@ end
 
 # Same for dense backend.
 function _extract_qtl_genotypes(::Type{T}, pop::DensePop, vt::VariantTable;
-                                  p_buf::Vector{Float64}) where {T<:AbstractFloat}
+                                  p_buf::Vector{Float64},
+                                  maf_min::Float64=0.0) where {T<:AbstractFloat}
     L = pop.L
     N_total = pop.N
     @assert length(p_buf) == L
     allele_freqs!(p_buf, pop, vt)
     qtl_keep = Int[]
     for j in 1:L
-        if vt.is_qtl[j] && vt.alpha[j] != 0.0 && 0.0 < p_buf[j] < 1.0
-            push!(qtl_keep, j)
+        vt.is_qtl[j] || continue
+        vt.alpha[j] != 0.0 || continue
+        p = p_buf[j]
+        if maf_min > 0.0
+            (min(p, 1.0 - p) >= maf_min) || continue
+        else
+            (0.0 < p < 1.0) || continue
         end
+        push!(qtl_keep, j)
     end
     p_qtl = length(qtl_keep)
     if p_qtl == 0
@@ -750,7 +767,8 @@ function oracle_stats(result::SimResult;
                        n_perm::Int                  = result.cfg.oracle_n_perm,
                        memory_path_threshold::Int   = result.cfg.oracle_memory_path_threshold,
                        seed::UInt64                 = result.cfg.seed,
-                       precision::Symbol            = result.cfg.oracle_precision)
+                       precision::Symbol            = result.cfg.oracle_precision,
+                       maf_min::Float64             = result.cfg.oracle_maf_min)
     cfg = result.cfg
     pop = result.pop
     vt  = result.vt
@@ -762,7 +780,7 @@ function oracle_stats(result::SimResult;
         error("oracle_stats: precision must be :Float64 or :Float32, got $precision")
 
     p_buf = zeros(Float64, length(vt))
-    X, qtl_keep = _extract_qtl_genotypes(T, pop, vt; p_buf=p_buf)
+    X, qtl_keep = _extract_qtl_genotypes(T, pop, vt; p_buf=p_buf, maf_min=maf_min)
     p = length(qtl_keep)
     N_total = pop.N
 
@@ -915,11 +933,19 @@ Plus header rows for `p_qtl`, `VA_meta`, `n_total`, `n_demes`, `n_perm`,
 `used_memory_path`.
 """
 function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
-                            phase::Union{Symbol,Nothing}=nothing)
+                            phase::Union{Symbol,Nothing}=nothing,
+                            gen::Union{Int,Nothing}=nothing,
+                            maf_min::Union{Float64,Nothing}=nothing)
     suffix = phase === nothing ? "" : "." * String(phase)
     path = prefix * ".oracle" * suffix * ".tsv"
     open(path, "w") do io
         println(io, "key\tvalue")
+        if gen !== nothing
+            println(io, "meta.gen\t", gen)
+        end
+        if maf_min !== nothing
+            println(io, "meta.maf_min\t", maf_min)
+        end
         println(io, "meta.p_qtl\t",      oracle.p_qtl)
         println(io, "meta.n_total\t",    oracle.n_total)
         println(io, "meta.n_demes\t",    oracle.n_demes)
