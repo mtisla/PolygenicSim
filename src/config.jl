@@ -4,7 +4,7 @@
 Top-level simulation configuration. All fields exposed as keyword arguments to the
 `Config(; ...)` keyword constructor with bulmer-aligned defaults.
 """
-Base.@kwdef struct Config
+Base.@kwdef mutable struct Config
     # population
     N::Int = 5000                                  # diploid size per deme
     Ne::Int = 5000                                 # effective size for θ at init
@@ -14,6 +14,14 @@ Base.@kwdef struct Config
     chr_len_bp::Int = 1_000_000                    # only used for BIM/PLINK bp coordinates
     n_qtl::Int = 1_000
     n_neutral::Int = 0
+    # Optional fraction-based parameterization. When `f_neutral` is set
+    # (not NaN), validate() derives:
+    #   n_neutral = round(Int, n_qtl · f_neutral / (1 − f_neutral))
+    # so `f_neutral = n_neutral / (n_qtl + n_neutral)` — the fraction of
+    # the TOTAL panel that's neutral. Matches the SLiM `fneu = n_neutral / L`
+    # convention. Mutually exclusive with `n_neutral > 0` — pass one or the
+    # other, never both.
+    f_neutral::Float64 = NaN
     # Expected number of crossovers per chromosome per gamete per generation
     # (the genetic-map length of the chromosome in Morgans). Replaces the old
     # `r` (per-bp rate) parameterization — biologically stable across changes
@@ -487,6 +495,29 @@ function validate(cfg::Config)
     cfg.Ne > 0 || throw(ArgumentError("Ne must be > 0"))
     cfg.n_chr > 0 || throw(ArgumentError("n_chr must be > 0"))
     cfg.chr_len_bp > 0 || throw(ArgumentError("chr_len_bp must be > 0"))
+
+    # Resolve fraction-based parameterization. When `f_neutral` is set
+    # (not NaN), derive `n_neutral` from `n_qtl` so that
+    # `f_neutral == n_neutral / (n_qtl + n_neutral)`. Idempotent under
+    # repeated `validate()` calls: re-entering with `cfg.n_neutral`
+    # already equal to the derived value is a no-op (so users can reuse
+    # the same cfg across multiple `simulate()` calls without surprises).
+    # A conflict — explicit `n_neutral > 0` that DOESN'T match the
+    # derived value — still errors.
+    if !isnan(cfg.f_neutral)
+        (0 <= cfg.f_neutral < 1) ||
+            throw(ArgumentError("f_neutral must be in [0, 1) when set"))
+        cfg.n_qtl > 0 ||
+            throw(ArgumentError("f_neutral requires n_qtl > 0"))
+        derived_n_neu = round(Int, cfg.n_qtl * cfg.f_neutral / (1 - cfg.f_neutral))
+        if cfg.n_neutral != 0 && cfg.n_neutral != derived_n_neu
+            throw(ArgumentError("cannot combine n_neutral=$(cfg.n_neutral) with " *
+                                "f_neutral=$(cfg.f_neutral) (would derive " *
+                                "n_neutral=$(derived_n_neu)); pass one or the other"))
+        end
+        cfg.n_neutral = derived_n_neu
+    end
+
     cfg.n_qtl >= 0 || throw(ArgumentError("n_qtl must be >= 0"))
     cfg.n_neutral >= 0 || throw(ArgumentError("n_neutral must be >= 0"))
     n_variants(cfg) > 0 || throw(ArgumentError("n_qtl + n_neutral must be > 0"))

@@ -252,7 +252,8 @@ the value used when the kwarg is omitted.
 | `n_chr` | `Int` | `10` | Number of chromosomes. |
 | `chr_len_bp` | `Int` | `1_000_000` | Length of each chromosome in base pairs. Sets the bp coordinate space for crossovers, BIM output, and `recomb_per_bp = xovers_per_chr / chr_len_bp`. |
 | `n_qtl` | `Int` | `1_000` | Number of QTL sites (contribute to the trait). |
-| `n_neutral` | `Int` | `0` | Number of neutral sites (no effect on trait). `0` → QTL-only fast path. |
+| `n_neutral` | `Int` | `0` | Number of neutral sites (no effect on trait). `0` → QTL-only fast path. Mutually exclusive with `f_neutral` (pass one or the other). |
+| `f_neutral` | `Float64` | `NaN` | Optional fraction-based parameterization: when set, `validate()` derives `n_neutral = round(Int, n_qtl · f_neutral / (1 − f_neutral))` so `f_neutral == n_neutral / (n_qtl + n_neutral)` — the fraction of the *total* panel that's neutral. Validated to `[0, 1)`. Cannot be combined with `n_neutral > 0`; matches the SLiM `fneu = n_neutral / L` convention. |
 | `xovers_per_chr` | `Float64` | `1.0` | Expected crossovers per chromosome per gamete (genetic-map length in Morgans). Each gamete draws `K_c ~ Poisson(xovers_per_chr)`. |
 
 ### Mutation
@@ -1004,7 +1005,18 @@ tbl = PS.overlay_neutral_mutations("run1.anc.zst";
 
 **`mu_per_bp` auto-derivation.** When you pass a `SimResult`, the default
 neutral per-bp rate is computed from `cfg.Uqtl` and the configured
-neutral fraction:
+neutral fraction. Two ways to specify the fraction (pick one):
+
+```julia
+# (i) Explicit counts:
+PS.Config(n_qtl=4_000, n_neutral=96_000, Uqtl=0.02, ...)
+
+# (ii) n_qtl + fraction (matches SLiM's fneu convention):
+PS.Config(n_qtl=4_000, f_neutral=0.96, Uqtl=0.02, ...)
+# validate() rewrites n_neutral = round(4_000 · 0.96 / 0.04) = 96_000 in place.
+```
+
+Either way, downstream:
 
 ```julia
 effective_Uneu(cfg)  = cfg.Uneu  (if set explicitly)
@@ -1126,7 +1138,7 @@ PS.simulate(PS.Config(load_plink_prefix = "external",
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-**496 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
+**512 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
 segregation, Haldane recombination at `d ∈ {0.01, 0.1, 0.5, 1.0} M`,
 cross-chr LD, neutral drift, selection regimes), Phase-2 zero-allocation
 kernels and chunk determinism, Phase-4 spatial structure (DemeLayout, `m=0`

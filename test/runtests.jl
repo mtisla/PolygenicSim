@@ -1800,6 +1800,126 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# Config — fraction parameterization (n_sites + f_neutral → n_qtl + n_neutral)
+# ---------------------------------------------------------------------------
+@testset "Config — f_neutral fraction parameterization" begin
+    # Resolution happens inside validate(), which simulate() calls first.
+    # When f_neutral is set, validate() derives n_neutral from n_qtl so that
+    # f_neutral == n_neutral / (n_qtl + n_neutral).
+
+    # ----- Case A: basic fraction → n_neutral derivation -------------------
+    # n_qtl=4, f_neutral=0.96 ⇒ n_neutral = round(4 · 0.96 / 0.04) = 96.
+    cfg_a = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=20_000,
+        n_qtl=4, f_neutral=0.96,
+        Uqtl=0.02, h2=0.5,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=5,
+        output_formats=Symbol[], n_int=0, seed=UInt64(31),
+    )
+    PS.validate(cfg_a)
+    @test cfg_a.n_qtl == 4
+    @test cfg_a.n_neutral == 96
+    # effective_Uneu now reflects the derived counts.
+    @test PS.effective_Uneu(cfg_a) ≈ 0.02 * 96 / 4
+
+    # ----- Case B: f_neutral = 0 → no neutrals (QTL-only fast path) --------
+    cfg_b = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=20_000,
+        n_qtl=50, f_neutral=0.0,
+        Uqtl=0.02, h2=0.5,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=1,
+        output_formats=Symbol[], n_int=0, seed=UInt64(32),
+    )
+    PS.validate(cfg_b)
+    @test cfg_b.n_qtl == 50
+    @test cfg_b.n_neutral == 0
+
+    # ----- Case C: validation errors ---------------------------------------
+    # f_neutral outside [0, 1).
+    @test_throws ArgumentError PS.validate(PS.Config(
+        n_qtl=10, f_neutral=1.0,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    @test_throws ArgumentError PS.validate(PS.Config(
+        n_qtl=10, f_neutral=-0.1,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # Combining n_neutral > 0 with f_neutral is rejected.
+    @test_throws ArgumentError PS.validate(PS.Config(
+        n_qtl=10, n_neutral=5, f_neutral=0.5,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # f_neutral with n_qtl=0 has nothing to scale from.
+    @test_throws ArgumentError PS.validate(PS.Config(
+        n_qtl=0, f_neutral=0.5,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+
+    # ----- Case D': idempotent re-entry ------------------------------------
+    # Calling validate() twice on the same cfg must NOT throw — users may
+    # reuse a Config across multiple simulate() calls. After the first
+    # call, cfg.n_neutral is derived (e.g. 96 for n_qtl=4, f=0.96); the
+    # second call must accept the already-derived state.
+    cfg_idem = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=20_000,
+        n_qtl=4, f_neutral=0.96,
+        Uqtl=0.02, h2=0.5,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=1,
+        output_formats=Symbol[], n_int=0, seed=UInt64(35),
+    )
+    PS.validate(cfg_idem); PS.validate(cfg_idem); PS.validate(cfg_idem)
+    @test cfg_idem.n_qtl == 4
+    @test cfg_idem.n_neutral == 96
+    # …but if the user manually set n_neutral to a DIFFERENT value that
+    # conflicts with what f_neutral implies, still error.
+    cfg_conflict = PS.Config(
+        n_qtl=10, n_neutral=99,  # 99 ≠ 10·0.5/0.5 = 10
+        f_neutral=0.5,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[])
+    @test_throws ArgumentError PS.validate(cfg_conflict)
+
+    # ----- Case D: backward compat — defaults are unchanged ----------------
+    cfg_d = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=20_000,
+        n_qtl=60, n_neutral=600,
+        Uqtl=0.02, h2=0.5,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=5,
+        output_formats=Symbol[], n_int=0, seed=UInt64(33),
+    )
+    PS.validate(cfg_d)
+    @test cfg_d.n_qtl == 60
+    @test cfg_d.n_neutral == 600
+    @test isnan(cfg_d.f_neutral)
+
+    # ----- Case E: end-to-end — f_neutral feeds the overlay -----------------
+    # n_qtl=60, f_neutral=0.9 ⇒ n_neutral = round(60·9) = 540.
+    # Uneu = Uqtl · n_neutral / n_qtl = 0.02 · 540 / 60 = 0.18.
+    # mu_per_bp_neutral = 0.18 / (2·20_000) = 4.5e-6.
+    cfg_e = PS.Config(
+        N=80, Ne=80, n_chr=2, chr_len_bp=20_000,
+        n_qtl=60, f_neutral=0.9,
+        Uqtl=0.02, h2=0.5,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=10,
+        record_ancestry=true, ancestry_simplify_interval=5,
+        save_ancestry=false,
+        output_formats=Symbol[], n_int=0, seed=UInt64(34),
+        output_prefix=joinpath(mktempdir(), "fr"),
+    )
+    res_e = PS.simulate(cfg_e)
+    @test cfg_e.n_qtl == 60
+    @test cfg_e.n_neutral == 540
+    @test PS.mu_per_bp_neutral(cfg_e) ≈ 4.5e-6
+    tbl_e = PS.overlay_neutral_mutations(res_e; seed=UInt64(7))
+    @test tbl_e.mu_per_bp ≈ 4.5e-6
+end
+
+# ---------------------------------------------------------------------------
 # overlay_neutral_mutations(res::SimResult; ...) — mu_per_bp auto-derivation
 # from cfg.Uqtl + n_neutral fraction via effective_Uneu / (n_chr · chr_len_bp).
 # ---------------------------------------------------------------------------

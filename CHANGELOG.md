@@ -9,6 +9,43 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.13.5] — 2026-05-17
+
+### Added — fraction-based site parameterization (`f_neutral`)
+
+Alternate way to specify the QTL / neutral split: pass `f_neutral`
+(fraction neutral, validated to `[0, 1)`) alongside `n_qtl`, and
+`validate()` derives `n_neutral` so that
+`f_neutral == n_neutral / (n_qtl + n_neutral)`. Matches the SLiM
+`fneu = n_neutral / L` convention.
+
+- **New Config field:** `f_neutral::Float64 = NaN`. Mutually exclusive
+  with `n_neutral > 0` — pass one or the other.
+- **`Config` is now `mutable struct`.** `validate()` resolves
+  `n_qtl + f_neutral` → `n_neutral` in place at the top of `simulate()`,
+  before any consumer reads the field. Existing 23 `cfg.n_qtl` /
+  `cfg.n_neutral` call sites are unchanged. Runtime cost is negligible
+  (Config is allocated once, read many times; field reads stay
+  scalar-cached in hot loops).
+- **Strict validation** (no silent overrides):
+  - `f_neutral ∈ [0, 1)`.
+  - `n_neutral > 0` AND `f_neutral` set together → error.
+  - `f_neutral` set with `n_qtl == 0` → error (nothing to scale from).
+- Pairs cleanly with `overlay_neutral_mutations(res; seed=...)` from
+  0.13.4: the auto-derived `mu_per_bp` flows from `f_neutral` →
+  derived `n_neutral` → `effective_Uneu` → `mu_per_bp_neutral`.
+
+Example:
+```julia
+cfg = PS.Config(n_qtl=4_000, f_neutral=0.96, Uqtl=0.02, ...)
+# validate() rewrites n_neutral = round(4_000 · 0.96 / 0.04) = 96_000
+```
+
+Tests: +16 assertions (512 total) covering derivation, the `f_neutral
+= 0` no-neutrals case (QTL-only fast path), the four validation error
+paths, backward-compat defaults, and end-to-end overlay using the
+fraction-derived `mu_per_bp_neutral`.
+
 ## [0.13.4] — 2026-05-17
 
 ### Added — `overlay_neutral_mutations(res; ...)` with auto-derived `mu_per_bp`
