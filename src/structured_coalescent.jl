@@ -210,11 +210,17 @@ mutable struct CoalescentState
     edges::Vector{Edge}                    # output
     next_node_id::UInt32                   # monotonic node allocator
     total_span::Int64                      # sum of all lineage spans (stop at chr_len_bp)
-    Ne::Int
+    Ne::Int                                 # legacy panmictic Ne (== N_per_deme[1])
+    # === DEMOGRAPHY (Phase 2) ===
+    N_per_deme::Vector{Int}                # population sizes per deme (length n_demes)
+    migration_rate::Float64                # total per-lineage backward rate to ANY other deme
+    deme_count::Vector{Int}                # active lineages per deme (length n_demes)
+    # ============================
     node_times::Vector{Float64}            # node_times[node_id] = backward time
     current_time::Float64                  # cumulative backward time
 end
 
+# Panmictic constructor — backward compat. n_demes = 1, no migration.
 function CoalescentState(K::Int, chr::Int8, chr_len_bp::Int, Ne::Int, seed::UInt64;
                           starting_node_id::UInt32=UInt32(0),
                           initial_capacity::Int=max(4096, 4 * K))
@@ -223,33 +229,81 @@ function CoalescentState(K::Int, chr::Int8, chr_len_bp::Int, Ne::Int, seed::UInt
     free_idx = Int[]
     fen = FenwickTree(max(K, 64))
     rng = Xoshiro(seed)
-
     return CoalescentState(lineages, free_idx, 0, fen, pool, rng, chr,
                              Int32(chr_len_bp), Edge[], starting_node_id,
-                             Int64(0), Ne, Float64[], 0.0)
+                             Int64(0), Ne,
+                             [Ne], 0.0, Int[],
+                             Float64[], 0.0)
 end
 
-# Initialize K leaves: each gets one segment covering the full chromosome,
-# with its own fresh node id. Leaf times set to 0.
+# Structured constructor — n_demes = length(N_per_deme), island-model migration.
+# Each lineage migrates to ANY OTHER deme at total rate `migration_rate` per
+# generation; destination is uniform among the n_demes - 1 other demes.
+function CoalescentState(K_total::Int, chr::Int8, chr_len_bp::Int,
+                          N_per_deme::Vector{Int}, migration_rate::Float64,
+                          seed::UInt64;
+                          starting_node_id::UInt32=UInt32(0),
+                          initial_capacity::Int=max(4096, 4 * K_total))
+    pool = SegmentPool(initial_capacity)
+    lineages = [Lineage() for _ in 1:max(K_total, 64)]
+    free_idx = Int[]
+    fen = FenwickTree(max(K_total, 64))
+    rng = Xoshiro(seed)
+    n_demes = length(N_per_deme)
+    n_demes >= 1 || throw(ArgumentError("N_per_deme must have at least one entry"))
+    migration_rate >= 0 || throw(ArgumentError("migration_rate must be >= 0"))
+    if n_demes == 1 && migration_rate > 0
+        throw(ArgumentError("migration_rate > 0 requires n_demes > 1"))
+    end
+    return CoalescentState(lineages, free_idx, 0, fen, pool, rng, chr,
+                             Int32(chr_len_bp), Edge[], starting_node_id,
+                             Int64(0), N_per_deme[1],
+                             copy(N_per_deme), migration_rate, zeros(Int, n_demes),
+                             Float64[], 0.0)
+end
+
+# Initialize K leaves all in deme 1 (panmictic backward compat).
 function init_leaves!(state::CoalescentState, K::Int)
+    return init_leaves!(state, [K])
+end
+
+# Initialize leaves per deme: K_per_deme[d] leaves in deme d. Each leaf
+# gets a single segment covering the full chromosome with its own fresh
+# node id; leaf times set to 0. Maintains state.deme_count.
+function init_leaves!(state::CoalescentState, K_per_deme::Vector{Int})
     @assert state.n_active == 0
+    n_demes = length(state.N_per_deme)
+    length(K_per_deme) == n_demes ||
+        throw(ArgumentError("K_per_deme length $(length(K_per_deme)) != n_demes $(n_demes)"))
+    K_total = sum(K_per_deme)
     chr_len = state.chr_len_bp
-    fen_resize!(state.fenwick, max(K, 64))
-    for i in 1:K
-        if i > length(state.lineages)
-            push!(state.lineages, Lineage())
-        end
-        node_id = state.next_node_id + UInt32(1)
-        state.next_node_id = node_id
-        segs = seg_single!(state.seg_pool, Int32(1), Int32(chr_len + 1), node_id)
-        state.lineages[i] = Lineage(segs, chr_len, Int8(1), true)
-        fen_update!(state.fenwick, i, Float64(chr_len))
-        state.total_span += Int64(chr_len)
-        while Int(node_id) > length(state.node_times)
-            push!(state.node_times, 0.0)
+    fen_resize!(state.fenwick, max(K_total, 64))
+    if length(state.deme_count) != n_demes
+        resize!(state.deme_count, n_demes)
+        fill!(state.deme_count, 0)
+    else
+        fill!(state.deme_count, 0)
+    end
+    slot = 0
+    for d in 1:n_demes
+        for _ in 1:K_per_deme[d]
+            slot += 1
+            if slot > length(state.lineages)
+                push!(state.lineages, Lineage())
+            end
+            node_id = state.next_node_id + UInt32(1)
+            state.next_node_id = node_id
+            segs = seg_single!(state.seg_pool, Int32(1), Int32(chr_len + 1), node_id)
+            state.lineages[slot] = Lineage(segs, chr_len, Int8(d), true)
+            fen_update!(state.fenwick, slot, Float64(chr_len))
+            state.total_span += Int64(chr_len)
+            state.deme_count[d] += 1
+            while Int(node_id) > length(state.node_times)
+                push!(state.node_times, 0.0)
+            end
         end
     end
-    state.n_active = K
+    state.n_active = K_total
     return nothing
 end
 
@@ -268,7 +322,7 @@ function allocate_lineage!(state::CoalescentState)
 end
 
 # Deactivate a lineage: mark its slot free, zero its Fenwick weight,
-# subtract its span from total_span.
+# subtract its span from total_span, decrement deme_count for its deme.
 function deactivate_lineage!(state::CoalescentState, idx::Int)
     @inbounds lin = state.lineages[idx]
     if !lin.active
@@ -276,9 +330,26 @@ function deactivate_lineage!(state::CoalescentState, idx::Int)
     end
     fen_update!(state.fenwick, idx, -Float64(lin.span))
     state.total_span -= Int64(lin.span)
+    if !isempty(state.deme_count)
+        @inbounds state.deme_count[Int(lin.deme)] -= 1
+    end
     lin.active = false
     push!(state.free_idx, idx)
     state.n_active -= 1
+    return nothing
+end
+
+# Activate a lineage in a specific deme with given segments and span.
+# Maintains Fenwick, total_span, n_active, and deme_count.
+@inline function activate_lineage!(state::CoalescentState, idx::Int,
+                                     segs::SegRef, span::Int32, deme::Int8)
+    @inbounds state.lineages[idx] = Lineage(segs, span, deme, true)
+    state.n_active += 1
+    fen_update!(state.fenwick, idx, Float64(span))
+    state.total_span += Int64(span)
+    if !isempty(state.deme_count)
+        @inbounds state.deme_count[Int(deme)] += 1
+    end
     return nothing
 end
 
@@ -435,14 +506,16 @@ function coalesce_pair!(state::CoalescentState, idx_a::Int, idx_b::Int,
     end
     new_segs = SegRef(Int32(new_off), Int32(n_segs))
 
-    # Deactivate A and B; activate the merged lineage.
+    # Determine merged deme (A and B must be in the same deme — caller's
+    # responsibility; we read from lin_a). The merged lineage inherits
+    # that deme.
+    merged_deme = lin_a.deme
+
+    # Deactivate A and B; activate the merged lineage in the same deme.
     deactivate_lineage!(state, idx_a)
     deactivate_lineage!(state, idx_b)
     new_idx = allocate_lineage!(state)
-    @inbounds state.lineages[new_idx] = Lineage(new_segs, new_span, Int8(1), true)
-    state.n_active += 1
-    fen_update!(state.fenwick, new_idx, Float64(new_span))
-    state.total_span += Int64(new_span)
+    activate_lineage!(state, new_idx, new_segs, new_span, merged_deme)
 
     return new_idx
 end
@@ -553,24 +626,89 @@ function recombine_lineage!(state::CoalescentState, idx::Int, bp::Int32,
     new_left = SegRef(Int32(left_off), Int32(n_left))
     new_right = SegRef(Int32(right_off), Int32(n_right))
 
+    # Both halves stay in the same deme as the parent lineage.
+    parent_deme = lin.deme
+
     # Deactivate the original lineage.
     deactivate_lineage!(state, idx)
 
     # Activate the two child lineages. NO new node ids allocated, NO edges
     # emitted (segments retain their node ids).
     left_idx = allocate_lineage!(state)
-    @inbounds state.lineages[left_idx] = Lineage(new_left, span_left, Int8(1), true)
-    state.n_active += 1
-    fen_update!(state.fenwick, left_idx, Float64(span_left))
-    state.total_span += Int64(span_left)
-
+    activate_lineage!(state, left_idx, new_left, span_left, parent_deme)
     right_idx = allocate_lineage!(state)
-    @inbounds state.lineages[right_idx] = Lineage(new_right, span_right, Int8(1), true)
-    state.n_active += 1
-    fen_update!(state.fenwick, right_idx, Float64(span_right))
-    state.total_span += Int64(span_right)
+    activate_lineage!(state, right_idx, new_right, span_right, parent_deme)
 
     return right_idx
+end
+
+# =============================================================================
+# Migration operator (Phase 2, island model).
+# -----------------------------------------------------------------------------
+# Move a lineage from its current deme to `dest_deme`. NO edges emitted
+# (migration doesn't change ancestry topology; it only relabels which
+# deme the lineage currently inhabits going backward in time). Updates
+# deme_count.
+# =============================================================================
+function migrate_lineage!(state::CoalescentState, idx::Int, dest_deme::Int8)
+    @inbounds lin = state.lineages[idx]
+    src_deme = lin.deme
+    if src_deme == dest_deme
+        return 0
+    end
+    if !isempty(state.deme_count)
+        @inbounds state.deme_count[Int(src_deme)] -= 1
+        @inbounds state.deme_count[Int(dest_deme)] += 1
+    end
+    lin.deme = dest_deme
+    return idx
+end
+
+# Find the i-th active lineage in a specific deme. O(L) scan; acceptable
+# for Phase 2 at small to moderate K.
+function nth_active_lineage_in_deme(state::CoalescentState, deme::Int8, i::Int)
+    count = 0
+    @inbounds for idx in 1:length(state.lineages)
+        lin = state.lineages[idx]
+        if lin.active && lin.deme == deme
+            count += 1
+            if count == i
+                return idx
+            end
+        end
+    end
+    error("nth_active_lineage_in_deme: i=$i exceeds count in deme=$deme " *
+          "(deme_count=$(state.deme_count[Int(deme)]))")
+end
+
+# Compute per-deme coalescent rates and their sum.
+# Writes into pre-allocated `deme_coal_rate` (length n_demes).
+function compute_deme_coal_rates!(deme_coal_rate::Vector{Float64},
+                                    state::CoalescentState)
+    n_demes = length(state.N_per_deme)
+    total = 0.0
+    @inbounds for d in 1:n_demes
+        k_d = state.deme_count[d]
+        N_d = state.N_per_deme[d]
+        rate = k_d > 1 && N_d > 0 ? (Float64(k_d) * Float64(k_d - 1)) / (4.0 * Float64(N_d)) : 0.0
+        deme_coal_rate[d] = rate
+        total += rate
+    end
+    return total
+end
+
+# Sample a deme from `deme_coal_rate` weighted by its rate. Returns the
+# deme index in 1..n_demes.
+function sample_deme(rng::Xoshiro, deme_coal_rate::Vector{Float64}, total::Float64)
+    target = rand(rng) * total
+    cum = 0.0
+    @inbounds for d in 1:length(deme_coal_rate)
+        cum += deme_coal_rate[d]
+        if cum >= target
+            return d
+        end
+    end
+    return length(deme_coal_rate)
 end
 
 # =============================================================================
@@ -587,30 +725,58 @@ end
 function run_coalescent!(state::CoalescentState, r_per_bp::Float64;
                           max_events::Int=10_000_000)
     chr_len = Int64(state.chr_len_bp)
+    n_demes = length(state.N_per_deme)
+    deme_coal_rate = zeros(Float64, n_demes)
+    # Stopping condition: every bp has exactly one ancestor. When
+    # total_span == chr_len_bp, that's equivalent. But when migration
+    # is enabled, lineages in DIFFERENT demes can't coalesce — we may
+    # need to keep simulating until they migrate to the same deme.
+    # The total_span condition still captures "fully resolved per bp"
+    # for both cases (because a lineage continues to carry its AM
+    # regardless of which deme it's in).
     nevents = 0
     while state.total_span > chr_len
         k = state.n_active
         if k <= 1
             break
         end
-        coal_rate = (k * (k - 1)) / (4.0 * state.Ne)
+        # Per-deme coalescent rates.
+        coal_rate = compute_deme_coal_rates!(deme_coal_rate, state)
+        # Total migration rate: each active lineage migrates at rate
+        # state.migration_rate (total over all destinations).
+        mig_rate = state.migration_rate > 0 ? Float64(k) * state.migration_rate : 0.0
+        # Recombination rate.
         recomb_rate = Float64(state.total_span) * r_per_bp
-        total_rate = coal_rate + recomb_rate
+        total_rate = coal_rate + mig_rate + recomb_rate
         if total_rate <= 0.0
             break
         end
         dt = randexp(state.rng) / total_rate
         state.current_time += dt
-        if rand(state.rng) < coal_rate / total_rate
-            # Coalescence.
-            i1 = rand(state.rng, 1:k)
-            i2 = rand(state.rng, 1:(k - 1))
+        u = rand(state.rng) * total_rate
+        if u < coal_rate
+            # Coalescence — pick a deme, then 2 distinct lineages within it.
+            d = sample_deme(state.rng, deme_coal_rate, coal_rate)
+            k_d = state.deme_count[d]
+            i1 = rand(state.rng, 1:k_d)
+            i2 = rand(state.rng, 1:(k_d - 1))
             if i2 >= i1
                 i2 += 1
             end
-            idx1 = nth_active_lineage(state, i1)
-            idx2 = nth_active_lineage(state, i2)
+            idx1 = nth_active_lineage_in_deme(state, Int8(d), i1)
+            idx2 = nth_active_lineage_in_deme(state, Int8(d), i2)
             coalesce_pair!(state, idx1, idx2, state.current_time)
+        elseif u < coal_rate + mig_rate
+            # Migration — pick a lineage uniformly, then a destination deme
+            # uniformly among the other n_demes - 1.
+            n_demes >= 2 || continue
+            i = rand(state.rng, 1:k)
+            idx = nth_active_lineage(state, i)
+            @inbounds src_deme = state.lineages[idx].deme
+            # Pick dest != src.
+            r = rand(state.rng, 1:(n_demes - 1))
+            dest = r >= Int(src_deme) ? r + 1 : r
+            migrate_lineage!(state, idx, Int8(dest))
         else
             # Recombination — pick lineage proportional to span via Fenwick.
             target = rand(state.rng) * fen_total(state.fenwick)
@@ -628,7 +794,7 @@ function run_coalescent!(state::CoalescentState, r_per_bp::Float64;
         nevents += 1
         if nevents >= max_events
             error("run_coalescent!: max_events ($max_events) exceeded; " *
-                  "likely a parameter producing runaway recombination")
+                  "likely a parameter producing runaway recombination/migration")
         end
     end
     return state.current_time

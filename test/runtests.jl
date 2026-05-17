@@ -2276,4 +2276,146 @@ end
     end
 end
 
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 2: multi-deme demography + migration.
+# Validates the structured (island-model) backward coalescent. Each lineage
+# migrates between demes at rate `migration_rate`; coalescence happens only
+# WITHIN the same deme. Validation: 2-deme symmetric coalescent recovers
+# F_ST ≈ 1/(1 + 4N · m) within a sensible tolerance.
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — demography + migration (Phase 2)" begin
+    # Helper: in a no-recomb tree, find the MRCA time for every leaf pair.
+    function pairwise_mrca_times(state::PS.CoalescentState, K::Int)
+        # Build child → parent map (no recomb ⇒ each non-root has one parent).
+        parent = Dict{UInt32,UInt32}()
+        for e in state.edges
+            parent[e.child_node] = e.parent_node
+        end
+        # For each leaf, build the chain of ancestors (set of node ids).
+        ancestor_set = Dict{UInt32,Set{UInt32}}()
+        for i in 1:K
+            s = Set{UInt32}()
+            node = UInt32(i)
+            push!(s, node)
+            while haskey(parent, node)
+                node = parent[node]
+                push!(s, node)
+            end
+            ancestor_set[UInt32(i)] = s
+        end
+        T = zeros(Float64, K, K)
+        for i in 1:K
+            chain_i = ancestor_set[UInt32(i)]
+            node = UInt32(i)
+            # Walk i's ancestry upward, checking j's ancestor set.
+            for j in (i+1):K
+                set_j = ancestor_set[UInt32(j)]
+                # Walk i's chain to find first common ancestor.
+                walk = UInt32(i)
+                while !(walk in set_j)
+                    walk = parent[walk]
+                end
+                t = state.node_times[Int(walk)]
+                T[i, j] = t
+                T[j, i] = t
+            end
+        end
+        return T
+    end
+
+    # ----- Smoke: 2-deme structured coalescent completes -----------------
+    K_per_deme = [10, 10]
+    K_total = sum(K_per_deme)
+    N_per_deme = [50, 50]
+    mig = 0.01
+    state = PS.CoalescentState(K_total, Int8(1), 100, N_per_deme, mig, UInt64(42))
+    PS.init_leaves!(state, K_per_deme)
+    @test state.n_active == K_total
+    @test state.deme_count == K_per_deme
+    @test state.N_per_deme == N_per_deme
+    @test state.migration_rate == mig
+    t_mrca = PS.run_coalescent!(state, 0.0)
+    @test state.n_active == 1                       # single MRCA reached
+    @test state.total_span == 100                   # all bp resolved
+    @test t_mrca > 0
+
+    # ----- Determinism: same seed → same edges in structured run --------
+    s1 = PS.CoalescentState(K_total, Int8(1), 100, N_per_deme, mig, UInt64(99))
+    PS.init_leaves!(s1, K_per_deme)
+    t1 = PS.run_coalescent!(s1, 0.0)
+    s2 = PS.CoalescentState(K_total, Int8(1), 100, N_per_deme, mig, UInt64(99))
+    PS.init_leaves!(s2, K_per_deme)
+    t2 = PS.run_coalescent!(s2, 0.0)
+    @test t1 == t2
+    @test length(s1.edges) == length(s2.edges)
+
+    # ----- Validation: T_w < T_b under low-to-moderate migration --------
+    # Within-deme pairs should coalesce faster on average than between-deme
+    # pairs (which must first migrate to the same deme).
+    K_per = [15, 15]
+    Kt = sum(K_per)
+    N_per = [100, 100]
+    m = 0.002
+    nreps = 100
+    Tw_sum = 0.0; Tw_count = 0
+    Tb_sum = 0.0; Tb_count = 0
+    for rep in 1:nreps
+        s = PS.CoalescentState(Kt, Int8(1), 100, N_per, m, UInt64(5000 + rep))
+        PS.init_leaves!(s, K_per)
+        PS.run_coalescent!(s, 0.0)
+        T = pairwise_mrca_times(s, Kt)
+        # Leaves 1..15 are in deme 1 (init order), 16..30 in deme 2.
+        for i in 1:Kt, j in (i+1):Kt
+            same_deme = (i <= 15 && j <= 15) || (i > 15 && j > 15)
+            if same_deme
+                Tw_sum += T[i, j]; Tw_count += 1
+            else
+                Tb_sum += T[i, j]; Tb_count += 1
+            end
+        end
+    end
+    T_w = Tw_sum / Tw_count
+    T_b = Tb_sum / Tb_count
+    @test T_w > 0
+    @test T_b > 0
+    @test T_b > T_w                                 # between > within (qualitative)
+    # F_ST = 1 - T_w / T_b. For 2-deme symmetric with per-lineage
+    # backward migration rate m to the other deme:
+    #   T_w = 4N  (limit as m → ∞: panmictic 2N-individual pop)
+    #   T_b = 1/(2m) + T_w
+    #   F_ST = 1/(1 + 8Nm)
+    # For N=100, m=0.002: F_ST ≈ 0.385. (Wright's classical 1/(1+4Nm)
+    # formula uses a different m convention — forward migrant fraction
+    # — and produces ~2× our F_ST.)
+    F_ST = 1.0 - T_w / T_b
+    F_ST_theoretical = 1.0 / (1.0 + 8.0 * 100.0 * m)
+    @test 0 < F_ST < 1
+    # Within ±20% of theory: tight statistical band that confirms the
+    # migration kernel is implemented per our convention.
+    @test 0.8 * F_ST_theoretical < F_ST < 1.2 * F_ST_theoretical
+
+    # ----- Migration extreme cases --------------------------------------
+    # m = 0: between-deme pairs should NEVER coalesce. Total_span won't
+    # reach chr_len_bp; the run will stop at n_active <= 1 anyway because
+    # eventually only one lineage per deme remains and they can't coalesce.
+    # We just check that the simulation terminates without error and
+    # produces n_active >= n_demes (= 2 in this case).
+    s_nomig = PS.CoalescentState(Kt, Int8(1), 100, N_per, 0.0, UInt64(31))
+    PS.init_leaves!(s_nomig, K_per)
+    PS.run_coalescent!(s_nomig, 0.0)
+    @test s_nomig.n_active >= 1                     # at least one lineage per deme
+    # Under m=0 with 2 demes, expect exactly 2 lineages remaining (one per deme).
+    @test s_nomig.n_active == 2
+
+    # ----- Backward compat: panmictic constructor still works ----------
+    s_panmictic = PS.CoalescentState(20, Int8(1), 100, 50, UInt64(101))
+    PS.init_leaves!(s_panmictic, 20)
+    @test s_panmictic.n_active == 20
+    @test s_panmictic.deme_count == [20]
+    @test s_panmictic.N_per_deme == [50]
+    @test s_panmictic.migration_rate == 0.0
+    PS.run_coalescent!(s_panmictic, 0.0)
+    @test s_panmictic.n_active == 1                 # full coalescence
+end
+
 end # @testset top-level
