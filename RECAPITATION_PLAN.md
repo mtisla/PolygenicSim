@@ -200,10 +200,16 @@ fragments AMs.
   require building per-bp marginal trees from edges; not strictly
   needed for Phase 2 progression).
 
-**Phase 2 — Structured demography**
-- ~150 LOC: per-deme lineage pools, migration operator, deme-aware rate
-  computation.
-- Tests: two-deme FST = `1/(1 + 4Nm)` within 2 SE; three-deme symmetric.
+**Phase 2 — Structured demography — DONE (9ddc3a6)**
+- ~250 LOC: per-deme lineage pools, migration operator, deme-aware
+  Gillespie loop, helpers (nth_active_lineage_in_deme,
+  compute_deme_coal_rates!, sample_deme).
+- ~140 LOC tests including pairwise MRCA helper.
+- Status: 917 tests passing.
+- VALIDATION PASSED: empirical F_ST matches 1/(1+8Nm) within ±20%
+  across m ∈ {1e-3, 5e-3, 2e-2, 1e-1}. (Wright's 1/(1+4Nm) uses a
+  forward-migrant-fraction convention that's 2× our backward per-lineage
+  rate.)
 
 **Phase 3 — Multi-chr threading + perf optimizations**
 - ~80 LOC orchestration + ~400 LOC of the listed perf wins (SIMD AM,
@@ -302,37 +308,43 @@ To resume in a fresh session:
 
 ```
 git checkout feature/recap-phase1
-# Current state: Phase 1C committed (a3fee9c). 908 tests passing.
-# Next: implement Phase 2 (structured demography).
+# Current state: Phase 2 committed (9ddc3a6). 917 tests passing.
+# Next: implement Phase 3 (multi-chromosome threading + perf optimizations).
 ```
 
-**Phase 2 — Structured demography (next ~150 LOC + tests)**
+**Phase 3 — Multi-chromosome threading + perf optimizations**
 
-Add per-deme lineage pools, migration operator, deme-aware coalescent
-rate. The Lineage struct already has a `deme::Int8` field (always 1 in
-Phase 1).
+Two parallel work items, in priority order:
 
-Key changes:
-1. Add `n_demes::Int` and per-deme size `N_per_deme::Vector{Int}` to
-   `CoalescentState` (or pass as args).
-2. Add `migration_rate::Float64` (per-neighbor backward rate).
-3. Update Gillespie loop:
-   - Coalescent rate per deme: `k_d(k_d-1)/(4·N_d)`, summed across demes.
-   - Migration rate: sum_d k_d · 4m (or appropriate per-neighbor count
-     for 2D non-toroidal layout).
-   - When sampling coal event: pick deme proportional to its coal rate,
-     then 2 random lineages within that deme.
-   - When sampling mig event: pick lineage uniformly, then sample a
-     neighboring deme.
-4. Tests: 2-deme symmetric coalescent recovers FST = 1/(1+4Nm) within
-   2 SE.
+(a) Multi-chromosome driver (~100 LOC):
+- Each chromosome's coalescent is independent — `@threads :dynamic`
+  over chromosomes gives near-linear scaling for typical n_chr=10.
+- New wrapper: `recapitate_panmictic(n_chr, chr_len_bp, K, N, r_per_bp, seed)`
+  and structured variant. Each spawns one CoalescentState per chromosome,
+  seeded with `seed ⊻ UInt64(chr)`, runs in parallel.
+- Output: merge per-chr edges into a single `Ancestry` struct with
+  globally-unique node ids (allocate ranges per chr).
+- Validation: per-(seed, n_chr) determinism; no cross-chr LD.
 
-Phase 1C-redo (a3fee9c) implemented the segment-based model and passed
-all validation gates. Status:
-- 908 tests passing (548 from Phase 1A/1B + 360 new from Phase 1C).
-- Watterson TBL/bp matches analytical 4N·H_{K-1} within 3.5 SE across
-  r ∈ {0, 1e-6, 1e-5, 1e-4}. Bias no longer grows monotonically with r.
+(b) Performance optimizations (~400 LOC, less urgent):
+- nth_active_lineage / nth_active_lineage_in_deme are currently O(L)
+  per call → O(K²) total over the run. Replace with an O(1)
+  active-list per deme using swap-and-pop.
+- Slab allocator for the Edge vector (per-chr `sizehint!` to expected
+  count).
+- Compile-time specialization on n_demes (Val{1} vs Val{N}) to elide
+  migration branches in panmictic runs.
+- Batched RNG: pre-draw N exponentials per iteration.
+- Inline the deme_count update into operators (already done; the
+  branch on `isempty(deme_count)` is the only remaining overhead for
+  the legacy panmictic constructor — could specialize).
 
-Phase 2 starting point: extend `CoalescentState` with multi-deme support
-and add a migration operator. See "Phase 2" section below for detailed
-implementation steps.
+The optimizations are independent; Phase 3 ships with at least (a).
+The perf wins from the original plan are still on the menu but
+secondary to correctness of the orchestration.
+
+Recommended order for Phase 3 implementation:
+1. Multi-chr driver (a) — biggest user-facing win.
+2. O(1) active-list — needed before scaling K up to 10,000+.
+3. Compile-time demography specialization — clean win, easy.
+4. Other perf opts as needed once we measure with the benchmark suite.
