@@ -154,6 +154,19 @@ function simulate(cfg::Config)
     # Phases at which we record an oracle snapshot: a subset of
     # {:init, :settled, :final} per cfg.oracle_phases.
     oracle_records = Dict{Symbol,OracleResult}()
+
+    # ---- ancestry recording (SLiM-recapitation analog) -----------------
+    # When `cfg.record_ancestry`, allocate an Ancestry recorder and pass it
+    # into `step_generation_packed!` each generation. Periodic `simplify!`
+    # drops dead lineages. Written to `{prefix}.anc.zst` at end of run.
+    # Only supported on the :packed backend (dense backend ignores).
+    ancestry = (cfg.record_ancestry && pop isa PackedPop) ?
+        Ancestry(pop.N, cfg.n_chr, cfg.chr_len_bp;
+                   simplify_interval=cfg.ancestry_simplify_interval) :
+        nothing
+    if cfg.record_ancestry && pop isa DensePop
+        @warn "record_ancestry=true is not supported on the :dense backend; ignoring"
+    end
     oracle_enabled = :oracle in cfg.output_formats
     record_init    = oracle_enabled && :init    in cfg.oracle_phases
     record_settled = oracle_enabled && :settled in cfg.oracle_phases && ngen_eq_eff > 0
@@ -206,8 +219,15 @@ function simulate(cfg::Config)
             for i in 1:new_total
                 deme_id[i] = deme_of(scratch.layout, i)
             end
+            # Ancestry: expansion changes N. For now we disallow combining
+            # ancestry recording with expansion (would require resizing
+            # node_of_col mid-run); flag with @warn once.
+            if ancestry !== nothing
+                @warn "record_ancestry is enabled with expansion: ancestry indices may not be valid post-expansion (unsupported combination)"
+            end
         else
-            step!(pop, vt, cfg, phase, scratch, rng, gen_in_phase)
+            step!(pop, vt, cfg, phase, scratch, rng, gen_in_phase;
+                   _ancestry_kwarg(ancestry, pop)...)
         end
         # ISM lost-site reclamation. Slots that have reached popcount=0
         # are returned to `ism_free_slots`; fixed sites stay in qtl_idx.
@@ -216,6 +236,14 @@ function simulate(cfg::Config)
             if scratch.ism_cleanup_counter >= cfg.ism_cleanup_interval
                 cleanup_ism!(pop, vt, scratch)
             end
+        end
+        # Periodic ancestry simplification (drops dead lineages).
+        if ancestry !== nothing &&
+           ancestry.gen_counter > 0 &&
+           ancestry.gen_counter % cfg.ancestry_simplify_interval == 0
+            # Refresh sample_nodes to the current generation before simplify.
+            copyto!(ancestry.sample_nodes, ancestry.node_of_col)
+            simplify!(ancestry)
         end
         if n_int > 0 && (gen % n_int == 0 || gen == total_gens)
             # Within-deme weighted-average diagnostics. For panmictic
@@ -429,6 +457,15 @@ function simulate(cfg::Config)
         end
     end
 
+    # ---- ancestry: final simplify + write to disk ----------------------
+    if ancestry !== nothing
+        copyto!(ancestry.sample_nodes, ancestry.node_of_col)
+        simplify!(ancestry)
+        anc_path = write_ancestry(cfg.output_prefix, ancestry)
+        push!(paths, anc_path)
+        @info "ancestry recorded" path=anc_path n_edges=length(ancestry.edges) n_nodes=Int(ancestry.next_node - 1)
+    end
+
     return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths,
                        oracle_res, oracle_records)
 end
@@ -543,6 +580,16 @@ function _build_phase_plan(cfg::Config, mean_A0::Float64, V_P0::Float64,
         error("unhandled selection_mode")
     end
     return phase_A, phase_B
+end
+
+# Build the per-step kwarg pack for `step_generation_packed!`. The dense
+# backend's step function takes no ancestry kwarg; we only pass it when
+# we have a recorder AND we're on the packed backend.
+@inline function _ancestry_kwarg(ancestry, pop)
+    if ancestry === nothing || !(pop isa PackedPop)
+        return NamedTuple()
+    end
+    return (ancestry = ancestry,)
 end
 
 function _resolve_checkpoints(cfg::Config, total_gens::Int, V_A::Float64,

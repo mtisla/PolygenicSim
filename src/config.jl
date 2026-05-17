@@ -174,6 +174,18 @@ Base.@kwdef struct Config
     # of full genotype dumps.
     save_at_checkpoints::Bool = false
 
+    # Ancestry recording (SLiM-recapitation analog). When true, the simulator
+    # records a per-generation edge table mapping every offspring haplotype
+    # back to its parent haplotype(s) over inherited segments. After the run,
+    # `overlay_neutral_mutations(prefix)` can place neutral mutations along
+    # surviving lineages — decoupling marker-panel size from selection-
+    # simulation cost. Output: `{output_prefix}.anc.zst` + sidecar TOML.
+    record_ancestry::Bool = false
+    # How often (in generations) to run `simplify!` on the edge table.
+    # Higher = bigger memory peak between simplifies; lower = more simplify
+    # passes. Default 100 matches SLiM's tskit default.
+    ancestry_simplify_interval::Int = 100
+
     # output
     output_formats::Vector{Symbol} = Symbol[:plink]
     output_prefix::String = "polygenicsim"
@@ -548,6 +560,8 @@ function validate(cfg::Config)
         throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
     (0.0 <= cfg.oracle_maf_min < 0.5) ||
         throw(ArgumentError("oracle_maf_min must be in [0, 0.5), got $(cfg.oracle_maf_min)"))
+    cfg.ancestry_simplify_interval >= 1 ||
+        throw(ArgumentError("ancestry_simplify_interval must be >= 1, got $(cfg.ancestry_simplify_interval)"))
     # Validate scope-list FORMAT only (each entry must be `:all`, `:within`,
     # `:genome`, or `:win_<N>pct`). We don't require the scope to exist in
     # `oracle_windows_pct` — unsupported scopes are silently dropped at

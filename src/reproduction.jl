@@ -44,6 +44,9 @@ mutable struct GenScratch
     chunk_recomb::Vector{RecombScratch}
     chunk_offspring_lo::Vector{Int}
     chunk_offspring_hi::Vector{Int}
+    # ---- Ancestry recording (per-thread edge buffers; empty unless
+    # cfg.record_ancestry is true). One Vector{Edge} per chunk, sized once.
+    chunk_edges::Vector{Vector{Edge}}
     # ---- ISM-only state (empty under :finite_sites) -----------------------
     ism_free_slots::Vector{Int}        # stack of currently-free slot indices
     ism_hap_idx::Vector{Int}           # batch scratch for new mutation haplotypes
@@ -93,12 +96,17 @@ function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
     cc = _resolve_chunk_count(cfg)
     chunk_rngs = Vector{Xoshiro}(undef, cc)
     chunk_recomb = Vector{RecombScratch}(undef, cc)
+    chunk_edges = Vector{Vector{Edge}}(undef, cc)
     lo = Vector{Int}(undef, cc)
     hi = Vector{Int}(undef, cc)
     chunk_size = cld(N_total, cc)
     @inbounds for k in 1:cc
         chunk_rngs[k]   = spawn_rng(master, k)
         chunk_recomb[k] = RecombScratch()
+        chunk_edges[k]  = Edge[]
+        if cfg.record_ancestry
+            sizehint_chunk_edges!(chunk_edges[k], chunk_size, cfg.n_chr, cfg.xovers_per_chr)
+        end
         lo[k] = (k - 1) * chunk_size + 1
         hi[k] = min(k * chunk_size, N_total)
     end
@@ -130,6 +138,7 @@ function GenScratch(cfg::Config, vt::VariantTable, master::Xoshiro,
         chunk_rngs,
         chunk_recomb,
         lo, hi,
+        chunk_edges,
         ism_free_slots,
         ism_hap_idx,
         ism_alpha_buf,
@@ -220,18 +229,49 @@ end
 function _do_chunk_packed!(pop::PackedPop, vt::VariantTable, cfg::Config,
                               cumw::Vector{Float64}, layout::DemeLayout,
                               rng::Xoshiro, recomb::RecombScratch,
-                              lo::Int, hi::Int)
+                              lo::Int, hi::Int,
+                              edge_buf::Union{Nothing,Vector{Edge}}=nothing,
+                              parent_node_of_col::Union{Nothing,Vector{UInt32}}=nothing,
+                              child_node_of_col::Union{Nothing,Vector{UInt32}}=nothing)
     @inbounds begin
         i = lo
-        while i <= hi
-            d = deme_of(layout, i)
-            d_mom = sample_source_deme(rng, layout, d)
-            mom = sample_parent_in_deme(rng, cumw, layout, d_mom)
-            d_dad = sample_source_deme(rng, layout, d)
-            dad = sample_parent_in_deme(rng, cumw, layout, d_dad)
-            gamete_packed!(view(pop.H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng, recomb)
-            gamete_packed!(view(pop.H_buf, :, 2i),     pop.H, dad, vt, cfg, rng, recomb)
-            i += 1
+        if edge_buf === nothing
+            # Fast path: no ancestry recording.
+            while i <= hi
+                d = deme_of(layout, i)
+                d_mom = sample_source_deme(rng, layout, d)
+                mom = sample_parent_in_deme(rng, cumw, layout, d_mom)
+                d_dad = sample_source_deme(rng, layout, d)
+                dad = sample_parent_in_deme(rng, cumw, layout, d_dad)
+                gamete_packed!(view(pop.H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng, recomb)
+                gamete_packed!(view(pop.H_buf, :, 2i),     pop.H, dad, vt, cfg, rng, recomb)
+                i += 1
+            end
+        else
+            # Recording path: look up node ids per (parent, child) and pass
+            # them as kwargs so gamete_packed! emits edges into edge_buf.
+            while i <= hi
+                d = deme_of(layout, i)
+                d_mom = sample_source_deme(rng, layout, d)
+                mom = sample_parent_in_deme(rng, cumw, layout, d_mom)
+                d_dad = sample_source_deme(rng, layout, d)
+                dad = sample_parent_in_deme(rng, cumw, layout, d_dad)
+                ph1_m = parent_node_of_col[2*mom - 1]
+                ph2_m = parent_node_of_col[2*mom]
+                ph1_d = parent_node_of_col[2*dad - 1]
+                ph2_d = parent_node_of_col[2*dad]
+                c_mat = child_node_of_col[2*i - 1]
+                c_pat = child_node_of_col[2*i]
+                gamete_packed!(view(pop.H_buf, :, 2i - 1), pop.H, mom, vt, cfg, rng, recomb;
+                                 edge_buf=edge_buf,
+                                 parent_node_h1=ph1_m, parent_node_h2=ph2_m,
+                                 child_node=c_mat)
+                gamete_packed!(view(pop.H_buf, :, 2i),     pop.H, dad, vt, cfg, rng, recomb;
+                                 edge_buf=edge_buf,
+                                 parent_node_h1=ph1_d, parent_node_h2=ph2_d,
+                                 child_node=c_pat)
+                i += 1
+            end
         end
     end
     return nothing
@@ -282,7 +322,8 @@ end
 # ---------------------------------------------------------------------------
 function step_generation_packed!(pop::PackedPop, vt::VariantTable, cfg::Config,
                                    phase::PhaseSelection, scratch::GenScratch,
-                                   rng::Xoshiro, gen_in_phase::Integer)
+                                   rng::Xoshiro, gen_in_phase::Integer;
+                                   ancestry::Union{Nothing,Ancestry}=nothing)
     layout = scratch.layout
     compute_breeding_values!(scratch, pop, vt)
     sample_env!(scratch.env, phase.sigma_E, rng)
@@ -290,29 +331,49 @@ function step_generation_packed!(pop::PackedPop, vt::VariantTable, cfg::Config,
     fill_cumulative_per_deme!(scratch.cumw, scratch.w, layout)
     cc = scratch.chunk_count
     use_threads = _resolve_chunk_count(cfg) > 1 && Threads.nthreads() > 1
+    # Pre-allocate next-gen node ids if recording. Done serially BEFORE the
+    # @threads block so threads only do read-only lookups → no contention.
+    new_node_of_col = nothing
+    parent_node_of_col = nothing
+    if ancestry !== nothing
+        twoN = 2 * pop.N
+        new_node_of_col = allocate_child_nodes!(ancestry, twoN)
+        parent_node_of_col = ancestry.node_of_col
+    end
     if use_threads
         Threads.@threads :static for k in 1:cc
             scratch.chunk_offspring_lo[k] <= scratch.chunk_offspring_hi[k] || continue
+            edge_buf = ancestry === nothing ? nothing : scratch.chunk_edges[k]
             _do_chunk_packed!(pop, vt, cfg, scratch.cumw, layout,
                                 scratch.chunk_rngs[k], scratch.chunk_recomb[k],
                                 scratch.chunk_offspring_lo[k],
-                                scratch.chunk_offspring_hi[k])
+                                scratch.chunk_offspring_hi[k],
+                                edge_buf, parent_node_of_col, new_node_of_col)
         end
     else
         @inbounds begin
             k = 1
             while k <= cc
                 if scratch.chunk_offspring_lo[k] <= scratch.chunk_offspring_hi[k]
+                    edge_buf = ancestry === nothing ? nothing : scratch.chunk_edges[k]
                     _do_chunk_packed!(pop, vt, cfg, scratch.cumw, layout,
                                         scratch.chunk_rngs[k], scratch.chunk_recomb[k],
                                         scratch.chunk_offspring_lo[k],
-                                        scratch.chunk_offspring_hi[k])
+                                        scratch.chunk_offspring_hi[k],
+                                        edge_buf, parent_node_of_col, new_node_of_col)
                 end
                 k += 1
             end
         end
     end
     mutate_packed!(pop, cfg, scratch, vt, rng)
+    # Merge per-chunk edge buffers + rotate node_of_col BEFORE swap_buffers!
+    # so the parent indices (still referring to the OLD generation's columns)
+    # are correctly mapped.
+    if ancestry !== nothing
+        merge_chunk_edges!(ancestry, scratch.chunk_edges)
+        finalize_generation!(ancestry, new_node_of_col)
+    end
     swap_buffers!(pop)
     return nothing
 end

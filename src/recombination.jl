@@ -201,12 +201,17 @@ zero allocations. Per-chromosome dispatch on number of crossovers (K):
 function gamete_packed!(g_col::AbstractVector{UInt64},
                         H::Matrix{UInt64}, parent_idx::Int,
                         vt::VariantTable, cfg::Config,
-                        rng::Xoshiro, scratch::RecombScratch)
+                        rng::Xoshiro, scratch::RecombScratch;
+                        edge_buf::Union{Nothing,Vector}=nothing,
+                        parent_node_h1::UInt32=UInt32(0),
+                        parent_node_h2::UInt32=UInt32(0),
+                        child_node::UInt32=UInt32(0))
     h1_col = 2 * parent_idx - 1
     h2_col = 2 * parent_idx
     fill!(g_col, UInt64(0))
     sample_breakpoints!(scratch, rng, vt, cfg)
     n_chr = cfg.n_chr
+    chr_len_bp = cfg.chr_len_bp
     c = 1
     @inbounds while c <= n_chr
         j_lo = Int(vt.chr_start[c])
@@ -227,8 +232,50 @@ function gamete_packed!(g_col::AbstractVector{UInt64},
                                           j_lo, j_hi,
                                           scratch.break_idx, bp_lo, bp_hi, init_src)
             end
+            # Ancestry edge emission. Zero overhead when `edge_buf === nothing`.
+            # K + 1 segments alternating between parental haplotypes; bp ranges
+            # are derived from the breakpoint variant positions.
+            if edge_buf !== nothing
+                _emit_chr_edges!(edge_buf, scratch.break_idx, vt.bp,
+                                   bp_lo, bp_hi, K, init_src,
+                                   parent_node_h1, parent_node_h2,
+                                   child_node, Int8(c), Int32(chr_len_bp + 1))
+            end
         end
         c += 1
+    end
+    return nothing
+end
+
+# Emit `K + 1` Edge records spanning one chromosome's inherited segments.
+# Convention: each Edge is `[left_bp, right_bp)` (half-open). Segment 0 starts
+# at bp 1 of the chromosome and ends at bp of the first breakpoint variant.
+# Last segment ends at `chr_end_bp` (= chr_len_bp + 1, exclusive).
+@inline function _emit_chr_edges!(edge_buf::Vector,
+                                    break_idx::AbstractVector{Int32},
+                                    vt_bp::AbstractVector{Int32},
+                                    bp_lo::Int, bp_hi::Int, K::Int,
+                                    init_src::Int,
+                                    parent_node_h1::UInt32,
+                                    parent_node_h2::UInt32,
+                                    child_node::UInt32,
+                                    chr::Int8, chr_end_bp::Int32)
+    cur_src = init_src
+    cur_left = Int32(1)
+    @inbounds for k in 0:K
+        right_bp = k < K ?
+            Int32(vt_bp[Int(break_idx[bp_lo + k])]) :
+            chr_end_bp
+        if right_bp <= cur_left
+            # Degenerate (back-to-back breakpoints at same bp); skip but still
+            # toggle source so alternation accounting stays consistent.
+            cur_src = 3 - cur_src
+            continue
+        end
+        pnode = cur_src == 1 ? parent_node_h1 : parent_node_h2
+        push!(edge_buf, Edge(pnode, child_node, cur_left, right_bp, chr))
+        cur_src = 3 - cur_src
+        cur_left = right_bp
     end
     return nothing
 end

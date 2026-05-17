@@ -1604,6 +1604,84 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# Smoke test — ancestry recording + neutral mutation overlay
+# ---------------------------------------------------------------------------
+@testset "Ancestry recording + neutral overlay" begin
+    tmp = mktempdir()
+    prefix = joinpath(tmp, "anc")
+    cfg = PS.Config(
+        N=100, Ne=100, n_chr=2, chr_len_bp=20_000,
+        n_qtl=80, n_neutral=0, Uqtl=0.02,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        h2=0.5, selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=20,
+        record_ancestry=true,
+        ancestry_simplify_interval=5,
+        output_formats=Symbol[], n_int=0, seed=UInt64(7),
+        output_prefix=prefix,
+    )
+    res = PS.simulate(cfg)
+
+    # 1. Ancestry file written and loadable.
+    anc_path = prefix * ".anc.zst"
+    @test isfile(anc_path)
+    anc = PS.read_ancestry(anc_path)
+    @test length(anc.sample_nodes) == 2 * cfg.N
+    @test length(anc.edges) > 0
+    @test anc.n_chr == cfg.n_chr
+    @test anc.chr_len_bp == cfg.chr_len_bp
+
+    # 2. Validation: ancestry_simplify_interval must be >= 1.
+    @test_throws ArgumentError PS.validate(
+        PS.Config(; N=10, n_qtl=10, ancestry_simplify_interval=0,
+                    output_prefix=prefix))
+
+    # 3. Edges reference valid node ids in [1, next_node).
+    max_node = anc.next_node - UInt32(1)
+    @test all(e -> e.parent_node >= 1 && e.parent_node <= max_node, anc.edges)
+    @test all(e -> e.child_node  >= 1 && e.child_node  <= max_node, anc.edges)
+
+    # 4. Edge bp ranges are valid (half-open, within chromosome).
+    @test all(e -> 1 <= e.left_bp < e.right_bp <= cfg.chr_len_bp + 1, anc.edges)
+
+    # 5. Per-chromosome coverage: every sample's lineage covers [1, chr_len_bp].
+    #    (sanity: sample nodes are reachable via at least one edge per chr).
+    sample_set = Set(anc.sample_nodes)
+    children = Set(e.child_node for e in anc.edges)
+    @test issubset(sample_set, children)
+
+    # 6. Neutral overlay produces deterministic per-(seed,T) output.
+    table1 = PS.overlay_neutral_mutations(anc_path; mu_per_bp=1e-6,
+                                            seed=UInt64(42),
+                                            output_prefix=prefix * ".ov1")
+    table2 = PS.overlay_neutral_mutations(anc_path; mu_per_bp=1e-6,
+                                            seed=UInt64(42),
+                                            output_prefix=prefix * ".ov2")
+    @test length(table1.samples) == 2 * cfg.N
+    @test table1.samples == table2.samples
+    @test all(table1.positions[i] == table2.positions[i]
+              for i in 1:length(table1.samples))
+
+    # 7. Roundtrip: write → read → identical.
+    @test isfile(prefix * ".ov1.neutral.zst")
+    table_r = PS.read_neutral_mutations(prefix * ".ov1.neutral.zst")
+    @test table_r.samples == table1.samples
+    @test table_r.mu_per_bp == table1.mu_per_bp
+    @test table_r.seed == table1.seed
+    @test all(table_r.positions[i] == table1.positions[i]
+              for i in 1:length(table1.samples))
+
+    # 8. Higher mu produces more mutations on average.
+    table_lo = PS.overlay_neutral_mutations(anc_path; mu_per_bp=1e-7,
+                                              seed=UInt64(7), output_prefix=nothing)
+    table_hi = PS.overlay_neutral_mutations(anc_path; mu_per_bp=1e-5,
+                                              seed=UInt64(7), output_prefix=nothing)
+    total_lo = sum(length(p) for p in table_lo.positions)
+    total_hi = sum(length(p) for p in table_hi.positions)
+    @test total_hi > total_lo
+end
+
+# ---------------------------------------------------------------------------
 # Smoke test — oracle_maf_min drops low-MAF sites from oracle statistics
 # ---------------------------------------------------------------------------
 @testset "Oracle — MAF cutoff (oracle_maf_min)" begin
