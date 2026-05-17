@@ -9,6 +9,69 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-05-17
+
+Phase 3b — performance fixes for recap-first at structured-demography
+scale. After v0.14.0 shipped, profiling on a `:twoD_perp` config
+(`N=500`, `grid_size=5`, `n_chr=10`, `n_qtl=2000`) revealed end-to-end
+`simulate()` was taking **193.88 s** — dominated by gen-0 QTL placement
+(`~20 s` per chr in `build_gen0_pop_from_recap!`) and per-event
+linear-scan lineage lookups inside the structured coalescent.
+
+This release is a pure performance patch: no API change, no algorithm
+correctness change, no new config fields. All 952 statistical tests
+still pass (down from 966 only because a loop counts emitted edges and
+the now-different tree topology yields fewer iterations — no asserts
+fail).
+
+### Changed — `src/recap.jl`
+
+- `place_one_qtl` replaced by **sweep-line** `place_qtls_on_chr_sweep!`:
+  per chromosome, edges are sorted by `left_bp` and a min-heap on
+  `right_bp` evicts edges as the sweep crosses them. Active-edge
+  removal uses swap-and-pop with a `pos_in_active` index (O(1) per
+  remove). Complexity: O((E + n_qtl) log E) replaces the prior
+  O(n_qtl × E) linear scan.
+- `build_gen0_pop_from_recap!` (PackedPop and DensePop) now groups
+  QTLs by chromosome up front and calls the sweep per chr; serial
+  across chrs to preserve determinism for a fixed seed.
+
+### Changed — `src/structured_coalescent.jl`
+
+- `Lineage` gains a `pos::Int32` field tracking its position in
+  `CoalescentState.active_per_deme[deme]`.
+- `CoalescentState` gains an `active_per_deme::Vector{Vector{Int}}` —
+  per-deme active-lineage lists maintained via swap-and-pop on every
+  `activate_lineage!` / `deactivate_lineage!` / `migrate_lineage!`.
+- `nth_active_lineage_in_deme` is now O(1) (direct index into
+  `active_per_deme[d]`); `nth_active_lineage` is O(n_demes)
+  (cumulative scan over `deme_count`). The pre-3b implementations
+  scanned the full `state.lineages` vector — O(L) per call, dominant
+  at K ≥ 5000 inside the Gillespie loop.
+
+### Performance
+
+| Scenario | pre-3b (v0.14.0) | post-3b (v0.14.1) | Speedup |
+|---|---|---|---|
+| Standalone structured coalescent: K=5000, n_chr=10, chr=1 Mbp, mig=1e-3, r=1e-7 (median of 2 seeds, excluding warmup) | 9.84 s | 7.67 s | 1.28× |
+| End-to-end recap_first: N=500, grid=5, n_chr=10, chr=1 Mbp, n_qtl=2000 | **193.88 s** | **37.07 s** | **5.23×** |
+
+The sweep-line dominates the end-to-end win; the O(1) active-list is a
+secondary contribution. Both kernels remain bit-deterministic for a
+fixed `(seed, n_threads)`, but the gen-0 `pop.H` pattern is NOT
+bit-identical to v0.14.0 (different RNG-draw order within
+`build_gen0_pop_from_recap!`). Statistical properties (Hill-Robertson
+LD, allele-frequency spectrum) are preserved.
+
+### Tests
+
+- All 952 tests pass at `JULIA_NUM_THREADS=4`. The 14-test diff vs
+  v0.14.0 (966 → 952) is from `test/runtests.jl:2244` — a loop that
+  iterates over `s1.edges`, and the structured-coalescent topology
+  changed (different but valid choice of "i-th active lineage" under
+  the swap-and-pop ordering). The Watterson statistical band test
+  (3.5-SE) still passes across all 4 `r` values.
+
 ## [0.14.0] — 2026-05-17
 
 Recapitation-first workflow: gen-0 founder haplotypes can now be

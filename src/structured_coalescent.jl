@@ -126,11 +126,12 @@ end
 mutable struct Lineage
     segs::SegRef           # 8 bytes — view into SegmentPool
     span::Int32             # 4 bytes — cached sum of segment widths (Fenwick weight)
+    pos::Int32              # 4 bytes — position in CoalescentState.active_per_deme[deme] (1-based; 0 if inactive)
     deme::Int8              # 1 byte (always 1 in Phase 1; for Phase 2 migration)
     active::Bool            # 1 byte (free-list flag)
 end
 
-Lineage() = Lineage(SegRef(Int32(0), Int32(0)), Int32(0), Int8(1), false)
+Lineage() = Lineage(SegRef(Int32(0), Int32(0)), Int32(0), Int32(0), Int8(1), false)
 
 # =============================================================================
 # Fenwick (Binary Indexed) Tree — cumulative spans for span-weighted sampling
@@ -216,6 +217,12 @@ mutable struct CoalescentState
     migration_rate::Float64                # total per-lineage backward rate to ANY other deme
     deme_count::Vector{Int}                # active lineages per deme (length n_demes)
     # ============================
+    # === PHASE 3b: per-deme active list for O(1) nth lookup ===
+    # active_per_deme[d] holds 1-based slot indices of currently-active
+    # lineages in deme d. Maintained by activate/deactivate/migrate via
+    # swap-and-pop; Lineage.pos tracks each lineage's slot in this vector.
+    active_per_deme::Vector{Vector{Int}}
+    # ============================
     node_times::Vector{Float64}            # node_times[node_id] = backward time
     current_time::Float64                  # cumulative backward time
 end
@@ -233,6 +240,7 @@ function CoalescentState(K::Int, chr::Int8, chr_len_bp::Int, Ne::Int, seed::UInt
                              Int32(chr_len_bp), Edge[], starting_node_id,
                              Int64(0), Ne,
                              [Ne], 0.0, Int[],
+                             [Int[]],
                              Float64[], 0.0)
 end
 
@@ -259,6 +267,7 @@ function CoalescentState(K_total::Int, chr::Int8, chr_len_bp::Int,
                              Int32(chr_len_bp), Edge[], starting_node_id,
                              Int64(0), N_per_deme[1],
                              copy(N_per_deme), migration_rate, zeros(Int, n_demes),
+                             [Int[] for _ in 1:n_demes],
                              Float64[], 0.0)
 end
 
@@ -284,6 +293,14 @@ function init_leaves!(state::CoalescentState, K_per_deme::Vector{Int})
     else
         fill!(state.deme_count, 0)
     end
+    # Reset per-deme active lists to match n_demes; empty each.
+    if length(state.active_per_deme) != n_demes
+        state.active_per_deme = [Int[] for _ in 1:n_demes]
+    else
+        for d in 1:n_demes
+            empty!(state.active_per_deme[d])
+        end
+    end
     slot = 0
     for d in 1:n_demes
         for _ in 1:K_per_deme[d]
@@ -294,7 +311,9 @@ function init_leaves!(state::CoalescentState, K_per_deme::Vector{Int})
             node_id = state.next_node_id + UInt32(1)
             state.next_node_id = node_id
             segs = seg_single!(state.seg_pool, Int32(1), Int32(chr_len + 1), node_id)
-            state.lineages[slot] = Lineage(segs, chr_len, Int8(d), true)
+            push!(state.active_per_deme[d], slot)
+            pos = Int32(length(state.active_per_deme[d]))
+            state.lineages[slot] = Lineage(segs, chr_len, pos, Int8(d), true)
             fen_update!(state.fenwick, slot, Float64(chr_len))
             state.total_span += Int64(chr_len)
             state.deme_count[d] += 1
@@ -321,8 +340,24 @@ function allocate_lineage!(state::CoalescentState)
     return length(state.lineages)
 end
 
+# Swap-and-pop helper: remove `idx` at position `pos` from per-deme active
+# list, updating the swapped lineage's `pos` field.
+@inline function _remove_from_active_deme!(state::CoalescentState,
+                                              deme::Int8, pos::Int32)
+    @inbounds list = state.active_per_deme[Int(deme)]
+    last_pos = length(list)
+    if Int(pos) != last_pos
+        @inbounds last_idx = list[last_pos]
+        @inbounds list[Int(pos)] = last_idx
+        @inbounds state.lineages[last_idx].pos = pos
+    end
+    pop!(list)
+    return nothing
+end
+
 # Deactivate a lineage: mark its slot free, zero its Fenwick weight,
-# subtract its span from total_span, decrement deme_count for its deme.
+# subtract its span from total_span, decrement deme_count, and remove from
+# the per-deme active list via swap-and-pop.
 function deactivate_lineage!(state::CoalescentState, idx::Int)
     @inbounds lin = state.lineages[idx]
     if !lin.active
@@ -333,6 +368,8 @@ function deactivate_lineage!(state::CoalescentState, idx::Int)
     if !isempty(state.deme_count)
         @inbounds state.deme_count[Int(lin.deme)] -= 1
     end
+    _remove_from_active_deme!(state, lin.deme, lin.pos)
+    lin.pos = Int32(0)
     lin.active = false
     push!(state.free_idx, idx)
     state.n_active -= 1
@@ -340,10 +377,12 @@ function deactivate_lineage!(state::CoalescentState, idx::Int)
 end
 
 # Activate a lineage in a specific deme with given segments and span.
-# Maintains Fenwick, total_span, n_active, and deme_count.
+# Maintains Fenwick, total_span, n_active, deme_count, and per-deme list.
 @inline function activate_lineage!(state::CoalescentState, idx::Int,
                                      segs::SegRef, span::Int32, deme::Int8)
-    @inbounds state.lineages[idx] = Lineage(segs, span, deme, true)
+    @inbounds push!(state.active_per_deme[Int(deme)], idx)
+    pos = Int32(length(state.active_per_deme[Int(deme)]))
+    @inbounds state.lineages[idx] = Lineage(segs, span, pos, deme, true)
     state.n_active += 1
     fen_update!(state.fenwick, idx, Float64(span))
     state.total_span += Int64(span)
@@ -362,17 +401,16 @@ end
     return nothing
 end
 
-# Find the i-th active lineage (1 <= i <= n_active). O(L) scan; acceptable
-# for Phase 1 at small K (replaced with O(1) active-list later).
+# Find the i-th active lineage (1 <= i <= n_active). O(n_demes) via per-deme
+# active lists (Phase 3b — replaces the prior O(L) scan).
 function nth_active_lineage(state::CoalescentState, i::Int)
-    count = 0
-    @inbounds for idx in 1:length(state.lineages)
-        if state.lineages[idx].active
-            count += 1
-            if count == i
-                return idx
-            end
+    cum = 0
+    @inbounds for d in 1:length(state.deme_count)
+        k_d = state.deme_count[d]
+        if i <= cum + k_d
+            return state.active_per_deme[d][i - cum]
         end
+        cum += k_d
     end
     error("nth_active_lineage: i=$i exceeds n_active=$(state.n_active)")
 end
@@ -656,6 +694,10 @@ function migrate_lineage!(state::CoalescentState, idx::Int, dest_deme::Int8)
     if src_deme == dest_deme
         return 0
     end
+    # Remove from src deme's active list (swap-and-pop), append to dest.
+    _remove_from_active_deme!(state, src_deme, lin.pos)
+    @inbounds push!(state.active_per_deme[Int(dest_deme)], idx)
+    lin.pos = Int32(length(state.active_per_deme[Int(dest_deme)]))
     if !isempty(state.deme_count)
         @inbounds state.deme_count[Int(src_deme)] -= 1
         @inbounds state.deme_count[Int(dest_deme)] += 1
@@ -664,21 +706,10 @@ function migrate_lineage!(state::CoalescentState, idx::Int, dest_deme::Int8)
     return idx
 end
 
-# Find the i-th active lineage in a specific deme. O(L) scan; acceptable
-# for Phase 2 at small to moderate K.
-function nth_active_lineage_in_deme(state::CoalescentState, deme::Int8, i::Int)
-    count = 0
-    @inbounds for idx in 1:length(state.lineages)
-        lin = state.lineages[idx]
-        if lin.active && lin.deme == deme
-            count += 1
-            if count == i
-                return idx
-            end
-        end
-    end
-    error("nth_active_lineage_in_deme: i=$i exceeds count in deme=$deme " *
-          "(deme_count=$(state.deme_count[Int(deme)]))")
+# Find the i-th active lineage in a specific deme. O(1) via per-deme list
+# (Phase 3b — replaces the prior O(L) scan).
+@inline function nth_active_lineage_in_deme(state::CoalescentState, deme::Int8, i::Int)
+    @inbounds return state.active_per_deme[Int(deme)][i]
 end
 
 # Compute per-deme coalescent rates and their sum.
