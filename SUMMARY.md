@@ -244,10 +244,15 @@ src/
   stats.jl                 # mean BV, var, sum-of-var, Bulmer B
   io_plink.jl              # .bed/.bim/.fam/.effects.tsv writer + loader
   io_native.jl             # .psim.zst writer + reader (CodecZstd)
+  ancestry.jl              # Edge + Ancestry recorder + simplify! (.anc.zst)
+  oracle.jl, oracle_types.jl # in-process B / rho_pearson tests
+  neutral_overlay.jl       # overlay_neutral_mutations: Poisson placement
+                            # + forward propagation to leaves (.neutral.zst)
+  merged_genotype.jl       # write_merged_genotype_plink: QTL + neutral PLINK
   summary.jl               # opt-in end-of-sim summary
   simulate.jl              # top-level driver
 
-test/runtests.jl           # 242 tests across all phases
+test/runtests.jl           # 484+ tests across all phases
 
 examples/
   panmictic.jl             # eq + 3 directional reps loaded from native eq

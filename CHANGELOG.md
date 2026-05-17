@@ -9,6 +9,93 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.13.3] — 2026-05-17
+
+### Added — ancestry recording + neutral-mutation overlay (recapitation)
+
+Forward-time SLiM-style tree-sequence recording with pure-Julia neutral
+overlay. Decouples GWAS-realism marker-panel size from selection-sim cost:
+forward-simulate QTLs only (fast), then drop arbitrarily many neutral
+mutations along the recorded ancestry for downstream PLINK output.
+
+- **New Config fields:**
+  - `record_ancestry::Bool = false` — turn on per-generation edge logging.
+  - `ancestry_simplify_interval::Int = 100` — periodic `simplify!` to drop
+    dead lineages (SLiM default).
+  - `save_ancestry::Bool = true` — gate the `.anc.zst` disk write; set
+    `false` for in-memory overlay in the same session.
+- **New module `src/ancestry.jl`:** `Edge` (20-byte isbits), `Ancestry`
+  recorder, per-chromosome threaded `simplify!`, custom zstd binary I/O
+  (`.anc.zst` with `PSAN` magic).
+- **New module `src/neutral_overlay.jl`:** `overlay_neutral_mutations`
+  (takes either an `Ancestry` or a `.anc.zst` path); per-chromosome
+  `@threads :dynamic` overlay + forward leaf propagation. Output:
+  `NeutralMutationTable` and `.neutral.zst` sparse panel.
+- **New module `src/merged_genotype.jl`:** `write_merged_genotype_plink`
+  fuses QTL haplotypes (`pop.H`) with the neutral overlay table into a
+  single PLINK BED/BIM/FAM/effects.tsv panel.
+- **New `SimResult.ancestry` field** exposing the in-memory recorder.
+
+Vectorization + threading per kernel:
+- Edge emission: per-chunk `Vector{Edge}` pre-sized via `sizehint!`;
+  zero allocations in the hot path. Recording adds no extra RNG draws —
+  proved by the side-channel invariant test (recorded run produces
+  bit-identical `pop.H` to non-recorded run with same seed).
+- `simplify!`: per-chromosome `@threads :static`; reverse-walk alive
+  set; in-place compaction.
+- Overlay: per-chromosome `@threads :dynamic`; per-edge Poisson +
+  forward propagation. Deterministic per `(seed, n_threads)`.
+
+Tests: +27 assertions (484 total) covering smoke, three cross-phase
+invariants (recording is non-invasive; simplify is lossless on surviving
+lineages — confirmed equal edge sets at different `simplify_interval`
+values; sample-node bookkeeping survives buffer-swap + I/O roundtrip),
+in-memory overlay equivalence to disk-roundtrip overlay, and merged
+PLINK file-size formula.
+
+Workflow:
+```julia
+cfg = PS.Config(..., record_ancestry=true, save_ancestry=false)
+res = PS.simulate(cfg)
+tbl = PS.overlay_neutral_mutations(res.ancestry;
+                                     mu_per_bp=1e-8, seed=UInt64(7))
+PS.write_merged_genotype_plink("out", res, tbl)
+```
+
+## [0.13.2] — 2026-05-17
+
+### Added — Oracle: t½-multiple checkpoints, MAF filter, save_at_checkpoints
+
+Three additions to the oracle workflow for trajectory-style analyses on
+empirical-like data.
+
+- **`checkpoints` accepts `Vector{Float64}`** interpreted as multiples of
+  `t_½` in Phase B (computed at the **end of the settling phase** from
+  realized V_A / V_P, rounded to integer gens). Auto-infers `ngen_dir`
+  from `max(checkpoints)` when left at 0. Each checkpoint emits
+  `{prefix}.oracle.{c}_thalf.tsv` with `meta.gen` recording the resolved
+  generation. Int checkpoints unchanged (absolute gens, legacy snapshot
+  emission).
+- **New `save_at_checkpoints::Bool = false`** gates whether the
+  population snapshot (psim/PLINK) is also written at Float checkpoints.
+  Default off so checkpoints emit only the oracle TSV — avoids hundreds
+  of MB of genotype dumps when only the trajectory stats are wanted.
+  Int checkpoints always emit snapshots (legacy preserved).
+- **New `oracle_maf_min::Float64 = 0.0`** filters per-site oracle stats
+  to sites with `MAF >= cutoff` before any window / quantile / Δp filter.
+  Matches GWAS / fine-mapping convention of dropping unreliable
+  near-monomorphic variants on empirical data. Recorded as `meta.maf_min`
+  in every oracle TSV.
+
+Every `write_oracle_tsv` call now records `meta.gen` and `meta.maf_min`
+so downstream readers can reconstruct the timepoint and filter
+convention.
+
+Tests: +13 assertions covering Float→gen resolution at end of Phase A,
+oracle-only emission with `save_at_checkpoints=false`, MAF cutoff drops
+sites, `meta.maf_min` is recorded correctly, and validation rejects
+`oracle_maf_min ∉ [0, 0.5)`.
+
 ## [0.13.1] — 2026-05-15
 
 ### Added — combined per-locus tail × frequency-separation filters (anchored at dp80)
