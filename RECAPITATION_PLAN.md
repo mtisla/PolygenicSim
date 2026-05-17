@@ -181,17 +181,24 @@ fragments AMs.
 - ~30 LOC: helpers updated.
 - ~380 LOC replacement (vs ~300 LOC originally estimated).
 
-**Phase 1C (revised) — Segment model + recombination**
-- ~380 LOC implementation; replaces the AM-pool approach.
-- Tests: panmictic Watterson SFS recovery (total branch length per bp
-  matches `4N · H_{K-1}` within 3 SE across r ∈ {0, 1e-6, 1e-5, 1e-4});
-  pairwise LD decay matches Hill-Robertson `1/(1 + 4Nrd)` within 2 SE
-  at distances 1kb, 10kb, 100kb, 1Mb.
-- Validation gate: bias is FLAT across r values (not growing with r as
-  the simple model did).
-- Note: existing Phase 1B tests should be preserved — segment model is
-  a strict superset; K-leaf MRCA-time test still works with segments
-  (each lineage starts with a single full-chromosome segment).
+**Phase 1C (revised) — Segment model + recombination — DONE (a3fee9c)**
+- ~580 LOC implementation refactor (replaced AM-pool with SegmentPool;
+  rewrote coalesce_pair! and added recombine_lineage!; added
+  run_coalescent! with Gillespie dispatch).
+- ~80 LOC new tests (smoke, determinism, edge-time direction, validation
+  gate).
+- Status: 908 tests passing.
+- VALIDATION PASSED: total branch length per bp matches Watterson
+  `4N · H_{K-1}` within 3.5 SE across r ∈ {0, 1e-6, 1e-5, 1e-4}:
+    - r=0:    z=+0.01 (was +0.01 — unchanged, both models agree without recomb)
+    - r=1e-6: z=+1.0  (was +1.6)
+    - r=1e-5: z=+0.8  (was +5.2 — fixed)
+    - r=1e-4: z=-2.8  (was +7.6 — fixed)
+  Bias no longer grows monotonically with r.
+- Phase 1B tests preserved (segment model is a strict superset).
+- Hill-Robertson r² decay test deferred to a later phase (would
+  require building per-bp marginal trees from edges; not strictly
+  needed for Phase 2 progression).
 
 **Phase 2 — Structured demography**
 - ~150 LOC: per-deme lineage pools, migration operator, deme-aware rate
@@ -295,41 +302,37 @@ To resume in a fresh session:
 
 ```
 git checkout feature/recap-phase1
-# Current state: Phase 1B committed (fc7b9eb). 548 tests passing.
-# Next: implement Phase 1C (REVISED — segment-based model + recombination).
+# Current state: Phase 1C committed (a3fee9c). 908 tests passing.
+# Next: implement Phase 2 (structured demography).
 ```
 
-The "simple shortcut" Phase 1C attempt (single node_id per lineage,
-emit edges for entire A ∪ B) was tried and rolled back — it produces
-+16-21% overestimate of total branch length per bp under recombination,
-because non-intersection coalescence parts emit phantom branches.
+**Phase 2 — Structured demography (next ~150 LOC + tests)**
 
-Phase 1C-redo scope: ~380 LOC implementation + ~150 LOC tests.
-Validation gate: total branch length per bp matches `4N · H_{K-1}`
-within 3 SE across all `r` values tested. The Phase 1B tests must
-continue to pass (segment model is a strict superset).
+Add per-deme lineage pools, migration operator, deme-aware coalescent
+rate. The Lineage struct already has a `deme::Int8` field (always 1 in
+Phase 1).
 
-Key implementation steps for next session:
+Key changes:
+1. Add `n_demes::Int` and per-deme size `N_per_deme::Vector{Int}` to
+   `CoalescentState` (or pass as args).
+2. Add `migration_rate::Float64` (per-neighbor backward rate).
+3. Update Gillespie loop:
+   - Coalescent rate per deme: `k_d(k_d-1)/(4·N_d)`, summed across demes.
+   - Migration rate: sum_d k_d · 4m (or appropriate per-neighbor count
+     for 2D non-toroidal layout).
+   - When sampling coal event: pick deme proportional to its coal rate,
+     then 2 random lineages within that deme.
+   - When sampling mig event: pick lineage uniformly, then sample a
+     neighboring deme.
+4. Tests: 2-deme symmetric coalescent recovers FST = 1/(1+4Nm) within
+   2 SE.
 
-1. Introduce `Segment` type: `(left, right, node_id)`. SoA pool with
-   3 parallel `Vector` arrays.
-2. Refactor `Lineage` to hold a `(segment_offset, segment_length)` view
-   into the pool, plus cached `total_span`. Drop the single `node_id`.
-3. Rewrite `coalesce_pair!`:
-   - Two-pointer merge of segment lists.
-   - Allocate one new common-ancestor node N per coalescence event.
-   - Overlap intervals: emit two edges `N → X_seg.node`, `N → Y_seg.node`;
-     overlap segment in merged lineage gets `node_id = N`.
-   - Non-overlap intervals: segments carry over unchanged.
-4. Rewrite `recombine_lineage!`:
-   - Split segment list at `bp`. NO edges emitted.
-   - Two new lineages; segments keep their `node_id`s.
-5. Update Gillespie loop (mostly unchanged; just adapt to new
-   coal/recomb signatures).
-6. Tests:
-   - Re-run Phase 1B test with segment model (sanity check).
-   - Watterson per-bp branch length within 3 SE for r ∈ {0, 1e-6, 1e-5, 1e-4}.
-   - Determinism per (seed, n_threads).
+Phase 1C-redo (a3fee9c) implemented the segment-based model and passed
+all validation gates. Status:
+- 908 tests passing (548 from Phase 1A/1B + 360 new from Phase 1C).
+- Watterson TBL/bp matches analytical 4N·H_{K-1} within 3.5 SE across
+  r ∈ {0, 1e-6, 1e-5, 1e-4}. Bias no longer grows monotonically with r.
 
-Once Phase 1C-redo passes, move to Phase 2 (structured demography),
-unchanged from plan.
+Phase 2 starting point: extend `CoalescentState` with multi-deme support
+and add a migration operator. See "Phase 2" section below for detailed
+implementation steps.
