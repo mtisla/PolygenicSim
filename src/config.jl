@@ -600,6 +600,11 @@ function validate(cfg::Config)
     end
     cfg.recap_burnin_structured >= 0 ||
         throw(ArgumentError("recap_burnin_structured must be >= 0 (0 = use n_recent)"))
+    # Resolve sentinel: 0 means "use n_recent". Idempotent (re-validation
+    # leaves the resolved value unchanged since it's now > 0).
+    if cfg.recap_first && cfg.recap_burnin_structured == 0
+        cfg.recap_burnin_structured = cfg.n_recent
+    end
     cfg.mutation_model in (:finite_sites, :infinite_sites) ||
         throw(ArgumentError("mutation_model must be :finite_sites or :infinite_sites, got $(cfg.mutation_model)"))
     is_ism_init = cfg.init_distribution in (:ism_watterson, :ism_denovo)

@@ -2683,4 +2683,136 @@ end
     @test mean_r2_rc > 3.0 * mean_r2_nr  # at least 3× ratio
 end
 
+# ---------------------------------------------------------------------------
+# Phase 5: :twoD_recent workflow routing.
+#
+# Validates the two semantic changes to simulate()'s phase orchestration:
+#
+# Workflow A — `:neutral` + `:twoD_recent` + `recap_first`: skip the full
+# `ngen_eq` settling phase, just run `recap_burnin_structured` g of
+# structured-neutral forward sim. The coalescent provides full
+# mutation-drift equilibrium at gen 0, so the long settling burn-in is
+# redundant.
+#
+# Workflow B (universal) — `:twoD_recent` structure-onset moves from
+# `total_gens − n_recent + 1` to `ngen_eq_eff − n_recent + 1`. For
+# `:stabilizing` (ngen_dir=0) this is identical to old behavior. For
+# `:directional` + `ngen_dir > 0`, this is a BREAKING change: the
+# structured epoch now precedes the shift event (was: spanned settling
+# and post-shift period).
+# ---------------------------------------------------------------------------
+@testset "Phase 5: :twoD_recent workflow routing" begin
+    # ----- Workflow A: neutral + twoD_recent + recap_first skips ngen_eq --
+    # Final gen should equal recap_burnin_structured (default = n_recent),
+    # NOT cfg.ngen_eq (which is ignored with an @info).
+    cfg_A = PS.Config(;
+        N=10, Ne=10, n_chr=1, chr_len_bp=5_000,
+        n_qtl=20, n_neutral=0, Uqtl=0.0,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.02,
+        selection_mode=:neutral,
+        ngen_eq=10_000,           # absurdly large; should be IGNORED
+        recap_first=true, init_distribution=:from_recap,
+        seed=UInt64(42),
+        output_formats=Symbol[:summary], output_prefix=tempname(),
+        n_int=0, n_threads=1,
+    )
+    res_A = PS.simulate(cfg_A)
+    # ngen_eq=10_000 ignored; run uses recap_burnin_structured (== n_recent = 3).
+    @test res_A.final_gen == 3
+    @test maximum(res_A.deme_id) == 4         # 2×2 = 4 demes (structure applied)
+
+    # Explicit recap_burnin_structured value is respected.
+    cfg_A_burnin = PS.Config(;
+        N=10, Ne=10, n_chr=1, chr_len_bp=5_000,
+        n_qtl=20, n_neutral=0, Uqtl=0.0,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.02,
+        selection_mode=:neutral,
+        ngen_eq=0,
+        recap_first=true, init_distribution=:from_recap,
+        recap_burnin_structured=7,
+        seed=UInt64(42),
+        output_formats=Symbol[], n_int=0, n_threads=1,
+    )
+    res_A_burnin = PS.simulate(cfg_A_burnin)
+    @test res_A_burnin.final_gen == 7
+    @test maximum(res_A_burnin.deme_id) == 4
+
+    # recap_burnin_structured = 0 sentinel resolves to n_recent in validate().
+    cfg_A_sentinel = PS.Config(;
+        N=10, Ne=10, n_chr=1, chr_len_bp=5_000,
+        n_qtl=20, n_neutral=0, Uqtl=0.0,
+        demography=:twoD_recent, grid_size=2, n_recent=4,
+        migration_rate=0.02,
+        selection_mode=:neutral,
+        ngen_eq=0,
+        recap_first=true, init_distribution=:from_recap,
+        recap_burnin_structured=0,   # sentinel
+        seed=UInt64(42),
+        output_formats=Symbol[], n_int=0, n_threads=1,
+    )
+    PS.validate(cfg_A_sentinel)
+    @test cfg_A_sentinel.recap_burnin_structured == 4   # resolved to n_recent
+
+    # ----- Workflow B: directional + twoD_recent moves structure before shift --
+    # With ngen_eq=10, ngen_dir=5, n_recent=3:
+    #   Old behavior: structure-onset at total_gens - n_recent + 1 = 15 - 3 + 1 = 13
+    #                 (= ngen_eq + 3, in middle of directional phase, AFTER shift at gen 11).
+    #   New behavior: structure-onset at ngen_eq - n_recent + 1 = 10 - 3 + 1 = 8
+    #                 (= last 3 gens of settling, BEFORE the shift).
+    cfg_B = PS.Config(;
+        N=10, Ne=40, n_chr=1, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.05,
+        selection_mode=:directional, vs_over_vp0=10.0, shift_sd=2.0,
+        ngen_eq=10, ngen_dir=5,
+        seed=UInt64(7),
+        output_formats=Symbol[], output_prefix=tempname(),
+        n_int=0, n_threads=1,
+    )
+    res_B = PS.simulate(cfg_B)
+    @test res_B.final_gen == 15
+    @test maximum(res_B.deme_id) == 4                # structured at end
+
+    # Validation: n_recent > ngen_eq under two-phase mode → error.
+    # (Was previously: n_recent > total_gens, looser.)
+    @test_throws ErrorException PS.simulate(PS.Config(;
+        N=10, Ne=40, n_chr=1, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5,
+        demography=:twoD_recent, grid_size=2, n_recent=8,   # > ngen_eq=5
+        migration_rate=0.05,
+        selection_mode=:directional, vs_over_vp0=10.0, shift_sd=2.0,
+        ngen_eq=5, ngen_dir=10,
+        seed=UInt64(7),
+        output_formats=Symbol[],
+    ))
+
+    # ----- Workflow A back-compat: stabilizing + :twoD_recent unchanged --
+    # ngen_eq = total_gens (since ngen_dir=0), so Workflow B's
+    # ngen_eq - n_recent + 1 reduces to old total_gens - n_recent + 1.
+    # No behavior change for :stabilizing + :twoD_recent users.
+    # (The existing "Demography — :twoD_recent" testset above already
+    # validates this; here just confirm a representative case still
+    # produces the structured end state.)
+    cfg_stab = PS.Config(;
+        N=10, Ne=40, n_chr=1, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0,
+        Uqtl=0.0, theta_override=0.5,
+        demography=:twoD_recent, grid_size=2, n_recent=3,
+        migration_rate=0.05,
+        selection_mode=:stabilizing, vs_over_vp0=10.0,
+        ngen_eq=10,
+        seed=UInt64(9),
+        output_formats=Symbol[], output_prefix=tempname(),
+        n_int=0, n_threads=1,
+    )
+    res_stab = PS.simulate(cfg_stab)
+    @test res_stab.final_gen == 10
+    @test maximum(res_stab.deme_id) == 4
+end
+
 end # @testset top-level
