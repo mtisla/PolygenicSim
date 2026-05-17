@@ -202,6 +202,31 @@ Base.@kwdef mutable struct Config
     # default-off avoids surprise disk pressure in QTL-only runs.
     save_ancestry::Bool = false
 
+    # Recapitation-first workflow. When true, the simulator generates
+    # gen-0 founder haplotypes via a backward structured-coalescent
+    # simulation instead of independent per-locus allele sampling.
+    # This produces gen-0 QTL alleles with realistic Hill-Robertson LD
+    # (`1/(1+4Nrd)` between linked sites) rather than the zero-LD
+    # baseline produced by independent Bernoulli draws.
+    #
+    # Required: `init_distribution = :from_recap` (other init modes
+    # are rejected). The forward simulation then runs from the
+    # coalescent-seeded gen-0 state through `ngen_eq` / `ngen_dir` as
+    # usual.
+    #
+    # Demography routing:
+    #   :panmictic      → panmictic coalescent
+    #   :twoD_perp      → structured coalescent (matches forward demography)
+    #   :twoD_recent    → panmictic coalescent (forward sim handles the
+    #                     recent structured epoch via existing semantics)
+    recap_first::Bool = false
+    # When `recap_first=true` AND `selection_mode=:neutral` AND
+    # `demography=:twoD_recent` (Workflow A), this controls the number
+    # of forward generations spent in the structured-neutral burn-in
+    # phase between recap completion and end-of-sim. Default `0`
+    # resolves to `n_recent` in `validate()`.
+    recap_burnin_structured::Int = 0
+
     # output
     output_formats::Vector{Symbol} = Symbol[:plink]
     output_prefix::String = "polygenicsim"
@@ -559,8 +584,22 @@ function validate(cfg::Config)
         throw(ArgumentError("directional_start_from must be :md or :msd"))
     cfg.backend in (:packed, :dense) ||
         throw(ArgumentError("backend must be :packed or :dense"))
-    cfg.init_distribution in (:beta_mutation_drift, :beta_asymmetric, :uniform, :fixed_p, :empirical_sfs, :ism_watterson, :ism_denovo) ||
+    cfg.init_distribution in (:beta_mutation_drift, :beta_asymmetric, :uniform, :fixed_p, :empirical_sfs, :ism_watterson, :ism_denovo, :from_recap) ||
         throw(ArgumentError("invalid init_distribution"))
+    # recap_first ↔ :from_recap strict pairing.
+    if cfg.recap_first
+        cfg.init_distribution === :from_recap ||
+            throw(ArgumentError("recap_first=true requires init_distribution=:from_recap, got $(cfg.init_distribution)"))
+        cfg.load_from === nothing ||
+            throw(ArgumentError("recap_first=true cannot be combined with load_from"))
+        cfg.load_plink_prefix === nothing ||
+            throw(ArgumentError("recap_first=true cannot be combined with load_plink_prefix"))
+    else
+        cfg.init_distribution === :from_recap &&
+            throw(ArgumentError("init_distribution=:from_recap requires recap_first=true"))
+    end
+    cfg.recap_burnin_structured >= 0 ||
+        throw(ArgumentError("recap_burnin_structured must be >= 0 (0 = use n_recent)"))
     cfg.mutation_model in (:finite_sites, :infinite_sites) ||
         throw(ArgumentError("mutation_model must be :finite_sites or :infinite_sites, got $(cfg.mutation_model)"))
     is_ism_init = cfg.init_distribution in (:ism_watterson, :ism_denovo)

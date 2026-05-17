@@ -535,6 +535,27 @@ function _build_initial_state(cfg::Config, rng::Xoshiro)
             d.H .= pl.H_dense
             return d, pl.vt, pl.deme_id
         end
+    elseif cfg.recap_first
+        # recap_first: derive gen-0 founder haplotypes from a backward
+        # structured coalescent. Builds the VariantTable (bp positions,
+        # is_qtl flags, α) like FSM init but skips per-locus allele
+        # frequency sampling — carriage is determined by tree placement.
+        N_total = n_total(cfg)
+        vt, _ = init_variant_table_recap(rng, cfg)
+        coal_result = recapitate_for_sim(cfg, rng)
+        if cfg.backend === :packed
+            pop = PackedPop(length(vt), N_total)
+            build_gen0_pop_from_recap!(pop, vt, coal_result, rng)
+        else
+            pop = DensePop(length(vt), N_total)
+            build_gen0_pop_from_recap!(pop, vt, coal_result, rng)
+        end
+        N_per_deme = cfg.N
+        deme_id = Vector{Int}(undef, N_total)
+        @inbounds for i in 1:N_total
+            deme_id[i] = (i - 1) ÷ N_per_deme + 1
+        end
+        return pop, vt, deme_id
     else
         vt, p_init = init_variant_table(rng, cfg)
         N_total = n_total(cfg)

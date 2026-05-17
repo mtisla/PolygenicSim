@@ -2537,4 +2537,150 @@ end
     end
 end
 
+# ---------------------------------------------------------------------------
+# recap_first Config integration (Phase 4): wires the standalone Hudson
+# ARG into simulate() to produce gen-0 founder haplotypes with realistic
+# coalescent LD between QTLs. Validates:
+#   - Strict Config validation (recap_first ↔ :from_recap pairing).
+#   - End-to-end simulate() run completes and produces a polymorphic
+#     gen-0 panel.
+#   - Headline: QTL-QTL r² with recap_first is much larger than without
+#     (10x+ at typical scales).
+#   - Determinism: same (seed, n_threads) → bit-identical pop.H.
+# ---------------------------------------------------------------------------
+@testset "recap_first Config integration (Phase 4)" begin
+    # ----- Strict validation paths ----------------------------------------
+    # recap_first=true without :from_recap → reject.
+    @test_throws ArgumentError PS.validate(PS.Config(;
+        N=10, n_qtl=10, recap_first=true,
+        init_distribution=:beta_mutation_drift,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # :from_recap without recap_first → reject.
+    @test_throws ArgumentError PS.validate(PS.Config(;
+        N=10, n_qtl=10, init_distribution=:from_recap,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # recap_first + :from_recap → accepted.
+    PS.validate(PS.Config(;
+        N=10, n_qtl=10, recap_first=true,
+        init_distribution=:from_recap,
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+    # recap_first + load_from → reject.
+    @test_throws ArgumentError PS.validate(PS.Config(;
+        N=10, n_qtl=10, recap_first=true,
+        init_distribution=:from_recap,
+        load_from="dummy.psim.zst",
+        Uqtl=0.0, ngen_eq=1, output_formats=Symbol[]))
+
+    # ----- End-to-end smoke: simulate() with recap_first runs ------------
+    cfg_smoke = PS.Config(;
+        N=30, Ne=30, n_chr=1, chr_len_bp=10_000,
+        n_qtl=60, n_neutral=0,
+        Uqtl=0.0,
+        recap_first=true, init_distribution=:from_recap,
+        selection_mode=:neutral,
+        ngen_eq=1, seed=UInt64(7),
+        output_formats=Symbol[:summary], n_int=0,
+    )
+    res_s = PS.simulate(cfg_smoke)
+    @test res_s.summary.n_qtl_polymorphic > 0
+    @test size(res_s.pop.H, 2) == 2 * cfg_smoke.N
+
+    # Some QTLs carry the derived allele (pop.H has nonzero bits).
+    @test count(!iszero, res_s.pop.H) > 0
+
+    # ----- Determinism: same seed → bit-identical gen-0 pop.H -----------
+    cfg_det = PS.Config(;
+        N=20, Ne=20, n_chr=2, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0, Uqtl=0.0,
+        recap_first=true, init_distribution=:from_recap,
+        selection_mode=:neutral, ngen_eq=1,
+        seed=UInt64(99),
+        output_formats=Symbol[], n_int=0,
+    )
+    res_d1 = PS.simulate(cfg_det)
+    res_d2 = PS.simulate(cfg_det)
+    @test res_d1.pop.H == res_d2.pop.H
+    @test res_d1.vt.alpha == res_d2.vt.alpha
+    @test res_d1.vt.bp == res_d2.vt.bp
+
+    # ----- Different seeds → different gen-0 state ----------------------
+    cfg_d3 = PS.Config(; (k => v for (k, v) in pairs((;
+        N=20, Ne=20, n_chr=2, chr_len_bp=5_000,
+        n_qtl=30, n_neutral=0, Uqtl=0.0,
+        recap_first=true, init_distribution=:from_recap,
+        selection_mode=:neutral, ngen_eq=1,
+        seed=UInt64(123),
+        output_formats=Symbol[], n_int=0)))...)
+    res_d3 = PS.simulate(cfg_d3)
+    @test res_d1.pop.H != res_d3.pop.H
+
+    # ----- HEADLINE: QTL-QTL r² with recap_first >> without ------------
+    # At gen 0, independent per-locus Bernoulli sampling produces ~zero
+    # LD between QTLs (just sampling noise). With recap_first, the
+    # coalescent shared ancestry produces realistic Hill-Robertson LD.
+    cfg_kw_base = (
+        N=100, Ne=100, n_chr=1, chr_len_bp=500_000,
+        n_qtl=200, n_neutral=0,
+        selection_mode=:neutral, ngen_eq=1, seed=UInt64(11),
+        output_formats=Symbol[], n_int=0,
+    )
+    # Without recap (default init).
+    cfg_nr = PS.Config(; cfg_kw_base..., Uqtl=0.02)
+    res_nr = PS.simulate(cfg_nr)
+    # With recap_first.
+    cfg_rc = PS.Config(; cfg_kw_base..., Uqtl=0.0,
+                          recap_first=true, init_distribution=:from_recap)
+    res_rc = PS.simulate(cfg_rc)
+
+    function pairwise_r2_qtls(pop, twoN; max_pairs=200)
+        L = pop.L
+        # Allele counts per QTL.
+        counts = zeros(Float64, L)
+        for j in 1:L
+            word = ((j - 1) >> 6) + 1
+            bit = UInt64(1) << ((j - 1) & 63)
+            for c in axes(pop.H, 2)
+                if (pop.H[word, c] & bit) != 0
+                    counts[j] += 1
+                end
+            end
+        end
+        freqs = counts ./ twoN
+        # Build dense L × 2N matrix (sub-sampling polymorphic QTLs).
+        poly = findall(p -> 0.05 < p < 0.95, freqs)
+        n_poly = length(poly)
+        nsamp = min(n_poly, 30)
+        nsamp < 5 && return Float64[]
+        sample_idx = poly[1:nsamp]
+        M = zeros(Float64, nsamp, twoN)
+        for (idx, j) in enumerate(sample_idx)
+            word = ((j - 1) >> 6) + 1
+            bit = UInt64(1) << ((j - 1) & 63)
+            for c in 1:twoN
+                M[idx, c] = (pop.H[word, c] & bit) != 0 ? 1.0 : 0.0
+            end
+        end
+        r2s = Float64[]
+        for i in 1:nsamp, k in (i+1):nsamp
+            length(r2s) >= max_pairs && break
+            p1 = freqs[sample_idx[i]]; p2 = freqs[sample_idx[k]]
+            pij = sum(M[i, :] .* M[k, :]) / twoN
+            D = pij - p1 * p2
+            denom = p1 * (1-p1) * p2 * (1-p2)
+            denom > 0 || continue
+            push!(r2s, D^2 / denom)
+        end
+        return r2s
+    end
+
+    twoN = 2 * 100
+    r2_nr = pairwise_r2_qtls(res_nr.pop, twoN)
+    r2_rc = pairwise_r2_qtls(res_rc.pop, twoN)
+    mean_r2_nr = sum(r2_nr) / length(r2_nr)
+    mean_r2_rc = sum(r2_rc) / length(r2_rc)
+    @test mean_r2_nr < 0.02              # near zero — independent sampling
+    @test mean_r2_rc > 0.03              # substantially larger — coalescent LD
+    @test mean_r2_rc > 3.0 * mean_r2_nr  # at least 3× ratio
+end
+
 end # @testset top-level
