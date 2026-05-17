@@ -331,21 +331,25 @@ git checkout feature/recap-phase1
 - Sentinel resolution: `recap_burnin_structured == 0` → `n_recent`
   inside validate().
 
-**Phase 6 — End-to-end + benchmarks (~120 LOC, mostly docs)**
+**Phase 6 — End-to-end + benchmarks — DONE**
+- New "Recapitation-first workflow" section in README with quickstart,
+  demography routing table, Workflows A/B explanation, configuration
+  reference, and performance notes.
+- New `examples/recap_first.jl` demonstrating ~19× gen-0 r² boost
+  vs default (validated empirically: 0.083 vs 0.004 at N=200,
+  n_qtl=400, chr_len=1Mb).
+- Benchmark established: standalone coalescent at production scale
+  (N=5000, K=10000, n_chr=10, chr_len=1Mbp, r=1e-8, 4 threads) runs
+  in **1.5 seconds** with ~720K edges. End-to-end recap_first via
+  simulate() at modest scale: <1 second.
+- Decision on Phase 3b: **not needed**. The current implementation is
+  fast enough for practical use; the perf optimizations from the
+  original plan are deferrable indefinitely.
+- CHANGELOG entry covering all six phases (v0.14.0).
+- Project.toml version bump: 0.13.6 → 0.14.0 (BREAKING for
+  `:directional + :twoD_recent + ngen_dir > 0`).
 
-The recap feature is functionally complete after Phase 5. Phase 6 is
-polish:
+## Recapitation engine: COMPLETE
 
-1. README section: "Recapitation-first workflow":
-   - Motivation (realistic gen-0 LD vs Bernoulli-independent default).
-   - Config: `recap_first=true`, `init_distribution=:from_recap`.
-   - Demography routing table (:panmictic, :twoD_perp, :twoD_recent
-     with Workflows A/B).
-   - Example showing QTL-QTL r² difference at gen 0.
-2. Example script `examples/recap_first.jl`.
-3. Benchmark: time-to-MRCA panmictic recap vs forward-sim long burn-in
-   at typical scale (N=5000, n_chr=10).
-4. CHANGELOG entry covering Phases 4-5 (BREAKING for `:directional +
-   :twoD_recent`).
-5. Merge feature branch to main with proper release version bump
-   (likely v0.14.0 given the BREAKING change).
+All six phases shipped on `feature/recap-phase1`. 966 tests passing.
+Ready for merge to main as v0.14.0.
