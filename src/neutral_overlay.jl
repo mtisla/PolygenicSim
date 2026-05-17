@@ -58,8 +58,25 @@ function overlay_neutral_mutations(ancestry_path::AbstractString;
                                      seed::UInt64,
                                      n_threads::Int=Threads.nthreads(),
                                      output_prefix::Union{Nothing,String}=nothing)
-    mu_per_bp >= 0 || throw(ArgumentError("mu_per_bp must be >= 0"))
     anc = read_ancestry(ancestry_path)
+    return overlay_neutral_mutations(anc; mu_per_bp=mu_per_bp, seed=seed,
+                                      n_threads=n_threads,
+                                      output_prefix=output_prefix)
+end
+
+"""
+    overlay_neutral_mutations(anc::Ancestry; mu_per_bp, seed, ...)
+
+In-memory variant. Use this when you have `record_ancestry=true` and
+`save_ancestry=false`: pass `res.ancestry` directly, avoiding a disk
+roundtrip. Same semantics, identical output.
+"""
+function overlay_neutral_mutations(anc::Ancestry;
+                                     mu_per_bp::Float64,
+                                     seed::UInt64,
+                                     n_threads::Int=Threads.nthreads(),
+                                     output_prefix::Union{Nothing,String}=nothing)
+    mu_per_bp >= 0 || throw(ArgumentError("mu_per_bp must be >= 0"))
     n_chr = anc.n_chr
     samples = sort(anc.sample_nodes)
 

@@ -185,6 +185,13 @@ Base.@kwdef struct Config
     # Higher = bigger memory peak between simplifies; lower = more simplify
     # passes. Default 100 matches SLiM's tskit default.
     ancestry_simplify_interval::Int = 100
+    # When `record_ancestry=true`, controls whether the edge table is
+    # serialized to `{output_prefix}.anc.zst` at end of run. Default `true`
+    # preserves current behavior. Set `false` when the goal is to overlay
+    # neutral mutations in the same Julia session via the in-memory
+    # `SimResult.ancestry` object — avoids the disk I/O cost (the edge
+    # table can be hundreds of MB at production scale).
+    save_ancestry::Bool = true
 
     # output
     output_formats::Vector{Symbol} = Symbol[:plink]

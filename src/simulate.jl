@@ -25,11 +25,20 @@ struct SimResult
     # populated according to `cfg.oracle_phases`. Always populated as a Dict
     # (possibly empty) so callers can iterate without nothing-checks.
     oracle_records::Dict{Symbol,OracleResult}
+    # In-memory ancestry recorder. Populated when `cfg.record_ancestry=true`
+    # (PackedPop only). Always present so downstream callers can run
+    # `overlay_neutral_mutations(res.ancestry; ...)` without going through
+    # disk. `nothing` when recording was disabled.
+    ancestry::Union{Nothing,Ancestry}
 end
 
 SimResult(pop, vt, deme_id, cfg, final_gen, summary, paths, oracle) =
     SimResult(pop, vt, deme_id, cfg, final_gen, summary, paths, oracle,
-              Dict{Symbol,OracleResult}())
+              Dict{Symbol,OracleResult}(), nothing)
+
+SimResult(pop, vt, deme_id, cfg, final_gen, summary, paths, oracle, oracle_records) =
+    SimResult(pop, vt, deme_id, cfg, final_gen, summary, paths, oracle,
+              oracle_records, nothing)
 
 """
     simulate(cfg::Config) -> SimResult
@@ -457,17 +466,21 @@ function simulate(cfg::Config)
         end
     end
 
-    # ---- ancestry: final simplify + write to disk ----------------------
+    # ---- ancestry: final simplify + (optional) write to disk -----------
     if ancestry !== nothing
         copyto!(ancestry.sample_nodes, ancestry.node_of_col)
         simplify!(ancestry)
-        anc_path = write_ancestry(cfg.output_prefix, ancestry)
-        push!(paths, anc_path)
-        @info "ancestry recorded" path=anc_path n_edges=length(ancestry.edges) n_nodes=Int(ancestry.next_node - 1)
+        if cfg.save_ancestry
+            anc_path = write_ancestry(cfg.output_prefix, ancestry)
+            push!(paths, anc_path)
+            @info "ancestry recorded" path=anc_path n_edges=length(ancestry.edges) n_nodes=Int(ancestry.next_node - 1)
+        else
+            @info "ancestry recorded (in-memory only; save_ancestry=false)" n_edges=length(ancestry.edges) n_nodes=Int(ancestry.next_node - 1)
+        end
     end
 
     return SimResult(pop, vt, deme_id, cfg, total_gens, summary, paths,
-                       oracle_res, oracle_records)
+                       oracle_res, oracle_records, ancestry)
 end
 
 # ---------------------------------------------------------------------------

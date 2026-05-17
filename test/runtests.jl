@@ -1738,6 +1738,29 @@ end
     @test minimum(anc_freq.sample_nodes) == minimum(anc_lazy.sample_nodes)
     @test maximum(anc_freq.sample_nodes) == maximum(anc_lazy.sample_nodes)
 
+    # ----- save_ancestry=false: in-memory overlay path --------------------
+    # When save_ancestry=false the .anc.zst is NOT written, but the recorder
+    # lives on in SimResult.ancestry and overlay can run against it directly.
+    p_mem = joinpath(tmp, "mem")
+    cfg_mem = PS.Config(; cfg_kw..., record_ancestry=true,
+                          ancestry_simplify_interval=5,
+                          save_ancestry=false,
+                          output_prefix=p_mem)
+    res_mem = PS.simulate(cfg_mem)
+    @test res_mem.ancestry !== nothing
+    @test length(res_mem.ancestry.sample_nodes) == 2 * cfg_mem.N
+    @test !isfile(p_mem * ".anc.zst")          # disk write skipped
+    # In-memory overlay should produce identical output to a
+    # disk-roundtrip overlay (both seeded the same way; ancestry is
+    # bit-identical because save_ancestry doesn't affect simulation).
+    tab_mem  = PS.overlay_neutral_mutations(res_mem.ancestry;
+                                              mu_per_bp=1e-6, seed=UInt64(99))
+    tab_disk = PS.overlay_neutral_mutations(p_freq * ".anc.zst";
+                                              mu_per_bp=1e-6, seed=UInt64(99))
+    @test tab_mem.samples == tab_disk.samples
+    @test all(tab_mem.positions[i] == tab_disk.positions[i]
+              for i in 1:length(tab_mem.samples))
+
     # ----- Invariant 3: sample_nodes ≡ surviving haplotypes ---------------
     # After the final simplify in simulate.jl, `sample_nodes` reflects the
     # current generation's node ids, and there are exactly 2N of them
