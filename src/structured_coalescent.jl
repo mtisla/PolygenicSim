@@ -6,133 +6,149 @@
 #
 # Phase 1 scope: PANMICTIC ONLY. Multi-deme migration added in Phase 2.
 #
+# Data model (msprime/tskit-style "segment" semantics, Phase 1C):
+#   - A SEGMENT carries (left, right, node_id) — a single bp interval that
+#     traces back to a specific genealogical node at that bp range.
+#   - A LINEAGE holds a list of segments. All segments in one lineage share
+#     genealogical fate (move together at recombination, coalesce together
+#     at coalescence). Segments in one lineage can have DIFFERENT node_ids
+#     — one for each local-tree tip at the bp covered by that segment.
+#   - SegmentPool is a slab allocator with three parallel `Vector` arrays
+#     (lefts, rights, nodes) for SoA storage.
+#
 # Algorithm:
-#   - K initial lineages, each with full-chromosome ancestral material (AM)
-#     [1, chr_len_bp + 1).
+#   - K initial lineages; each has one segment (left=1, right=chr_len_bp+1,
+#     node_id=i) covering the full chromosome.
 #   - Gillespie loop with two event types:
-#       coalescence at rate k(k-1) / (2N) per generation
-#       recombination at rate (sum of lineage spans) · r_per_bp per generation
-#   - Coalescence: pick two lineages uniformly, merge AMs, emit edges for
-#     all merged intervals. Decrements total span by |A ∩ B|.
-#   - Recombination: pick lineage proportional to span, sample uniform bp,
-#     split AM. Two new lineages with new node IDs. Span unchanged.
-#   - Stopping: total_span == chr_len_bp (each bp has exactly one ancestor).
+#       coalescence at rate k(k-1)/(4N)   (k = n_active, N = effective size)
+#       recombination at rate (sum_span) · r_per_bp
+#   - Coalescence (lineages X, Y): two-pointer segment merge. For each
+#     overlap interval, allocate ONE new common-ancestor node N (per event)
+#     and emit edges N→X_seg.node, N→Y_seg.node over the overlap. The
+#     merged lineage's overlap segments carry node_id=N. Non-overlap
+#     segments carry over unchanged with their original node_ids.
+#   - Recombination at bp on lineage X: split X's segment list at bp into
+#     two new lineages. Straddling segment is split into (l, bp, node) and
+#     (bp, r, node) — both halves keep the original node_id. NO edges
+#     emitted at recombination.
+#   - Stopping: total_span == chr_len_bp (every bp has exactly one
+#     ancestor in some lineage).
 #
-# Output: edges appended to Ancestry.edges; node IDs allocated above the
-# existing range. After running, the caller should `simplify!` to compact.
-#
-# Data structures (Phase 1 essentials):
-#   - AMPool: slab allocator for sorted (left, right) interval arrays
-#   - Lineage: AM ref + node_id + span (cached)
-#   - FenwickTree: cumulative span tracker for O(log K) span-weighted sampling
+# Output: edges appended to `state.edges`. Caller can then construct an
+# `Ancestry` from the state for downstream overlay / merging with forward
+# edges.
 # =============================================================================
 
 using Random
 
 # =============================================================================
-# AM Pool — slab allocator for interval lists
+# SegmentPool — slab allocator for segment lists
 # -----------------------------------------------------------------------------
-# All AM intervals across all lineages live in one growing Vector{Int32} pair.
-# Each lineage gets a `(offset, length)` view into the pool. When a lineage's
-# AM changes, we allocate a new slice and leave the old one (garbage) — the
-# pool is reset between chromosomes, so wasted space is bounded.
+# Three parallel `Vector{T}` arrays: SoA layout. Each lineage's segments
+# live in a contiguous slice `[offset, offset + length)`. When a lineage's
+# segments change, we allocate a new slice and the old one becomes garbage
+# (pool reset between chromosomes bounds the wasted space).
 # =============================================================================
 
-mutable struct AMPool
-    lefts::Vector{Int32}
-    rights::Vector{Int32}
+mutable struct SegmentPool
+    lefts::Vector{Int32}     # segment.left (inclusive bp)
+    rights::Vector{Int32}    # segment.right (exclusive bp)
+    nodes::Vector{UInt32}    # segment.node_id (tip of local subtree at this bp)
     used::Int
 end
 
-AMPool(initial_capacity::Int=4096) =
-    AMPool(zeros(Int32, initial_capacity),
-           zeros(Int32, initial_capacity),
-           0)
+SegmentPool(initial_capacity::Int=4096) =
+    SegmentPool(zeros(Int32, initial_capacity),
+                 zeros(Int32, initial_capacity),
+                 zeros(UInt32, initial_capacity),
+                 0)
 
 # Reset pool for reuse between chromosomes.
-@inline function am_reset!(pool::AMPool)
+@inline function seg_reset!(pool::SegmentPool)
     pool.used = 0
     return nothing
 end
 
-# Allocate space for n intervals; return 1-based offset.
-@inline function am_alloc!(pool::AMPool, n::Int)
+# Allocate space for n segments; return 1-based offset.
+@inline function seg_alloc!(pool::SegmentPool, n::Int)
     offset = pool.used + 1
     pool.used += n
     if pool.used > length(pool.lefts)
         new_cap = max(2 * length(pool.lefts), pool.used)
         resize!(pool.lefts, new_cap)
         resize!(pool.rights, new_cap)
+        resize!(pool.nodes, new_cap)
     end
     return offset
 end
 
-# AM "reference": where in the pool this lineage's intervals live.
-struct AMRef
+# Reference into the pool: (offset, length) view of one lineage's segments.
+struct SegRef
     offset::Int32      # 1-based start in pool
-    length::Int32      # number of intervals
+    length::Int32      # number of segments in this list
 end
 
-# Compute total span (sum of right - left) of an AM.
-@inline function am_span(pool::AMPool, am::AMRef)
+# Compute total span (sum of right - left) of a segment list.
+@inline function seg_span(pool::SegmentPool, segs::SegRef)
     s = Int64(0)
-    @inbounds for i in 1:Int(am.length)
-        idx = Int(am.offset) + i - 1
+    @inbounds for i in 1:Int(segs.length)
+        idx = Int(segs.offset) + i - 1
         s += Int64(pool.rights[idx]) - Int64(pool.lefts[idx])
     end
     return Int32(s)
 end
 
-# Set a single-interval AM [l, r). Returns AMRef.
-function am_single!(pool::AMPool, l::Int32, r::Int32)
-    off = am_alloc!(pool, 1)
+# Create a single-segment list at position [l, r) with given node_id.
+function seg_single!(pool::SegmentPool, l::Int32, r::Int32, node::UInt32)
+    off = seg_alloc!(pool, 1)
     @inbounds pool.lefts[off] = l
     @inbounds pool.rights[off] = r
-    return AMRef(Int32(off), Int32(1))
+    @inbounds pool.nodes[off] = node
+    return SegRef(Int32(off), Int32(1))
 end
 
-# Iterator helpers (unrolled-friendly).
-@inline am_left(pool::AMPool, am::AMRef, i::Int) =
-    @inbounds pool.lefts[Int(am.offset) + i - 1]
-@inline am_right(pool::AMPool, am::AMRef, i::Int) =
-    @inbounds pool.rights[Int(am.offset) + i - 1]
+# Segment-field accessors.
+@inline seg_left(pool::SegmentPool, segs::SegRef, i::Int) =
+    @inbounds pool.lefts[Int(segs.offset) + i - 1]
+@inline seg_right(pool::SegmentPool, segs::SegRef, i::Int) =
+    @inbounds pool.rights[Int(segs.offset) + i - 1]
+@inline seg_node(pool::SegmentPool, segs::SegRef, i::Int) =
+    @inbounds pool.nodes[Int(segs.offset) + i - 1]
 
 # =============================================================================
 # Lineage
 # -----------------------------------------------------------------------------
-# Mutable struct kept small (one cache line target). Hot fields first.
+# Holds a list of segments (via SegRef). All segments share genealogical
+# fate. The lineage does NOT have a single node_id — each segment has its
+# own.
 # =============================================================================
 
 mutable struct Lineage
-    am::AMRef            # 8 bytes
-    span::Int32          # 4 bytes (cached for Fenwick weighting)
-    node_id::UInt32      # 4 bytes
-    deme::Int8           # 1 byte (always 1 in Phase 1)
-    active::Bool         # 1 byte (free-list flag)
-    # Total: ~20 bytes incl. padding
+    segs::SegRef           # 8 bytes — view into SegmentPool
+    span::Int32             # 4 bytes — cached sum of segment widths (Fenwick weight)
+    deme::Int8              # 1 byte (always 1 in Phase 1; for Phase 2 migration)
+    active::Bool            # 1 byte (free-list flag)
 end
 
-Lineage() = Lineage(AMRef(Int32(0), Int32(0)), Int32(0), UInt32(0), Int8(1), false)
+Lineage() = Lineage(SegRef(Int32(0), Int32(0)), Int32(0), Int8(1), false)
 
 # =============================================================================
 # Fenwick (Binary Indexed) Tree — cumulative spans for span-weighted sampling
 # -----------------------------------------------------------------------------
 # Used to draw a recombination target lineage in O(log K) by weighting on
-# the lineage's current AM span.
+# the lineage's current span.
 # =============================================================================
 
 mutable struct FenwickTree
     tree::Vector{Float64}
-    n::Int                # logical size (= max lineage index)
+    n::Int
 end
 
 FenwickTree(n::Int) = FenwickTree(zeros(Float64, n), n)
 
-# Resize if needed.
 function fen_resize!(f::FenwickTree, new_n::Int)
     if new_n > length(f.tree)
         resize!(f.tree, max(2 * length(f.tree), new_n))
-        # Zero-fill newly added.
         @inbounds for i in (f.n + 1):length(f.tree)
             f.tree[i] = 0.0
         end
@@ -141,7 +157,6 @@ function fen_resize!(f::FenwickTree, new_n::Int)
     return nothing
 end
 
-# Point update: add `delta` at index.
 @inline function fen_update!(f::FenwickTree, idx::Int, delta::Float64)
     @inbounds while idx <= f.n
         f.tree[idx] += delta
@@ -150,7 +165,6 @@ end
     return nothing
 end
 
-# Prefix sum [1, idx].
 @inline function fen_sum(f::FenwickTree, idx::Int)
     s = 0.0
     @inbounds while idx > 0
@@ -160,11 +174,8 @@ end
     return s
 end
 
-# Total sum (over [1, n]).
 @inline fen_total(f::FenwickTree) = fen_sum(f, f.n)
 
-# Find smallest idx such that prefix sum [1, idx] >= target.
-# Returns 0 if target > total.
 function fen_search(f::FenwickTree, target::Float64)
     idx = 0
     bit_mask = 1
@@ -189,48 +200,37 @@ end
 
 mutable struct CoalescentState
     lineages::Vector{Lineage}
-    free_idx::Vector{Int}                # stack of free lineage slots
-    n_active::Int                         # currently active lineages
-    fenwick::FenwickTree                  # span-weighted (for recomb)
-    am_pool::AMPool
+    free_idx::Vector{Int}                 # stack of free lineage slots
+    n_active::Int                          # currently active lineages
+    fenwick::FenwickTree                   # span-weighted (for recomb)
+    seg_pool::SegmentPool
     rng::Xoshiro
     chr::Int8
-    chr_len_bp::Int32                     # exclusive upper bound for bp (intervals are [l, r), r ≤ chr_len_bp + 1)
-    edges::Vector{Edge}                   # output
-    next_node_id::UInt32                  # monotonic node allocator
-    total_span::Int64                     # sum of all lineage spans; stop when == chr_len_bp
-    Ne::Int                                # effective population size
-    node_times::Vector{Float64}           # node_times[node_id] = backward time (leaves=0)
-    current_time::Float64                  # cumulative backward time (running)
+    chr_len_bp::Int32                      # intervals are [l, r), r ≤ chr_len_bp + 1
+    edges::Vector{Edge}                    # output
+    next_node_id::UInt32                   # monotonic node allocator
+    total_span::Int64                      # sum of all lineage spans (stop at chr_len_bp)
+    Ne::Int
+    node_times::Vector{Float64}            # node_times[node_id] = backward time
+    current_time::Float64                  # cumulative backward time
 end
 
 function CoalescentState(K::Int, chr::Int8, chr_len_bp::Int, Ne::Int, seed::UInt64;
-                         starting_node_id::UInt32=UInt32(0),
-                         initial_capacity::Int=max(4096, 4 * K))
-    pool = AMPool(initial_capacity)
+                          starting_node_id::UInt32=UInt32(0),
+                          initial_capacity::Int=max(4096, 4 * K))
+    pool = SegmentPool(initial_capacity)
     lineages = [Lineage() for _ in 1:max(K, 64)]
     free_idx = Int[]
     fen = FenwickTree(max(K, 64))
     rng = Xoshiro(seed)
 
-    state = CoalescentState(lineages,
-                              free_idx,
-                              0,
-                              fen,
-                              pool,
-                              rng,
-                              chr,
-                              Int32(chr_len_bp),
-                              Edge[],
-                              starting_node_id,
-                              Int64(0),
-                              Ne,
-                              Float64[],     # node_times grows as nodes allocated
-                              0.0)            # current_time = 0 at start
-    return state
+    return CoalescentState(lineages, free_idx, 0, fen, pool, rng, chr,
+                             Int32(chr_len_bp), Edge[], starting_node_id,
+                             Int64(0), Ne, Float64[], 0.0)
 end
 
-# Initialize K leaves: each with full-chromosome AM, fresh node id.
+# Initialize K leaves: each gets one segment covering the full chromosome,
+# with its own fresh node id. Leaf times set to 0.
 function init_leaves!(state::CoalescentState, K::Int)
     @assert state.n_active == 0
     chr_len = state.chr_len_bp
@@ -241,11 +241,10 @@ function init_leaves!(state::CoalescentState, K::Int)
         end
         node_id = state.next_node_id + UInt32(1)
         state.next_node_id = node_id
-        am = am_single!(state.am_pool, Int32(1), Int32(chr_len + 1))
-        state.lineages[i] = Lineage(am, chr_len, node_id, Int8(1), true)
+        segs = seg_single!(state.seg_pool, Int32(1), Int32(chr_len + 1), node_id)
+        state.lineages[i] = Lineage(segs, chr_len, Int8(1), true)
         fen_update!(state.fenwick, i, Float64(chr_len))
         state.total_span += Int64(chr_len)
-        # Record leaf time = 0.
         while Int(node_id) > length(state.node_times)
             push!(state.node_times, 0.0)
         end
@@ -255,8 +254,7 @@ function init_leaves!(state::CoalescentState, K::Int)
 end
 
 # =============================================================================
-# Coalescent operators — declared in companion file (Phase 1B).
-# Provided as forward declarations here so the file compiles.
+# Lineage management helpers
 # =============================================================================
 
 # Allocate a new active lineage slot; returns its index.
@@ -269,8 +267,8 @@ function allocate_lineage!(state::CoalescentState)
     return length(state.lineages)
 end
 
-# Deactivate a lineage (mark its slot free, zero its Fenwick weight,
-# subtract its span from total_span).
+# Deactivate a lineage: mark its slot free, zero its Fenwick weight,
+# subtract its span from total_span.
 function deactivate_lineage!(state::CoalescentState, idx::Int)
     @inbounds lin = state.lineages[idx]
     if !lin.active
@@ -284,17 +282,7 @@ function deactivate_lineage!(state::CoalescentState, idx::Int)
     return nothing
 end
 
-# Update Fenwick weight for an existing lineage after its span changes.
-@inline function lineage_set_span!(state::CoalescentState, idx::Int, new_span::Int32)
-    @inbounds lin = state.lineages[idx]
-    delta = Float64(new_span) - Float64(lin.span)
-    state.total_span += Int64(new_span) - Int64(lin.span)
-    lin.span = new_span
-    fen_update!(state.fenwick, idx, delta)
-    return nothing
-end
-
-# Record a new node id with its time. Grows node_times as needed.
+# Record a new node id's time. Grows node_times as needed.
 @inline function record_node_time!(state::CoalescentState, node_id::UInt32, time::Float64)
     while Int(node_id) > length(state.node_times)
         push!(state.node_times, 0.0)
@@ -303,9 +291,8 @@ end
     return nothing
 end
 
-# Find the i-th active lineage (1 <= i <= n_active). O(L) scan over the
-# lineage array. Acceptable for Phase 1B at small K; replaced by an O(1)
-# active-list in a later optimization pass.
+# Find the i-th active lineage (1 <= i <= n_active). O(L) scan; acceptable
+# for Phase 1 at small K (replaced with O(1) active-list later).
 function nth_active_lineage(state::CoalescentState, i::Int)
     count = 0
     @inbounds for idx in 1:length(state.lineages)
@@ -320,136 +307,139 @@ function nth_active_lineage(state::CoalescentState, i::Int)
 end
 
 # =============================================================================
-# Coalescence operator — merge two lineages' AMs and emit edges.
+# Coalescence — segment-based two-pointer merge.
 # -----------------------------------------------------------------------------
-# Two-pointer scan of sorted (left, right) interval lists. For each piece
-# of the union:
-#   - interval in (A ∩ B): the merged lineage carries this piece; emit
-#     edges from new parent → A_node and new parent → B_node.
-#   - interval in (A \ B): only A contributes; emit edge from new parent → A_node.
-#   - interval in (B \ A): only B contributes; emit edge from new parent → B_node.
+# For each piece of the union of X.segs and Y.segs:
+#   - Overlap (both X and Y have a segment): allocate one new common
+#     ancestor node N (per coalescence event). Emit Edge(N, X_seg.node)
+#     and Edge(N, Y_seg.node) over the overlap. The merged lineage's
+#     segment at this overlap carries node_id=N.
+#   - Non-overlap (only X or only Y): segment carries over to the merged
+#     lineage with its original node_id. NO edge emitted at this
+#     coalescence for that bp (the lineage just relabels).
 #
-# (We allocate a new parent node id at every coalescence; downstream
-# simplify! collapses chains of single-child internal nodes when present.)
-#
-# Side effects: emits edges, deactivates A and B, allocates new lineage,
-# records new node's time.
-#
-# Returns: index of the new (merged) lineage.
+# Returns: index of the merged lineage.
 # =============================================================================
 function coalesce_pair!(state::CoalescentState, idx_a::Int, idx_b::Int,
-                          event_time::Float64)
-    pool = state.am_pool
+                         event_time::Float64)
+    pool = state.seg_pool
     @inbounds lin_a = state.lineages[idx_a]
     @inbounds lin_b = state.lineages[idx_b]
-    a = lin_a.am
-    b = lin_b.am
-    a_node = lin_a.node_id
-    b_node = lin_b.node_id
+    a = lin_a.segs
+    b = lin_b.segs
     chr = state.chr
 
-    # Allocate new parent node.
+    # Allocate one new common-ancestor node id for this coalescence event.
     new_node = state.next_node_id + UInt32(1)
     state.next_node_id = new_node
     record_node_time!(state, new_node, event_time)
 
-    # Scratch arrays for the union AM. Allocate at worst-case size up front
-    # to avoid push!-resizes during the merge.
-    cap = Int(a.length) + Int(b.length) + 2
-    union_lefts = Vector{Int32}()
-    union_rights = Vector{Int32}()
-    sizehint!(union_lefts, cap)
-    sizehint!(union_rights, cap)
+    # Scratch arrays for the merged segment list. Worst-case size: each
+    # source segment can contribute up to 2 output segments (prefix + overlap).
+    cap = 2 * (Int(a.length) + Int(b.length)) + 4
+    out_lefts = Vector{Int32}()
+    out_rights = Vector{Int32}()
+    out_nodes = Vector{UInt32}()
+    sizehint!(out_lefts, cap)
+    sizehint!(out_rights, cap)
+    sizehint!(out_nodes, cap)
 
-    # Two-pointer walk with cursor-style (al, ar) / (bl, br) tracking so
-    # we can split a partially-consumed interval across the overlap boundary.
+    # Two-pointer walk with cursor (al, ar, anode) / (bl, br, bnode) for
+    # tracking partially-consumed segments across an overlap boundary.
     ia, ib = 1, 1
-    al = Int32(0); ar = Int32(0); bl = Int32(0); br = Int32(0)
-    if ia <= Int(a.length); al = am_left(pool, a, ia); ar = am_right(pool, a, ia); end
-    if ib <= Int(b.length); bl = am_left(pool, b, ib); br = am_right(pool, b, ib); end
+    al = Int32(0); ar = Int32(0); anode = UInt32(0)
+    bl = Int32(0); br = Int32(0); bnode = UInt32(0)
+    if ia <= Int(a.length)
+        al = seg_left(pool, a, ia); ar = seg_right(pool, a, ia); anode = seg_node(pool, a, ia)
+    end
+    if ib <= Int(b.length)
+        bl = seg_left(pool, b, ib); br = seg_right(pool, b, ib); bnode = seg_node(pool, b, ib)
+    end
 
     @inbounds while ia <= Int(a.length) || ib <= Int(b.length)
         if ia > Int(a.length)
-            # Only B left.
-            push!(union_lefts, bl); push!(union_rights, br)
-            push!(state.edges, Edge(new_node, b_node, bl, br, chr))
+            # Only B segments remain — carry over with original node_id.
+            push!(out_lefts, bl); push!(out_rights, br); push!(out_nodes, bnode)
             ib += 1
-            if ib <= Int(b.length); bl = am_left(pool, b, ib); br = am_right(pool, b, ib); end
+            if ib <= Int(b.length)
+                bl = seg_left(pool, b, ib); br = seg_right(pool, b, ib); bnode = seg_node(pool, b, ib)
+            end
         elseif ib > Int(b.length)
-            push!(union_lefts, al); push!(union_rights, ar)
-            push!(state.edges, Edge(new_node, a_node, al, ar, chr))
+            push!(out_lefts, al); push!(out_rights, ar); push!(out_nodes, anode)
             ia += 1
-            if ia <= Int(a.length); al = am_left(pool, a, ia); ar = am_right(pool, a, ia); end
+            if ia <= Int(a.length)
+                al = seg_left(pool, a, ia); ar = seg_right(pool, a, ia); anode = seg_node(pool, a, ia)
+            end
         elseif ar <= bl
-            # A interval entirely before B.
-            push!(union_lefts, al); push!(union_rights, ar)
-            push!(state.edges, Edge(new_node, a_node, al, ar, chr))
+            # A segment entirely before B: carry over A.
+            push!(out_lefts, al); push!(out_rights, ar); push!(out_nodes, anode)
             ia += 1
-            if ia <= Int(a.length); al = am_left(pool, a, ia); ar = am_right(pool, a, ia); end
+            if ia <= Int(a.length)
+                al = seg_left(pool, a, ia); ar = seg_right(pool, a, ia); anode = seg_node(pool, a, ia)
+            end
         elseif br <= al
-            # B interval entirely before A.
-            push!(union_lefts, bl); push!(union_rights, br)
-            push!(state.edges, Edge(new_node, b_node, bl, br, chr))
+            push!(out_lefts, bl); push!(out_rights, br); push!(out_nodes, bnode)
             ib += 1
-            if ib <= Int(b.length); bl = am_left(pool, b, ib); br = am_right(pool, b, ib); end
+            if ib <= Int(b.length)
+                bl = seg_left(pool, b, ib); br = seg_right(pool, b, ib); bnode = seg_node(pool, b, ib)
+            end
         else
-            # Overlap exists. Emit non-overlap prefix (from either A or B),
-            # then the overlap (with two edges), then advance.
+            # Overlap exists. Emit non-overlap prefix (from A or B), then
+            # the overlap (with two edges from new_node), then advance.
             ovl_l = al > bl ? al : bl
             ovl_r = ar < br ? ar : br
             if al < ovl_l
-                push!(union_lefts, al); push!(union_rights, ovl_l)
-                push!(state.edges, Edge(new_node, a_node, al, ovl_l, chr))
+                # A-only prefix (A starts before overlap).
+                push!(out_lefts, al); push!(out_rights, ovl_l); push!(out_nodes, anode)
             elseif bl < ovl_l
-                push!(union_lefts, bl); push!(union_rights, ovl_l)
-                push!(state.edges, Edge(new_node, b_node, bl, ovl_l, chr))
+                # B-only prefix.
+                push!(out_lefts, bl); push!(out_rights, ovl_l); push!(out_nodes, bnode)
             end
-            # Overlap: emit BOTH child edges.
-            push!(union_lefts, ovl_l); push!(union_rights, ovl_r)
-            push!(state.edges, Edge(new_node, a_node, ovl_l, ovl_r, chr))
-            push!(state.edges, Edge(new_node, b_node, ovl_l, ovl_r, chr))
-            # Advance pointers past ovl_r. If a cursor ends at ovl_r,
-            # advance to the next interval; otherwise mark its remaining
-            # left edge as ovl_r.
+            # Overlap: merged segment carries new_node, emit both edges.
+            push!(out_lefts, ovl_l); push!(out_rights, ovl_r); push!(out_nodes, new_node)
+            push!(state.edges, Edge(new_node, anode, ovl_l, ovl_r, chr))
+            push!(state.edges, Edge(new_node, bnode, ovl_l, ovl_r, chr))
+            # Advance pointers past ovl_r.
             if ar == ovl_r
                 ia += 1
-                if ia <= Int(a.length); al = am_left(pool, a, ia); ar = am_right(pool, a, ia); end
+                if ia <= Int(a.length)
+                    al = seg_left(pool, a, ia); ar = seg_right(pool, a, ia); anode = seg_node(pool, a, ia)
+                end
             else
                 al = ovl_r
             end
             if br == ovl_r
                 ib += 1
-                if ib <= Int(b.length); bl = am_left(pool, b, ib); br = am_right(pool, b, ib); end
+                if ib <= Int(b.length)
+                    bl = seg_left(pool, b, ib); br = seg_right(pool, b, ib); bnode = seg_node(pool, b, ib)
+                end
             else
                 bl = ovl_r
             end
         end
     end
 
-    # Compute span of the union.
+    # Compute merged span.
     new_span = Int32(0)
-    @inbounds for k in 1:length(union_lefts)
-        new_span += union_rights[k] - union_lefts[k]
+    @inbounds for k in 1:length(out_lefts)
+        new_span += out_rights[k] - out_lefts[k]
     end
 
-    # Allocate new AM in the pool and copy intervals over.
-    n_intervals = length(union_lefts)
-    new_off = am_alloc!(state.am_pool, n_intervals)
-    @inbounds for k in 1:n_intervals
-        state.am_pool.lefts[new_off + k - 1] = union_lefts[k]
-        state.am_pool.rights[new_off + k - 1] = union_rights[k]
+    # Allocate merged segment list in the pool.
+    n_segs = length(out_lefts)
+    new_off = seg_alloc!(pool, n_segs)
+    @inbounds for k in 1:n_segs
+        pool.lefts[new_off + k - 1] = out_lefts[k]
+        pool.rights[new_off + k - 1] = out_rights[k]
+        pool.nodes[new_off + k - 1] = out_nodes[k]
     end
-    new_am = AMRef(Int32(new_off), Int32(n_intervals))
+    new_segs = SegRef(Int32(new_off), Int32(n_segs))
 
-    # Deactivate A and B (this also subtracts their spans from total_span
-    # and updates the Fenwick tree).
+    # Deactivate A and B; activate the merged lineage.
     deactivate_lineage!(state, idx_a)
     deactivate_lineage!(state, idx_b)
-
-    # Activate the merged lineage.
     new_idx = allocate_lineage!(state)
-    @inbounds state.lineages[new_idx] = Lineage(new_am, new_span, new_node,
-                                                   Int8(1), true)
+    @inbounds state.lineages[new_idx] = Lineage(new_segs, new_span, Int8(1), true)
     state.n_active += 1
     fen_update!(state.fenwick, new_idx, Float64(new_span))
     state.total_span += Int64(new_span)
@@ -458,19 +448,197 @@ function coalesce_pair!(state::CoalescentState, idx_a::Int, idx_b::Int,
 end
 
 # =============================================================================
-# Gillespie loop — coalescence-only (no recombination, Phase 1B).
+# Recombination — segment-list split at bp.
 # -----------------------------------------------------------------------------
-# Continuous-time backward simulation. With k active lineages, rate of
-# next coalescence is `k(k-1)/(4N)` per generation (diploid). Time to
-# next event ~ Exp(rate). Picks two distinct active lineages uniformly,
-# coalesces them.
+# Split a lineage's segment list at breakpoint `bp` (inclusive for the
+# right half). Each segment going entirely left or right is carried over
+# unchanged. A segment straddling bp is split into (l, bp, node) and
+# (bp, r, node) — both halves keep the original node_id.
 #
-# Stops when only one active lineage remains (T_MRCA reached). For Phase
-# 1B this is sufficient because there is no recombination — total_span
-# decreases monotonically and reaches chr_len_bp exactly at K → 1.
+# Span is conserved (split partitions segments; total bp unchanged).
+# No edges emitted (segments retain their node_ids; only the lineage
+# membership changes).
 #
-# Returns: T_MRCA (the backward time at which the final coalescence
-# happened).
+# Returns: index of the right lineage (nonzero on success, 0 if no-op).
+# =============================================================================
+
+# Sample a breakpoint uniformly within a lineage's span. Returns bp ∈
+# (first_left, last_right) for a non-trivial split.
+function sample_breakpoint_in_segs(rng::Xoshiro, pool::SegmentPool,
+                                     segs::SegRef, span::Int32)
+    if span <= 1
+        return Int32(0)
+    end
+    # Pick uniform s ∈ {2, ..., span} so the breakpoint always splits
+    # off at least one bp on the left side.
+    s = rand(rng, 2:Int(span))
+    cum = 0
+    @inbounds for i in 1:Int(segs.length)
+        l = Int(seg_left(pool, segs, i))
+        r = Int(seg_right(pool, segs, i))
+        width = r - l
+        if cum + width >= s
+            return Int32(l + (s - cum))
+        end
+        cum += width
+    end
+    return Int32(0)
+end
+
+function recombine_lineage!(state::CoalescentState, idx::Int, bp::Int32,
+                              event_time::Float64)
+    @inbounds lin = state.lineages[idx]
+    pool = state.seg_pool
+    segs = lin.segs
+
+    # First pass: classify segments and count.
+    n_left = 0
+    n_right = 0
+    span_left = Int32(0)
+    span_right = Int32(0)
+    @inbounds for i in 1:Int(segs.length)
+        l = seg_left(pool, segs, i)
+        r = seg_right(pool, segs, i)
+        if r <= bp
+            n_left += 1
+            span_left += r - l
+        elseif l >= bp
+            n_right += 1
+            span_right += r - l
+        else
+            # Split this segment at bp.
+            n_left += 1
+            n_right += 1
+            span_left += bp - l
+            span_right += r - bp
+        end
+    end
+
+    if n_left == 0 || n_right == 0
+        # No-op: bp falls outside the segments' bp extent.
+        return 0
+    end
+
+    # Allocate left + right segment lists in the pool.
+    left_off = seg_alloc!(pool, n_left)
+    right_off = seg_alloc!(pool, n_right)
+    li = 0
+    ri = 0
+    @inbounds for i in 1:Int(segs.length)
+        l = seg_left(pool, segs, i)
+        r = seg_right(pool, segs, i)
+        nd = seg_node(pool, segs, i)
+        if r <= bp
+            li += 1
+            pool.lefts[left_off + li - 1] = l
+            pool.rights[left_off + li - 1] = r
+            pool.nodes[left_off + li - 1] = nd
+        elseif l >= bp
+            ri += 1
+            pool.lefts[right_off + ri - 1] = l
+            pool.rights[right_off + ri - 1] = r
+            pool.nodes[right_off + ri - 1] = nd
+        else
+            li += 1
+            pool.lefts[left_off + li - 1] = l
+            pool.rights[left_off + li - 1] = bp
+            pool.nodes[left_off + li - 1] = nd
+            ri += 1
+            pool.lefts[right_off + ri - 1] = bp
+            pool.rights[right_off + ri - 1] = r
+            pool.nodes[right_off + ri - 1] = nd
+        end
+    end
+
+    new_left = SegRef(Int32(left_off), Int32(n_left))
+    new_right = SegRef(Int32(right_off), Int32(n_right))
+
+    # Deactivate the original lineage.
+    deactivate_lineage!(state, idx)
+
+    # Activate the two child lineages. NO new node ids allocated, NO edges
+    # emitted (segments retain their node ids).
+    left_idx = allocate_lineage!(state)
+    @inbounds state.lineages[left_idx] = Lineage(new_left, span_left, Int8(1), true)
+    state.n_active += 1
+    fen_update!(state.fenwick, left_idx, Float64(span_left))
+    state.total_span += Int64(span_left)
+
+    right_idx = allocate_lineage!(state)
+    @inbounds state.lineages[right_idx] = Lineage(new_right, span_right, Int8(1), true)
+    state.n_active += 1
+    fen_update!(state.fenwick, right_idx, Float64(span_right))
+    state.total_span += Int64(span_right)
+
+    return right_idx
+end
+
+# =============================================================================
+# Gillespie loop — full Hudson ARG (coalescence + recombination).
+# -----------------------------------------------------------------------------
+# Continuous-time backward simulation with rates:
+#   coal_rate   = k(k-1)/(4N) per generation (diploid, panmictic)
+#   recomb_rate = total_span · r_per_bp per generation
+# Time to next event ~ Exp(total_rate); event type drawn proportional to
+# its rate.
+#
+# Stops when total_span == chr_len_bp (every bp resolved).
+# =============================================================================
+function run_coalescent!(state::CoalescentState, r_per_bp::Float64;
+                          max_events::Int=10_000_000)
+    chr_len = Int64(state.chr_len_bp)
+    nevents = 0
+    while state.total_span > chr_len
+        k = state.n_active
+        if k <= 1
+            break
+        end
+        coal_rate = (k * (k - 1)) / (4.0 * state.Ne)
+        recomb_rate = Float64(state.total_span) * r_per_bp
+        total_rate = coal_rate + recomb_rate
+        if total_rate <= 0.0
+            break
+        end
+        dt = randexp(state.rng) / total_rate
+        state.current_time += dt
+        if rand(state.rng) < coal_rate / total_rate
+            # Coalescence.
+            i1 = rand(state.rng, 1:k)
+            i2 = rand(state.rng, 1:(k - 1))
+            if i2 >= i1
+                i2 += 1
+            end
+            idx1 = nth_active_lineage(state, i1)
+            idx2 = nth_active_lineage(state, i2)
+            coalesce_pair!(state, idx1, idx2, state.current_time)
+        else
+            # Recombination — pick lineage proportional to span via Fenwick.
+            target = rand(state.rng) * fen_total(state.fenwick)
+            idx = fen_search(state.fenwick, target)
+            if idx < 1 || idx > length(state.lineages) || !state.lineages[idx].active
+                continue
+            end
+            @inbounds lin = state.lineages[idx]
+            bp = sample_breakpoint_in_segs(state.rng, state.seg_pool, lin.segs, lin.span)
+            if bp == 0
+                continue
+            end
+            recombine_lineage!(state, idx, bp, state.current_time)
+        end
+        nevents += 1
+        if nevents >= max_events
+            error("run_coalescent!: max_events ($max_events) exceeded; " *
+                  "likely a parameter producing runaway recombination")
+        end
+    end
+    return state.current_time
+end
+
+# =============================================================================
+# Convenience: coalescence-only (no recombination). Equivalent to
+# run_coalescent!(state, 0.0) but uses the simpler n_active > 1 stopping
+# condition since without recombination, n_active reaches 1 exactly when
+# total_span hits chr_len_bp.
 # =============================================================================
 function run_coalescent_norecomb!(state::CoalescentState)
     while state.n_active > 1
@@ -478,7 +646,6 @@ function run_coalescent_norecomb!(state::CoalescentState)
         rate = (k * (k - 1)) / (4.0 * state.Ne)
         dt = randexp(state.rng) / rate
         state.current_time += dt
-        # Pick two distinct active indices in {1..k}.
         i1 = rand(state.rng, 1:k)
         i2 = rand(state.rng, 1:(k - 1))
         if i2 >= i1

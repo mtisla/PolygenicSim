@@ -2196,4 +2196,84 @@ end
                for i in eachindex(s1.edges))
 end
 
+# ---------------------------------------------------------------------------
+# Structured coalescent — Phase 1C: full Hudson ARG with recombination.
+# Validates against analytical predictions:
+#   - Total branch length per bp matches 4N · H_{K-1} (Watterson) across
+#     a range of recombination rates. This is the GATE: the previous
+#     single-node-per-lineage shortcut systematically inflated TBL/bp
+#     under recomb. With the segment-based model, the mean TBL/bp is
+#     unbiased and the bias does NOT grow with r.
+#   - Stopping condition reached (total_span == chr_len_bp).
+#   - Determinism per (seed, K, N, r): bit-identical edge tables.
+# ---------------------------------------------------------------------------
+@testset "Structured coalescent — recombination + Watterson TBL (Phase 1C)" begin
+    # ----- Smoke: small recomb run completes correctly --------------------
+    state = PS.CoalescentState(6, Int8(1), 200, 20, UInt64(42))
+    PS.init_leaves!(state, 6)
+    t_mrca = PS.run_coalescent!(state, 1e-3)
+    @test state.total_span == 200                       # stopping cond reached
+    @test length(state.edges) > 6                       # more than no-recomb (K-1 coal)
+    @test t_mrca > 0
+
+    # ----- Smoke: r = 0 in run_coalescent! ≡ no-recomb path ---------------
+    s_norec = PS.CoalescentState(4, Int8(1), 100, 10, UInt64(42))
+    PS.init_leaves!(s_norec, 4)
+    t_norec = PS.run_coalescent!(s_norec, 0.0)
+    @test s_norec.n_active == 1
+    @test length(s_norec.edges) == 2 * (4 - 1)          # 2 edges per coal, K-1 coals
+
+    # ----- Determinism: same (seed, K, N, r) → same edges -----------------
+    s1 = PS.CoalescentState(10, Int8(1), 500, 30, UInt64(7))
+    PS.init_leaves!(s1, 10)
+    t1 = PS.run_coalescent!(s1, 5e-4)
+    s2 = PS.CoalescentState(10, Int8(1), 500, 30, UInt64(7))
+    PS.init_leaves!(s2, 10)
+    t2 = PS.run_coalescent!(s2, 5e-4)
+    @test t1 == t2
+    @test length(s1.edges) == length(s2.edges)
+    @test all(s1.edges[i].parent_node == s2.edges[i].parent_node &&
+               s1.edges[i].child_node == s2.edges[i].child_node &&
+               s1.edges[i].left_bp == s2.edges[i].left_bp &&
+               s1.edges[i].right_bp == s2.edges[i].right_bp
+               for i in eachindex(s1.edges))
+
+    # ----- All edges have valid time direction ---------------------------
+    # In the segment model, every emitted edge represents an actual
+    # coalescent event at the bp covered: parent_time > child_time always.
+    for e in s1.edges
+        @test s1.node_times[Int(e.parent_node)] > s1.node_times[Int(e.child_node)]
+    end
+
+    # ----- Validation gate: TBL/bp matches Watterson across r values ------
+    # Previously, the single-node-per-lineage shortcut produced
+    # +16-21% inflation that GREW with r. With the segment model, the
+    # mean should be unbiased and stable across r.
+    K = 30
+    N_eff = 100
+    chr_len = 1000
+    H = sum(1.0/k for k in 1:(K-1))
+    expected = 4.0 * N_eff * H
+    nreps = 100
+    for r in (0.0, 1e-6, 1e-5, 1e-4)
+        tbls = zeros(nreps)
+        for rep in 1:nreps
+            s = PS.CoalescentState(K, Int8(1), chr_len, N_eff, UInt64(2000 + rep))
+            PS.init_leaves!(s, K)
+            PS.run_coalescent!(s, r)
+            total = 0.0
+            for e in s.edges
+                elen = s.node_times[Int(e.parent_node)] - s.node_times[Int(e.child_node)]
+                total += elen * Float64(e.right_bp - e.left_bp)
+            end
+            tbls[rep] = total / Float64(chr_len)
+        end
+        sample_mean = sum(tbls) / nreps
+        sample_sd = sqrt(sum((tbls .- sample_mean) .^ 2) / (nreps - 1))
+        sem = sample_sd / sqrt(nreps)
+        z = (sample_mean - expected) / sem
+        @test abs(z) < 3.5    # within 3.5 SE (loose to absorb high-r variance)
+    end
+end
+
 end # @testset top-level
