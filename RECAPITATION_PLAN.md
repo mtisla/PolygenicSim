@@ -125,17 +125,73 @@ Tracked as a running counter, updated O(1) per event.
 - ~280 LOC: data structures + Fenwick tree + AMPool + state setup.
 - Verified: smoke test compiles and produces expected Fenwick queries.
 
-**Phase 1B — Coalescence operator (no recombination yet)**
+**Phase 1B — Coalescence operator (no recombination yet) — DONE (fc7b9eb)**
 - ~250 LOC: two-pointer AM union with edge emission, `coalesce_pair!`,
   Gillespie loop with coalescence-only events.
-- Tests: panmictic K-leaf coalescent to MRCA; MRCA time ≈ `4N · H_{2N−1}`
-  within 2 SE; single-tree limit per chromosome.
+- Tests: panmictic K-leaf coalescent to MRCA; MRCA time ≈ `4N · (1−1/K)`
+  within 3 SE; single-tree topology per chromosome; determinism.
+- Status: 33 new tests, all 548 passing on `feature/recap-phase1`.
 
-**Phase 1C — Recombination operator**
-- ~300 LOC: AM split at bp, two-lineage allocation, span sampling,
-  Gillespie extended.
-- Tests: Watterson SFS recovery for placed mutations; pairwise LD decay
-  matches `1/(1 + 4Nrd)` Hill-Robertson within 2 SE.
+**Phase 1C — Segment-based model + recombination [REVISED, ATTEMPTED & ROLLED BACK]**
+
+Initial attempt used a "single node_id per lineage" shortcut. **Fundamentally
+broken for recombination**: empirical total branch length per bp drifted up
+to +21% above analytical `4N · H_{K-1}` as `r` increased.
+
+**Root cause:** when two lineages A and B coalesce, my code emitted edges
+for ALL of `A ∪ B` (intersection + non-intersection). For bp positions in
+`A \ B`, there's no real coalescent event — A's lineage continues forward
+unchanged. Emitting a "pass-through" edge inserts a phantom branch of
+length `(t_coal − t_A)` at every such bp, spuriously inflating the local
+tree's branch length.
+
+Without recombination (Phase 1B), AMs never fragment → every coalescence
+has full overlap → no non-intersection parts → no spurious edges. So
+Phase 1B passes its tests correctly. The bug only manifests once recomb
+fragments AMs.
+
+**Correct fix (msprime/tskit semantics):** segment-based model.
+
+- A **Segment** carries `(left, right, node_id)`.
+- A **Lineage** holds a *list of segments*. All segments in one lineage
+  share genealogical fate (move together at recombination, coalesce
+  together at coalescence). Segments in one lineage may carry *different*
+  `node_id`s — one per local-tree tip at that bp.
+- **Coalescence:** two-pointer segment merge of lineages X and Y.
+  - For overlapping segment intervals (intersection): allocate ONE new
+    common-ancestor node N, emit edges `(N → X_seg.node)` and
+    `(N → Y_seg.node)` over the overlap. The overlap becomes a new
+    segment in the merged lineage with `node_id = N`.
+  - For non-overlapping intervals (A\B or B\A): no edges. The segments
+    carry over to the merged lineage with their *original* `node_id`s.
+- **Recombination:** split the lineage's segment list at breakpoint `bp`.
+  - Segments entirely left/right go to the respective new lineage.
+  - The straddling segment (if any) is split at `bp`; both halves keep
+    the original `node_id`.
+  - **No edges emitted.** New lineages share `node_id`s with the
+    original; only the lineage-membership relation changes.
+
+**Implementation cost vs original "simple" approach:**
+- ~80 LOC new: `Segment` type, `SegmentPool` (3-way SoA: lefts, rights,
+  node_ids).
+- ~50 LOC: `Lineage` refactored to hold a segment list (offset, length
+  into SegmentPool).
+- ~150 LOC: `coalesce_pair!` rewritten with proper segment merge.
+- ~80 LOC: `recombine_lineage!` rewritten (simpler — no edge emission).
+- ~30 LOC: helpers updated.
+- ~380 LOC replacement (vs ~300 LOC originally estimated).
+
+**Phase 1C (revised) — Segment model + recombination**
+- ~380 LOC implementation; replaces the AM-pool approach.
+- Tests: panmictic Watterson SFS recovery (total branch length per bp
+  matches `4N · H_{K-1}` within 3 SE across r ∈ {0, 1e-6, 1e-5, 1e-4});
+  pairwise LD decay matches Hill-Robertson `1/(1 + 4Nrd)` within 2 SE
+  at distances 1kb, 10kb, 100kb, 1Mb.
+- Validation gate: bias is FLAT across r values (not growing with r as
+  the simple model did).
+- Note: existing Phase 1B tests should be preserved — segment model is
+  a strict superset; K-leaf MRCA-time test still works with segments
+  (each lineage starts with a single full-chromosome segment).
 
 **Phase 2 — Structured demography**
 - ~150 LOC: per-deme lineage pools, migration operator, deme-aware rate
@@ -239,15 +295,41 @@ To resume in a fresh session:
 
 ```
 git checkout feature/recap-phase1
-# Current state: Phase 1A foundation committed.
-# Next: implement Phase 1B (coalescence operator).
-# See: src/structured_coalescent.jl — add coalesce_pair! and Gillespie loop.
-# Validation: panmictic K-leaf MRCA time test.
+# Current state: Phase 1B committed (fc7b9eb). 548 tests passing.
+# Next: implement Phase 1C (REVISED — segment-based model + recombination).
 ```
 
-The foundation file already has stubs and infrastructure for the operators;
-the next session's first task is to implement `coalesce_pair!` (AM union
-with edge emission via two-pointer merge), then a coalescence-only
-Gillespie loop, then validate MRCA time.
+The "simple shortcut" Phase 1C attempt (single node_id per lineage,
+emit edges for entire A ∪ B) was tried and rolled back — it produces
++16-21% overestimate of total branch length per bp under recombination,
+because non-intersection coalescence parts emit phantom branches.
 
-Phase 1B is the next session's scope; aim for ~250 LOC + ~80 LOC tests.
+Phase 1C-redo scope: ~380 LOC implementation + ~150 LOC tests.
+Validation gate: total branch length per bp matches `4N · H_{K-1}`
+within 3 SE across all `r` values tested. The Phase 1B tests must
+continue to pass (segment model is a strict superset).
+
+Key implementation steps for next session:
+
+1. Introduce `Segment` type: `(left, right, node_id)`. SoA pool with
+   3 parallel `Vector` arrays.
+2. Refactor `Lineage` to hold a `(segment_offset, segment_length)` view
+   into the pool, plus cached `total_span`. Drop the single `node_id`.
+3. Rewrite `coalesce_pair!`:
+   - Two-pointer merge of segment lists.
+   - Allocate one new common-ancestor node N per coalescence event.
+   - Overlap intervals: emit two edges `N → X_seg.node`, `N → Y_seg.node`;
+     overlap segment in merged lineage gets `node_id = N`.
+   - Non-overlap intervals: segments carry over unchanged.
+4. Rewrite `recombine_lineage!`:
+   - Split segment list at `bp`. NO edges emitted.
+   - Two new lineages; segments keep their `node_id`s.
+5. Update Gillespie loop (mostly unchanged; just adapt to new
+   coal/recomb signatures).
+6. Tests:
+   - Re-run Phase 1B test with segment model (sanity check).
+   - Watterson per-bp branch length within 3 SE for r ∈ {0, 1e-6, 1e-5, 1e-4}.
+   - Determinism per (seed, n_threads).
+
+Once Phase 1C-redo passes, move to Phase 2 (structured demography),
+unchanged from plan.
