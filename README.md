@@ -1,13 +1,17 @@
 # PolygenicSim.jl
 
-Forward-time simulator for polygenic-trait evolution under Gaussian fitness,
-with a finite biallelic-sites mutation model, multiple chromosomes, panmictic
-or 2D non-toroidal stepping-stone demography, and instantaneous population
-expansion. Supports neutral, stabilizing, and directional selection regimes.
+Forward-time simulator for polygenic-trait evolution under Gaussian fitness.
+Supports finite-sites and infinite-sites mutation models, multiple chromosomes,
+panmictic or 2D non-toroidal stepping-stone demography, instantaneous
+population expansion, and SLiM-style ancestry recording with post-hoc neutral
+mutation overlay (msprime-recapitation analog, pure Julia). Selection regimes:
+neutral, stabilizing, directional.
 
-This package implements **Phases 1, 2, 4, 5** of the spec in
-`IMPLEMENTATION_PLAN.md`. Phases 3 (haplotype additive-value tracking) and 6
-(Bulmer / ρ_B / analysis module) are deferred — see [`SUMMARY.md`](./SUMMARY.md).
+This package implements **Phases 1, 2, 4, 5, 6** of the spec in
+`IMPLEMENTATION_PLAN.md` — Phase 6 (oracle Bulmer **B** + Δ_cross +
+ρ_pearson direction tests) shipped in v0.6.x and has been extended through
+v0.13.x. Phase 3 (haplotype additive-value tracking) remains deferred — see
+[`SUMMARY.md`](./SUMMARY.md).
 
 ---
 
@@ -32,6 +36,7 @@ This package implements **Phases 1, 2, 4, 5** of the spec in
 - [I/O formats](#io-formats)
 - [Equilibrium diagnostics](#equilibrium-diagnostics)
 - [Oracle statistics](#oracle-statistics)
+- [Ancestry recording + neutral overlay](#ancestry-recording--neutral-overlay)
 - [Loading prior state](#loading-prior-state)
 - [Tests](#tests)
 - [Versioning](#versioning)
@@ -143,6 +148,7 @@ To capture a phase-preserving restart point, add `:native` to
 examples/panmictic.jl          # eq + 3 directional reps loaded from eq
 examples/stepping_stone.jl     # 5×5 grid, three regimes (cline_amp=0 by default)
 examples/expansion.jl          # 10× panmictic + 4× stepping-stone expansion
+examples/multiphase_oracle.jl  # init / settled / final oracle in one run
 ```
 
 ---
@@ -332,6 +338,16 @@ Pick one of the two models; setting both is an error.
 | `output_formats` | `Vector{Symbol}` | `[:plink]` | Subset of `:plink`, `:native`, `:summary`, `:oracle`. |
 | `output_prefix` | `String` | `"polygenicsim"` | Filename prefix for all output files. |
 | `save_settled` | `Bool` | `false` | When `true` and `ngen_eq_eff > 0`, write a Phase-A snapshot (`{descriptor}.psim.zst` + `{descriptor}.toml` sidecar) to `<pkgdir>/data/settled/` so follow-on directional runs can `load_from=...` and skip the settling phase. See [Settled-state cache](#settled-state-cache). |
+
+### Ancestry recording + neutral overlay
+
+See [Ancestry recording + neutral overlay](#ancestry-recording--neutral-overlay) for the full workflow.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `record_ancestry` | `Bool` | `false` | When `true`, the simulator logs an edge table (parent_node → child_node, bp-range, chr) every generation so neutral mutations can be overlaid post-hoc without forward-simulating them. Adds ≲15% to per-gen wall-time at production scale; recording is a pure side-channel (`pop.H` is bit-identical with/without it for fixed seed). |
+| `ancestry_simplify_interval` | `Int` | `100` | Generations between `simplify!` passes that drop edges with no living descendants. Lower = tighter sustained memory; higher = more peak edges between passes. SLiM's default is 100. |
+| `save_ancestry` | `Bool` | `true` | Gate the `{prefix}.anc.zst` disk write. Set `false` for in-session overlay (`overlay_neutral_mutations(res.ancestry; ...)`) — skips the I/O when you don't need the ancestry on disk. Requires `record_ancestry=true`. |
 
 ### Oracle statistics (only used when `:oracle ∈ output_formats`)
 
@@ -694,6 +710,8 @@ For fixed seed and matching `n_threads`, both backends produce
   set `n_int=0` to disable diagnostics entirely; `n_int=k>0` logs every `k`
   generations explicitly.
 - **Oracle TSV** (`{prefix}.oracle.tsv`) — written when `:oracle ∈ output_formats`.
+- **Ancestry** (`{prefix}.anc.zst`) — written when `record_ancestry=true && save_ancestry=true`. Custom zstd-compressed binary edge table with `PSAN` magic. Header carries `(n_nodes, n_edges, n_chr, chr_len_bp)` and the surviving sample node range; each `Edge` is 20 bytes (parent_node, child_node, left_bp, right_bp, chr). See [Ancestry recording + neutral overlay](#ancestry-recording--neutral-overlay).
+- **Neutral overlay** (`{prefix}.neutral.zst`) — written by `overlay_neutral_mutations(...; output_prefix=...)`. Custom zstd-compressed binary sparse panel with `PSNV` magic; one record per surviving haplotype lists the bp positions of its inherited neutral mutations. Pair with the QTL haplotypes via `write_merged_genotype_plink` for a single PLINK panel covering both site classes.
 
 ---
 
@@ -910,6 +928,158 @@ with `meta.gen` recording the resolved absolute generation. Setting
 
 ---
 
+## Ancestry recording + neutral overlay
+
+A SLiM-style tree-sequence recorder + msprime-recapitation analog,
+implemented in pure Julia. Decouples GWAS-realism marker-panel size from
+selection-simulation cost: forward-simulate only the QTL sites (fast),
+record the ancestry of every surviving haplotype during the run, then
+drop arbitrarily many neutral mutations along the recorded lineages
+after the run finishes.
+
+**Why.** A 100k–1M-site neutral panel co-segregating with the QTLs is
+the standard input for GWAS / fine-mapping / LD pruning validation, but
+forward-simulating that many sites is wasteful — neutral sites don't
+affect selection dynamics. Recording + overlaying the same panel
+afterwards is ~`n_neutral / n_qtl` × cheaper.
+
+### Workflow
+
+```julia
+using PolygenicSim
+const PS = PolygenicSim
+
+# 1. Forward-simulate QTLs with recording on (no neutral sites forward-sim'd).
+cfg = PS.Config(
+    N=5_000, n_qtl=4_000, n_neutral=0, Uqtl=0.02,
+    h2=0.5, selection_mode=:directional, shift_sd=4.0,
+    ngen_eq=15_000, ngen_dir=200,
+    record_ancestry          = true,
+    ancestry_simplify_interval = 100,    # SLiM default
+    save_ancestry            = false,    # in-memory only — skip the .anc.zst write
+    output_formats           = [:summary],
+    output_prefix            = "run1",
+    seed = UInt64(1),
+)
+res = PS.simulate(cfg)
+# res.ancestry :: Ancestry — surviving lineages, simplified at end
+
+# 2. Overlay an arbitrarily dense neutral panel along the recorded ancestry.
+tbl = PS.overlay_neutral_mutations(res.ancestry;
+                                     mu_per_bp = 1e-8,
+                                     seed      = UInt64(7))
+# tbl :: NeutralMutationTable — per-haplotype sparse list of neutral bp positions
+
+# 3. Fuse QTL haplotypes (res.pop.H) + neutral overlay into one PLINK panel.
+PS.write_merged_genotype_plink("run1_full", res, tbl)
+# → run1_full.{bed,bim,fam,effects.tsv}, sites sorted by (chr, bp);
+#   effects.tsv carries α=0 for neutral sites.
+```
+
+### Two-call ergonomics: disk vs in-memory
+
+Both variants of `overlay_neutral_mutations` produce bit-identical output:
+
+```julia
+# (a) In-memory: cheapest when you stay in one session.
+tbl = PS.overlay_neutral_mutations(res.ancestry;
+                                     mu_per_bp=1e-8, seed=UInt64(7))
+
+# (b) From disk: pair with `save_ancestry=true` to overlay later or from a
+#     different process. The .anc.zst can be re-overlaid as many times as
+#     you want with different (mu_per_bp, seed) without rerunning the sim.
+tbl = PS.overlay_neutral_mutations("run1.anc.zst";
+                                     mu_per_bp=1e-8, seed=UInt64(7),
+                                     output_prefix="run1")
+# → writes run1.neutral.zst as a side effect
+```
+
+### What's recorded
+
+An `Edge` represents one inherited chromosomal segment:
+
+```julia
+struct Edge
+    parent_node::UInt32   # node id of parent's contributing haplotype
+    child_node::UInt32    # node id of child's haplotype
+    left_bp::Int32        # inclusive
+    right_bp::Int32       # exclusive (half-open SLiM convention)
+    chr::Int8             # 1..n_chr
+end                       # 20 bytes with padding
+```
+
+Every haplotype (across all generations) gets a monotonic `node_id::UInt32`.
+A persistent `node_of_col::Vector{UInt32}` of length `2N` maps the
+current generation's haplotype columns to node ids. Edges are appended
+per-thread per-chunk (no contention), merged before `swap_buffers!`, and
+periodically passed through `simplify!` to drop edges with no living
+descendants.
+
+The final `Ancestry` exposed via `SimResult.ancestry` carries:
+
+```julia
+mutable struct Ancestry
+    edges::Vector{Edge}
+    node_of_col::Vector{UInt32}     # final-gen column → node id
+    sample_nodes::Vector{UInt32}    # surviving leaves (= 2N nodes)
+    next_node::UInt32               # monotonic node allocator
+    gen_counter::Int
+    simplify_interval::Int
+    n_chr::Int
+    chr_len_bp::Int
+end
+```
+
+### Determinism & threading
+
+- **Recording is a pure side-channel.** Per-thread edge buffers add no
+  extra RNG draws — for a fixed `(seed, n_threads)`, `pop.H` is
+  bit-identical with or without `record_ancestry=true`. Verified by a
+  cross-phase invariant test.
+- **`simplify!` is lossless on surviving lineages.** Two runs that differ
+  only in `ancestry_simplify_interval` produce edge sets that — once both
+  are final-simplified — are equal as sets. Verified by an invariant test.
+- **Overlay is per-`(seed, n_threads)` deterministic.** Per-chromosome
+  threads run on independent edge ranges; per-edge Poisson + uniform
+  draws are seeded by `(seed, chr)`, independent of thread schedule.
+- **Per-kernel parallelism:**
+  - Edge emission: `Threads.@threads :static` over offspring chunks
+    (already-parallel reproduction kernel, zero added contention).
+  - `simplify!`: `Threads.@threads :static` per chromosome.
+  - Overlay placement + leaf propagation: `Threads.@threads :dynamic`
+    per chromosome (work-stealing for load balance).
+
+### Cost
+
+At the reference config (N=5000, n_qtl=4000, n_chr=10, n_threads=4,
+ngen_eq=15000, simplify_interval=100):
+
+- **Recording overhead**: ≤ 15% added per-gen wall-time.
+- **Peak edges between simplifies**: ~20M (~400 MB).
+- **Sustained edges after simplify**: ~5–10% of peak (~30 MB).
+- **Overlay at `mu_per_bp = 1e-8`** (≈10K neutral mutations total):
+  sub-second; dominated by per-edge Poisson draws.
+
+ISM constraint: ancestry recording is currently supported for both FSM and
+ISM mutation models; the recorded edges are independent of which model
+the simulator is using for QTLs.
+
+### Programmatic API
+
+| Function | Purpose |
+|---|---|
+| `Ancestry(N, n_chr, chr_len_bp; simplify_interval=100)` | Construct an empty recorder (normally done by `simulate` when `record_ancestry=true`). |
+| `simplify!(anc::Ancestry)` | Drop edges not on any leaf-reachable lineage; sort by `(chr, gen)` for downstream contiguity. |
+| `write_ancestry(prefix, anc)` | Write `{prefix}.anc.zst` (PSAN binary format). |
+| `read_ancestry(path)` | Load `{prefix}.anc.zst` back into an `Ancestry`. |
+| `overlay_neutral_mutations(anc; mu_per_bp, seed, [output_prefix])` | In-memory overlay; returns `NeutralMutationTable`. |
+| `overlay_neutral_mutations(path; mu_per_bp, seed, [output_prefix])` | Same, loading the ancestry from disk first. |
+| `write_neutral_mutations(prefix, table)` | Write `{prefix}.neutral.zst` (PSNV binary format). |
+| `read_neutral_mutations(path)` | Load `{prefix}.neutral.zst` back into a table. |
+| `write_merged_genotype_plink(prefix, res, table; include_qtl=true, include_neutral=true, pheno=nothing)` | Fuse QTL + neutral sites into one PLINK panel. Returns a NamedTuple `(bed, bim, fam, effects, n_sites, n_qtl, n_neutral)`. |
+
+---
+
 ## Loading prior state
 
 ```julia
@@ -929,20 +1099,28 @@ PS.simulate(PS.Config(load_plink_prefix = "external",
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-**360 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
+**484 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
 segregation, Haldane recombination at `d ∈ {0.01, 0.1, 0.5, 1.0} M`,
 cross-chr LD, neutral drift, selection regimes), Phase-2 zero-allocation
 kernels and chunk determinism, Phase-4 spatial structure (DemeLayout, `m=0`
 isolation vs `m=high` panmictic asymptote, cline gradient), Phase-5
 expansion (size scaling including fractional factors, mean-AF preservation,
-stepping-stone integration, checkpoint correctness), weighted-average
-per-deme diagnostics for 2D, the `Uqtl/Uneu` auto-derivation and
-validation, the QTL-only fast path, a regression test asserting threaded
-reductions match the `Statistics` reference under `JULIA_NUM_THREADS=4`,
-the single-knob `ngen` mode, the `:twoD_recent` demography (structure
-onset, panmictic vs structured `load_from` interaction), the `:fixed_p`
-init distribution, and oracle statistics (B perm-p, Δ_cross sign-flip
-null, rho_pearson, panmictic + structured paths, TSV side-effect).
+stepping-stone integration, checkpoint correctness), Phase-6 oracle
+statistics (B perm-p, Δ_cross sign-flip null, ρ_pearson family with
+dp80 / q05 / q10 / q25 / q05_dp80 / q10_dp80 / q25_dp80 variants,
+panmictic + structured paths, multi-phase recording, MAF cutoff, TSV
+side-effects), ISM mutation kernel + Watterson init, weighted-average
+per-deme diagnostics for 2D, the `Uqtl/Uneu` auto-derivation and validation,
+the QTL-only fast path, a regression test asserting threaded reductions
+match the `Statistics` reference under `JULIA_NUM_THREADS=4`, the
+single-knob `ngen` mode, the `:twoD_recent` demography (structure onset,
+panmictic vs structured `load_from` interaction), the `:fixed_p` init
+distribution, `save_settled` round-trip + TOML sidecar, t½-multiple
+checkpoints with `save_at_checkpoints` toggle, and the ancestry/overlay
+pipeline (recording-is-non-invasive invariant, `simplify!` loss-free
+on surviving lineages at any `simplify_interval`, sample-node bookkeeping
+across buffer-swaps and disk roundtrip, in-memory overlay parity with
+disk-roundtrip overlay, merged-PLINK file-size formula).
 
 To run with parallelism (recommended):
 
