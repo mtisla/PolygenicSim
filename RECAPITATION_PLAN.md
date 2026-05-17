@@ -308,63 +308,80 @@ To resume in a fresh session:
 
 ```
 git checkout feature/recap-phase1
-# Current state: Phase 3a committed (3f08cd3). 943 tests passing.
-# Next: Phase 4 (recap_first Config integration — user-facing).
-#       Phase 3b (perf opts) is deferrable.
+# Current state: Phase 4 committed (6c2aac5). 956 tests passing.
+# Next: Phase 5 (workflow routing for :twoD_recent + neutral skip-forward).
 ```
 
 **Phase 3a — Multi-chromosome threaded driver — DONE (3f08cd3)**
-- ~150 LOC implementation + ~120 LOC tests.
-- CoalescentResult struct, recapitate_panmictic, recapitate_structured.
-- Per-chr `@threads :dynamic`, thread-deterministic via per-chr seed
-  scrambling.
-- Empirical: 2.76× speedup at 4 threads on production-scale workload
-  (K=2000, Ne=1000, n_chr=10, chr_len=1Mbp).
 
-**Phase 3b — Perf optimizations (DEFERRABLE)**
+**Phase 3b — Perf optimizations — DEFERRABLE**
 
-Lower priority since 3a's threading delivers most of the practical
-speedup. Quick wins when scaling needs warrant:
-- O(1) active-list (swap-and-pop) replaces O(L) `nth_active_lineage`
-  scan. Needed before K > ~2000.
-- Compile-time demography specialization (Val{1} vs Val{N}).
-- Slab allocator for Edge vector + batched RNG.
+**Phase 4 — `recap_first` Config integration — DONE (6c2aac5)**
+- ~210 LOC implementation (src/recap.jl) + 21 LOC simulate.jl
+  integration + 13 tests (956 total).
+- Strict Config validation (recap_first ↔ :from_recap pairing).
+- Demography routing: :panmictic + :twoD_recent → panmictic coalescent;
+  :twoD_perp → structured coalescent.
+- HEADLINE VALIDATION PASSED: QTL-QTL r² with recap_first 26× larger
+  than without (0.105 vs 0.004 at N=100, chr_len=500k). Test asserts
+  recap r² > 3× no-recap r².
 
-**Phase 4 — `recap_first` Config integration (USER-FACING, ~300 LOC)**
+**Phase 5 — Workflow routing for `:twoD_recent` (~150 LOC)**
 
-The standalone coalescent module is complete and validated. Phase 4
-wires it into `simulate()` as the `recap_first=true` workflow.
+Two semantic changes to simulate()'s phase orchestration. Both apply
+to recap_first runs (the no-recap behavior is unchanged for back-compat).
 
-Implementation steps:
+(A) **Neutral skip-forward (Workflow A):**
+When `selection_mode = :neutral && demography = :twoD_recent && recap_first`,
+skip the full forward settling phase. Instead, just run
+`recap_burnin_structured` (default = n_recent) generations of
+structured-neutral forward sim after recap completes. Rationale: under
+:neutral, the coalescent provides full mutation-drift equilibrium —
+ngen_eq forward time adds nothing except wall-clock cost. The
+n_recent structured gens are needed to produce the recent demographic
+structure (gen 0 of selection is panmictic; structure forms in the
+forward sim).
 
-1. Config additions:
-   - `recap_first::Bool = false`.
-   - `recap_burnin_structured::Int = 0` (sentinel = n_recent).
-   - `init_distribution = :from_recap` (new enum value).
-2. Validation:
-   - recap_first=true && init_distribution != :from_recap → reject.
-   - recap_burnin_structured == 0 → resolve to n_recent in validate().
-   - :twoD_recent && n_recent > ngen_eq → reject.
-3. New file `src/recap.jl` (orchestration):
-   - `recapitate_for_sim(cfg) -> CoalescentResult` — picks the right
-     recapitate_panmictic/structured variant based on cfg.demography.
-   - `place_qtls_on_tree!(coalresult, vt, cfg, rng)` — pre-pick
-     n_qtl bp positions per chromosome, place each on a random edge
-     weighted by edge length × bp width. Carrier sets derived from
-     edge descendants at that bp.
-   - `derive_gen0_pop_from_tree(coalresult, qtl_carriers, cfg) -> PackedPop`
-     — write the gen-0 PackedPop.H based on which leaves carry which
-     QTL alleles.
-   - `merge_coalescent_into_ancestry!(anc, coalresult)` — make the
-     coalescent edges available for downstream neutral overlay.
-4. Wire into `simulate()`:
-   - Detect `recap_first=true` → call recapitate_for_sim → place QTLs
-     → derive gen-0 pop → continue with forward sim as usual (forward
-     sim sees a "settled" gen-0 state).
-5. Tests:
-   - Smoke: cfg with recap_first=true runs end-to-end.
-   - QTL-QTL LD at gen 0 matches Hill-Robertson `1/(1+4Nrd)` within
-     2 SE at distances 1kb, 10kb, 100kb — the headline validation.
-   - Determinism: same (cfg, seed) → bit-identical gen-0 state.
-   - Strict reject: `init_distribution = :from_recap` without
-     `recap_first` errors out.
+Implementation:
+- Detect (neutral, twoD_recent, recap_first) in simulate(); emit
+  @info that ngen_eq is ignored.
+- Run forward for recap_burnin_structured gens only (with
+  selection_mode=:neutral, demography=:twoD_recent semantics — the
+  structure-onset already fires within these gens).
+
+(B) **Workflow B — structure-onset before shift (universal change):**
+For `:stabilizing` and `:directional` + `:twoD_recent`, the
+structured-settling phase MUST happen before the shift fires. Current
+behavior: structure-onset at `total_gens - n_recent + 1` (relative to
+end of total_gens). New behavior: onset at `ngen_eq - n_recent + 1`
+(relative to end of settling, i.e., before any shift). For
+:stabilizing (where ngen_dir = 0), the two are identical. For
+:directional, the new behavior puts the structured 100 gens within
+settling (pre-shift), not spanning the shift event.
+
+This is a breaking change to :twoD_recent semantics, but it's the
+biologically-meaningful interpretation: the recent structure should be
+established before selection events of interest fire.
+
+Implementation:
+- Update structure-onset computation in simulate() (search for
+  `total_gens - n_recent`).
+- Add validation: :twoD_recent && n_recent > ngen_eq → reject.
+- CHANGELOG entry flagging the breaking change for :directional +
+  :twoD_recent users.
+
+Tests:
+- Workflow A: smoke + verify ngen_eq is ignored (final gen state
+  matches a coalescent-only run + recap_burnin_structured forward
+  gens).
+- Workflow B: structure-onset gen is correctly computed (use
+  diagnostic snapshots to verify deme assignment changes at the
+  expected gen).
+
+**Phase 6 — End-to-end + benchmarks (~120 LOC)**
+
+- README section: "Recapitation-first workflow" with example.
+- Benchmark suite: recap-first vs no-recap, recap-first vs forward-sim
+  long burn-in (for neutral runs especially).
+- Example showing gen-0 LD measurement via oracle on a recap-first
+  result.
