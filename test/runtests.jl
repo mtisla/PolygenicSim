@@ -1682,6 +1682,73 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# Cross-phase invariant tests — ancestry recording is non-invasive,
+# simplify is lossless on surviving lineages, sample-node bookkeeping survives
+# the buffer-swap + write/read roundtrip.
+# ---------------------------------------------------------------------------
+@testset "Ancestry — cross-phase invariants" begin
+    cfg_kw = (
+        N=100, Ne=100, n_chr=2, chr_len_bp=20_000,
+        n_qtl=80, n_neutral=0, Uqtl=0.02,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        h2=0.5, selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=20,
+        output_formats=Symbol[], n_int=0, seed=UInt64(11),
+    )
+
+    # ----- Invariant 1: recording is a pure side-channel ------------------
+    # A run with record_ancestry=true must produce bit-identical pop.H and
+    # bit-identical vt.alpha as a run with record_ancestry=false, given the
+    # same (seed, n_threads). Proves the recording path does not perturb any
+    # RNG draw or branching decision in the simulator.
+    tmp = mktempdir()
+    p_off = joinpath(tmp, "off")
+    p_on  = joinpath(tmp, "on")
+    cfg_off = PS.Config(; cfg_kw..., record_ancestry=false, output_prefix=p_off)
+    cfg_on  = PS.Config(; cfg_kw..., record_ancestry=true,
+                         ancestry_simplify_interval=5, output_prefix=p_on)
+    res_off = PS.simulate(cfg_off)
+    res_on  = PS.simulate(cfg_on)
+    @test res_off.pop.H == res_on.pop.H
+    @test res_off.vt.alpha == res_on.vt.alpha
+    @test res_off.vt.is_qtl == res_on.vt.is_qtl
+
+    # ----- Invariant 2: simplify is lossless on surviving lineages --------
+    # Two runs identical except for ancestry_simplify_interval: one simplifies
+    # aggressively mid-run (interval=5), the other only at end of run
+    # (interval far > ngen_eq, so the only simplify call is the implicit
+    # final one in simulate.jl). The final edge SET (as a Set, ignoring
+    # within-chr order) must be identical — simplify drops only edges that
+    # don't contribute to any surviving sample.
+    p_freq = joinpath(tmp, "freq")
+    p_lazy = joinpath(tmp, "lazy")
+    cfg_freq = PS.Config(; cfg_kw..., record_ancestry=true,
+                          ancestry_simplify_interval=5,
+                          output_prefix=p_freq)
+    cfg_lazy = PS.Config(; cfg_kw..., record_ancestry=true,
+                          ancestry_simplify_interval=10_000,    # no mid-run simplify
+                          output_prefix=p_lazy)
+    PS.simulate(cfg_freq)
+    PS.simulate(cfg_lazy)
+    anc_freq = PS.read_ancestry(p_freq * ".anc.zst")
+    anc_lazy = PS.read_ancestry(p_lazy * ".anc.zst")
+    @test Set(anc_freq.edges) == Set(anc_lazy.edges)
+    # And the node-id range — sample nodes are a contiguous range allocated
+    # last; both runs allocated the same number of node ids → same range.
+    @test minimum(anc_freq.sample_nodes) == minimum(anc_lazy.sample_nodes)
+    @test maximum(anc_freq.sample_nodes) == maximum(anc_lazy.sample_nodes)
+
+    # ----- Invariant 3: sample_nodes ≡ surviving haplotypes ---------------
+    # After the final simplify in simulate.jl, `sample_nodes` reflects the
+    # current generation's node ids, and there are exactly 2N of them
+    # matching pop.H's column count. After write→read roundtrip, both
+    # `sample_nodes` and `node_of_col` reflect the persisted sample range.
+    @test length(anc_freq.sample_nodes) == size(res_on.pop.H, 2)
+    @test anc_freq.sample_nodes == anc_freq.node_of_col
+    @test issorted(anc_freq.sample_nodes)
+end
+
+# ---------------------------------------------------------------------------
 # Smoke test — oracle_maf_min drops low-MAF sites from oracle statistics
 # ---------------------------------------------------------------------------
 @testset "Oracle — MAF cutoff (oracle_maf_min)" begin
