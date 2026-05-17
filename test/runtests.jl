@@ -1800,6 +1800,78 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# overlay_neutral_mutations(res::SimResult; ...) — mu_per_bp auto-derivation
+# from cfg.Uqtl + n_neutral fraction via effective_Uneu / (n_chr · chr_len_bp).
+# ---------------------------------------------------------------------------
+@testset "Overlay — mu_per_bp auto-derived from cfg" begin
+    cfg_kw_base = (
+        N=80, Ne=80, n_chr=2, chr_len_bp=20_000,
+        n_qtl=60, Uqtl=0.02,
+        mutation_model=:infinite_sites, init_distribution=:ism_watterson,
+        h2=0.5, selection_mode=:stabilizing, vs_over_vp0=20.0,
+        ngen_eq=15,
+        output_formats=Symbol[], n_int=0, seed=UInt64(23),
+    )
+
+    # ----- Case A: n_neutral > 0 → Uneu auto-derived → mu_per_bp derived ----
+    # With n_neutral = 600 and n_qtl = 60: Uneu = 0.02 · 600 / 60 = 0.2.
+    # Per-bp neutral rate = 0.2 / (2 · 20_000) = 5e-6.
+    cfg_with_neu = PS.Config(; cfg_kw_base..., n_neutral=600,
+                               record_ancestry=true,
+                               ancestry_simplify_interval=5,
+                               save_ancestry=false,
+                               output_prefix=joinpath(mktempdir(), "neu"))
+    @test PS.effective_Uneu(cfg_with_neu) ≈ 0.2
+    @test PS.mu_per_bp_neutral(cfg_with_neu) ≈ 5e-6
+    res_neu = PS.simulate(cfg_with_neu)
+
+    # Auto-derived path (pass `res`, no mu_per_bp kwarg).
+    tbl_auto = PS.overlay_neutral_mutations(res_neu; seed=UInt64(7))
+    # Explicit path (pass anc, same mu_per_bp).
+    tbl_expl = PS.overlay_neutral_mutations(res_neu.ancestry;
+                                              mu_per_bp=5e-6,
+                                              seed=UInt64(7))
+    @test tbl_auto.mu_per_bp ≈ 5e-6
+    @test tbl_auto.samples == tbl_expl.samples
+    @test all(tbl_auto.positions[i] == tbl_expl.positions[i]
+              for i in 1:length(tbl_auto.samples))
+
+    # User can still override mu_per_bp explicitly on the res form.
+    tbl_over = PS.overlay_neutral_mutations(res_neu;
+                                              seed=UInt64(7),
+                                              mu_per_bp=1e-7)
+    @test tbl_over.mu_per_bp == 1e-7
+
+    # ----- Case B: n_neutral = 0 → effective Uneu = 0 → must error ----------
+    # The auto-derivation has nothing to work from; the user must either
+    # set n_neutral / Uneu in cfg or pass mu_per_bp explicitly.
+    cfg_no_neu = PS.Config(; cfg_kw_base..., n_neutral=0,
+                             record_ancestry=true,
+                             ancestry_simplify_interval=5,
+                             save_ancestry=false,
+                             output_prefix=joinpath(mktempdir(), "nn"))
+    @test PS.effective_Uneu(cfg_no_neu) == 0.0
+    @test PS.mu_per_bp_neutral(cfg_no_neu) == 0.0
+    res_no_neu = PS.simulate(cfg_no_neu)
+    @test_throws ArgumentError PS.overlay_neutral_mutations(res_no_neu;
+                                                              seed=UInt64(7))
+    # …but passing mu_per_bp explicitly works.
+    tbl_no_neu = PS.overlay_neutral_mutations(res_no_neu;
+                                                seed=UInt64(7),
+                                                mu_per_bp=1e-6)
+    @test tbl_no_neu.mu_per_bp == 1e-6
+
+    # ----- Case C: res form requires record_ancestry=true ------------------
+    cfg_no_rec = PS.Config(; cfg_kw_base..., n_neutral=600,
+                             record_ancestry=false,
+                             output_prefix=joinpath(mktempdir(), "norec"))
+    res_no_rec = PS.simulate(cfg_no_rec)
+    @test res_no_rec.ancestry === nothing
+    @test_throws ArgumentError PS.overlay_neutral_mutations(res_no_rec;
+                                                              seed=UInt64(7))
+end
+
+# ---------------------------------------------------------------------------
 # Smoke test — oracle_maf_min drops low-MAF sites from oracle statistics
 # ---------------------------------------------------------------------------
 @testset "Oracle — MAF cutoff (oracle_maf_min)" begin

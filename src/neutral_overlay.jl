@@ -65,11 +65,72 @@ function overlay_neutral_mutations(ancestry_path::AbstractString;
 end
 
 """
+    mu_per_bp_neutral(cfg) -> Float64
+
+Per-bp neutral mutation rate implied by the configured `Uqtl` + neutral
+fraction. Computed as `effective_Uneu(cfg) / (n_chr · chr_len_bp)`, where
+`effective_Uneu` is `Uneu` when set explicitly, else the auto-derivation
+`Uqtl · n_neutral / n_qtl`. This is the default `mu_per_bp` used by
+`overlay_neutral_mutations(res::SimResult; ...)`. Returns 0 when
+`n_neutral == 0` and `Uneu` is left to auto-derive — in that case the
+overlay needs an explicit `mu_per_bp` kwarg.
+"""
+@inline function mu_per_bp_neutral(cfg::Config)
+    total_bp = cfg.n_chr * cfg.chr_len_bp
+    return total_bp > 0 ? effective_Uneu(cfg) / total_bp : 0.0
+end
+
+"""
+    overlay_neutral_mutations(res::SimResult; seed,
+                                mu_per_bp=nothing, n_threads, output_prefix=nothing)
+
+Convenience overload: derives the default `mu_per_bp` from
+`res.cfg` via [`mu_per_bp_neutral`](@ref) (= `effective_Uneu(cfg) /
+(n_chr · chr_len_bp)`). This wires the overlay rate to the same neutral
+per-bp pressure that the forward simulator would have applied if the
+neutrals had been forward-simulated. Pass `mu_per_bp` explicitly to
+override.
+
+Errors if `res.cfg` has `effective_Uneu(cfg) == 0` (e.g. `n_neutral=0`
+with auto-derived `Uneu`) and no explicit `mu_per_bp` was given — there's
+no sensible default to derive.
+
+Requires `res.ancestry !== nothing` (i.e. the sim was run with
+`record_ancestry=true`).
+"""
+function overlay_neutral_mutations(res::SimResult;
+                                     seed::UInt64,
+                                     mu_per_bp::Union{Nothing,Float64}=nothing,
+                                     n_threads::Int=Threads.nthreads(),
+                                     output_prefix::Union{Nothing,String}=nothing)
+    res.ancestry === nothing &&
+        throw(ArgumentError("overlay_neutral_mutations(res; ...) requires " *
+                            "record_ancestry=true; res.ancestry is nothing"))
+    mu = if mu_per_bp === nothing
+        derived = mu_per_bp_neutral(res.cfg)
+        derived > 0 || throw(ArgumentError(
+            "Cannot auto-derive mu_per_bp: effective_Uneu(cfg) == 0 " *
+            "(n_neutral=$(res.cfg.n_neutral), Uneu=$(res.cfg.Uneu)). " *
+            "Set cfg.n_neutral > 0 (so Uneu auto-derives as " *
+            "Uqtl · n_neutral / n_qtl), set cfg.Uneu explicitly, " *
+            "or pass mu_per_bp= as a kwarg."))
+        derived
+    else
+        mu_per_bp
+    end
+    return overlay_neutral_mutations(res.ancestry::Ancestry;
+                                      mu_per_bp=mu, seed=seed,
+                                      n_threads=n_threads,
+                                      output_prefix=output_prefix)
+end
+
+"""
     overlay_neutral_mutations(anc::Ancestry; mu_per_bp, seed, ...)
 
 In-memory variant. Use this when you have `record_ancestry=true` and
 `save_ancestry=false`: pass `res.ancestry` directly, avoiding a disk
-roundtrip. Same semantics, identical output.
+roundtrip. Prefer the `overlay_neutral_mutations(res::SimResult; ...)`
+form if you'd like `mu_per_bp` auto-derived from `res.cfg`.
 """
 function overlay_neutral_mutations(anc::Ancestry;
                                      mu_per_bp::Float64,
@@ -296,4 +357,5 @@ function read_neutral_mutations(path::AbstractString)
 end
 
 export overlay_neutral_mutations, NeutralMutationTable,
-       write_neutral_mutations, read_neutral_mutations
+       write_neutral_mutations, read_neutral_mutations,
+       mu_per_bp_neutral

@@ -976,16 +976,24 @@ PS.write_merged_genotype_plink("run1_full", res, tbl)
 #   effects.tsv carries α=0 for neutral sites.
 ```
 
-### Two-call ergonomics: disk vs in-memory
+### Three call forms
 
-Both variants of `overlay_neutral_mutations` produce bit-identical output:
+All three forms produce bit-identical output given the same `(seed, n_threads, mu_per_bp)`:
 
 ```julia
-# (a) In-memory: cheapest when you stay in one session.
+# (a) Pass the SimResult: mu_per_bp auto-derives from cfg (recommended).
+#     Defaults mu_per_bp = effective_Uneu(cfg) / (n_chr · chr_len_bp),
+#     so the overlay matches the neutral per-bp rate the simulator would
+#     have applied if neutrals had been forward-simulated.
+tbl = PS.overlay_neutral_mutations(res; seed=UInt64(7))
+# Override the auto-derived rate at the call site:
+tbl = PS.overlay_neutral_mutations(res; seed=UInt64(7), mu_per_bp=1e-8)
+
+# (b) In-memory, explicit: cheapest when you've already got the Ancestry.
 tbl = PS.overlay_neutral_mutations(res.ancestry;
                                      mu_per_bp=1e-8, seed=UInt64(7))
 
-# (b) From disk: pair with `save_ancestry=true` to overlay later or from a
+# (c) From disk: pair with `save_ancestry=true` to overlay later or from a
 #     different process. The .anc.zst can be re-overlaid as many times as
 #     you want with different (mu_per_bp, seed) without rerunning the sim.
 tbl = PS.overlay_neutral_mutations("run1.anc.zst";
@@ -993,6 +1001,23 @@ tbl = PS.overlay_neutral_mutations("run1.anc.zst";
                                      output_prefix="run1")
 # → writes run1.neutral.zst as a side effect
 ```
+
+**`mu_per_bp` auto-derivation.** When you pass a `SimResult`, the default
+neutral per-bp rate is computed from `cfg.Uqtl` and the configured
+neutral fraction:
+
+```julia
+effective_Uneu(cfg)  = cfg.Uneu  (if set explicitly)
+                     | cfg.Uqtl · cfg.n_neutral / cfg.n_qtl  (auto-derived)
+
+mu_per_bp_neutral(cfg) = effective_Uneu(cfg) / (cfg.n_chr · cfg.chr_len_bp)
+```
+
+So setting `cfg.n_neutral` to your desired panel-fraction (relative to
+`n_qtl`) makes the overlay match the per-bp pressure the simulator
+would have applied. If `effective_Uneu(cfg) == 0` (e.g. `n_neutral=0`
+with auto-derived `Uneu`), the auto-derivation throws — pass `mu_per_bp`
+explicitly, set `cfg.n_neutral > 0`, or set `cfg.Uneu` directly.
 
 ### What's recorded
 
@@ -1072,8 +1097,10 @@ the simulator is using for QTLs.
 | `simplify!(anc::Ancestry)` | Drop edges not on any leaf-reachable lineage; sort by `(chr, gen)` for downstream contiguity. |
 | `write_ancestry(prefix, anc)` | Write `{prefix}.anc.zst` (PSAN binary format). |
 | `read_ancestry(path)` | Load `{prefix}.anc.zst` back into an `Ancestry`. |
+| `overlay_neutral_mutations(res; seed, [mu_per_bp], [output_prefix])` | `SimResult` overload; `mu_per_bp` defaults to `mu_per_bp_neutral(res.cfg)`. |
 | `overlay_neutral_mutations(anc; mu_per_bp, seed, [output_prefix])` | In-memory overlay; returns `NeutralMutationTable`. |
 | `overlay_neutral_mutations(path; mu_per_bp, seed, [output_prefix])` | Same, loading the ancestry from disk first. |
+| `mu_per_bp_neutral(cfg)` | `effective_Uneu(cfg) / (n_chr · chr_len_bp)` — the auto-derived overlay rate. |
 | `write_neutral_mutations(prefix, table)` | Write `{prefix}.neutral.zst` (PSNV binary format). |
 | `read_neutral_mutations(path)` | Load `{prefix}.neutral.zst` back into a table. |
 | `write_merged_genotype_plink(prefix, res, table; include_qtl=true, include_neutral=true, pheno=nothing)` | Fuse QTL + neutral sites into one PLINK panel. Returns a NamedTuple `(bed, bim, fam, effects, n_sites, n_qtl, n_neutral)`. |
@@ -1099,7 +1126,7 @@ PS.simulate(PS.Config(load_plink_prefix = "external",
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-**484 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
+**496 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
 segregation, Haldane recombination at `d ∈ {0.01, 0.1, 0.5, 1.0} M`,
 cross-chr LD, neutral drift, selection regimes), Phase-2 zero-allocation
 kernels and chunk determinism, Phase-4 spatial structure (DemeLayout, `m=0`

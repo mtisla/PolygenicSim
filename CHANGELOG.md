@@ -9,6 +9,36 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.13.4] — 2026-05-17
+
+### Added — `overlay_neutral_mutations(res; ...)` with auto-derived `mu_per_bp`
+
+Convenience overload that accepts a `SimResult` and derives the default
+neutral per-bp rate from the existing `cfg.Uqtl` + `n_neutral` fraction
+auto-derivation chain — overlay matches the per-bp neutral pressure the
+forward simulator would have applied if `n_neutral` sites had been
+forward-simulated.
+
+- **New helper `mu_per_bp_neutral(cfg)`** exported. Returns
+  `effective_Uneu(cfg) / (cfg.n_chr · cfg.chr_len_bp)`. `effective_Uneu`
+  is `cfg.Uneu` when set explicitly, else the existing auto-derivation
+  `Uqtl · n_neutral / n_qtl`.
+- **New method** `overlay_neutral_mutations(res::SimResult; seed,
+  mu_per_bp=nothing, ...)`. When `mu_per_bp` is left `nothing`, it
+  auto-derives via `mu_per_bp_neutral(res.cfg)`. Throws
+  `ArgumentError` (with a fix hint) when `effective_Uneu(cfg) == 0` and
+  no explicit `mu_per_bp` is given. Also throws when
+  `res.ancestry === nothing` (i.e. the sim was not run with
+  `record_ancestry=true`).
+- The existing `overlay_neutral_mutations(anc::Ancestry; mu_per_bp, ...)`
+  and `(path; mu_per_bp, ...)` forms still require an explicit
+  `mu_per_bp` — they're the lower-level path and don't carry the cfg.
+
+Tests: +12 assertions (496 total) covering auto-derivation when
+`n_neutral > 0`, parity with the explicit form, override at the call
+site, the two error paths (`n_neutral = 0` and `record_ancestry =
+false`).
+
 ## [0.13.3] — 2026-05-17
 
 ### Added — ancestry recording + neutral-mutation overlay (recapitation)
