@@ -71,6 +71,9 @@ end
 # determined by the coalescent placement later. Returns (vt, p_dummy)
 # where p_dummy is a placeholder of 0.5 values (unused).
 function init_variant_table_recap(rng::Xoshiro, cfg::Config)
+    if cfg.mutation_model === :infinite_sites
+        return _init_variant_table_recap_ism(rng, cfg)
+    end
     L = n_variants(cfg)
     chr, bp = sample_variant_positions(rng, cfg)
 
@@ -88,6 +91,49 @@ function init_variant_table_recap(rng::Xoshiro, cfg::Config)
     p_dummy = fill(0.5, L)
     chr_start, chr_end = _compute_chr_ranges(chr, cfg.n_chr)
     active = trues(L)
+    return VariantTable(chr, bp, is_qtl, α, active, chr_start, chr_end), p_dummy
+end
+
+# ISM + recap init (Phase 7).
+#   - L = slot_capacity(cfg): expand the slot pool so ISM has headroom for
+#     de novo mutations during the forward sim.
+#   - bp positions pre-sampled for ALL L slots so ISM doesn't need to draw
+#     a fresh bp when it activates a free slot.
+#   - Mark exactly `n_qtl` slots active + is_qtl. The remaining slots stay
+#     inactive (≡ "free" in the ISM slot allocator's view) and are
+#     reactivated as ISM mutations arrive.
+#   - α sampled only for the active QTL slots.
+function _init_variant_table_recap_ism(rng::Xoshiro, cfg::Config)
+    L = slot_capacity(cfg)
+    L >= cfg.n_qtl ||
+        throw(ArgumentError(
+            "slot_capacity(cfg)=$L < n_qtl=$(cfg.n_qtl); " *
+            "increase ism_capacity or reduce n_qtl"))
+    chr, bp = sample_variant_positions(rng, cfg, L)
+    chr_start, chr_end = _compute_chr_ranges(chr, cfg.n_chr)
+    is_qtl = falses(L)
+    active = falses(L)
+    α = zeros(Float64, L)
+    if cfg.n_qtl > 0
+        qtl_slots = sample(rng, 1:L, cfg.n_qtl; replace=false)
+        @inbounds for s in qtl_slots
+            is_qtl[s] = true
+            active[s] = true
+        end
+        # Sample α for active QTL slots, in slot order.
+        alpha_buf = Vector{Float64}(undef, cfg.n_qtl)
+        sample_effects_into!(alpha_buf, rng, cfg)
+        # Write in ascending-slot order so determinism is independent of the
+        # random `qtl_slots` ordering returned by `sample`.
+        ai = 1
+        @inbounds for s in 1:L
+            if is_qtl[s]
+                α[s] = alpha_buf[ai]
+                ai += 1
+            end
+        end
+    end
+    p_dummy = fill(0.5, L)
     return VariantTable(chr, bp, is_qtl, α, active, chr_start, chr_end), p_dummy
 end
 

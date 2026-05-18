@@ -607,12 +607,15 @@ function validate(cfg::Config)
     end
     cfg.mutation_model in (:finite_sites, :infinite_sites) ||
         throw(ArgumentError("mutation_model must be :finite_sites or :infinite_sites, got $(cfg.mutation_model)"))
-    is_ism_init = cfg.init_distribution in (:ism_watterson, :ism_denovo)
+    # ISM-init distributions require :infinite_sites. :from_recap is bimodal
+    # (works under either mutation model — Phase 7 recap+ISM).
+    is_ism_only_init = cfg.init_distribution in (:ism_watterson, :ism_denovo)
+    is_ism_compatible_init = is_ism_only_init || cfg.init_distribution === :from_recap
     if cfg.mutation_model === :infinite_sites
-        is_ism_init ||
-            throw(ArgumentError("mutation_model=:infinite_sites requires init_distribution ∈ (:ism_watterson, :ism_denovo), got $(cfg.init_distribution)"))
+        is_ism_compatible_init ||
+            throw(ArgumentError("mutation_model=:infinite_sites requires init_distribution ∈ (:ism_watterson, :ism_denovo, :from_recap), got $(cfg.init_distribution)"))
     else
-        is_ism_init &&
+        is_ism_only_init &&
             throw(ArgumentError("init_distribution=$(cfg.init_distribution) requires mutation_model=:infinite_sites"))
     end
     cfg.ism_capacity >= 0 ||

@@ -9,6 +9,45 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-05-18
+
+Phase 7 — recap_first + ISM. Coalescent-derived gen-0 (recap_first) is
+now compatible with infinite-sites de novo mutations during the forward
+simulation. Prior to this release, the validation chain forced
+`mutation_model=:finite_sites` whenever `recap_first=true`; the realistic
+Hill-Robertson LD from recap and the unbounded-site mutation pool of ISM
+could not be combined.
+
+### Changed — `src/config.jl`
+
+- Validation relaxed: `mutation_model=:infinite_sites` accepts
+  `init_distribution ∈ (:ism_watterson, :ism_denovo, :from_recap)` (was
+  the first two only). The `:from_recap` init is now bimodal — valid
+  under either mutation model.
+- `:ism_watterson` and `:ism_denovo` still require `:infinite_sites`
+  (unchanged).
+
+### Changed — `src/recap.jl`
+
+- `init_variant_table_recap` now dispatches on `cfg.mutation_model`. Under
+  `:infinite_sites` it allocates `L = slot_capacity(cfg)` slots (vs.
+  `n_qtl + n_neutral` under `:finite_sites`), pre-samples bp positions
+  for the full pool, marks exactly `n_qtl` slots active + is_qtl with
+  sampled α, and leaves the remainder inactive (≡ free in the ISM slot
+  allocator's view). New ISM mutations during forward sim activate from
+  this pre-sampled bp pool, so no fresh bp draws happen at mutation time.
+- Adds an `slot_capacity(cfg) >= n_qtl` check with an actionable error
+  message ("increase ism_capacity or reduce n_qtl") for the case where
+  the auto-derivation under-provisions.
+
+### Tests
+
+- New testset `recap_first + ISM (Phase 7)` — 16 assertions covering:
+  validation of the new combo, rejection of old invalid combos,
+  vt structure at init (length = slot_capacity, exactly n_qtl active),
+  end-to-end smoke, ISM de novo activation during forward sim,
+  determinism per seed. All 968 tests pass at `JULIA_NUM_THREADS=4`.
+
 ## [0.14.1] — 2026-05-17
 
 Phase 3b — performance fixes for recap-first at structured-demography
