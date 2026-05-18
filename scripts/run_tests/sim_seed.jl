@@ -22,7 +22,7 @@ PS.simulate(PS.Config(;
     mutation_model=:infinite_sites,
     recap_first=true, init_distribution=:from_recap,
     effect_distribution=:signed_exponential, effect_scale=0.03,
-    h2=0.5, vs_over_vp0=65.0, sel_grad=0.05,
+    h2=0.5, vs_over_vp0=65.0, sel_grad=0.1,
     selection_mode=:directional, directional_start_from=:msd,
     ngen_eq=5, checkpoints=[1.0, 2.0], seed=UInt64(999),
     output_formats=Symbol[:oracle], oracle_n_perm=50,
@@ -40,7 +40,7 @@ cfg = PS.Config(;
     effect_distribution=:signed_exponential, effect_scale=0.03,
     h2=0.5,
     selection_mode=:directional, directional_start_from=:msd,
-    vs_over_vp0=65.0, sel_grad=0.05, t_shift=0,
+    vs_over_vp0=65.0, sel_grad=0.1, t_shift=0,
     ngen_eq=50_000,                       # 5× the v65g05 run
     checkpoints=[1.0, 2.0],
     output_formats=Symbol[:oracle], output_prefix=prefix,

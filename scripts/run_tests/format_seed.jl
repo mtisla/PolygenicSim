@@ -64,7 +64,7 @@ out_path = "$(prefix).tables.txt"
 open(out_path, "w") do io
     println(io, "==========================================================")
     println(io, "Seed $(Int(h2["seed"]))   recap+ISM   N=5000  n_qtl=3000  h²=0.5")
-    println(io, "vs_over_vp0=65  sel_grad=0.05  ngen_eq=50000  checkpoints=[1.0, 2.0]·t½")
+    println(io, "vs_over_vp0=65  sel_grad=0.1  ngen_eq=50000  checkpoints=[1.0, 2.0]·t½")
     println(io, "==========================================================")
     @printf(io, "wall_min = %.2f   final_gen = %d   t½_settled ≈ %.0f gens\n\n",
             h2["wall_min"], Int(h2["final_gen"]), (h2["final_gen"] - 50_000) / 2)

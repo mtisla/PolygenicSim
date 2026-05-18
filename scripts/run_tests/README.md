@@ -100,7 +100,7 @@ node is slower.
 | selection_mode | `:directional` |
 | directional_start_from | `:msd` (stabilizing burn-in, then shift) |
 | vs_over_vp0 | 65.0 |
-| sel_grad | 0.05  (Δ = sel_grad · V_S ≈ 3.25 trait units) |
+| sel_grad | 0.1  (Δ = sel_grad · V_S ≈ 6.5 trait units) |
 | ngen_eq | **50 000** |
 | checkpoints | `[1.0, 2.0]` (Float = multiples of t½_settled; ngen_dir auto) |
 | oracle_phases | `[:init, :settled]` (plus 1.0_thalf, 2.0_thalf via checkpoints) |

@@ -58,7 +58,7 @@ out_path = joinpath(out_dir, "aggregated.tables.txt")
 open(out_path, "w") do io
     println(io, "==========================================================")
     println(io, "AGGREGATED (3 seeds, median)   recap+ISM")
-    println(io, "N=5000  n_qtl=3000  h²=0.5  vs_over_vp0=65  sel_grad=0.05")
+    println(io, "N=5000  n_qtl=3000  h²=0.5  vs_over_vp0=65  sel_grad=0.1")
     println(io, "ngen_eq=50000  checkpoints=[1.0, 2.0]·t½")
     println(io, "==========================================================")
     fg = [Int(h2[s]["final_gen"]) for s in seeds]
