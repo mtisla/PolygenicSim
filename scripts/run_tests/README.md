@@ -16,13 +16,10 @@ git clone https://github.com/mtisla/PolygenicSim.git
 cd PolygenicSim
 git checkout v0.15.0          # or stay on main; v0.15.0 is the recap+ISM release
 
-# 2. Make Julia available. One of:
-module load julia/1.10        # if the cluster ships a Julia module
-# OR install with juliaup:
-#   curl -fsSL https://install.julialang.org | sh
-#   ~/.juliaup/bin/juliaup add 1.10
-#   export PATH=$HOME/.juliaup/bin:$PATH
-julia --version               # confirm 1.10 or newer
+# 2. Make Julia available. The cluster offers julia/{1.7.3, 1.8.2, 1.9.2, 1.11.1}.
+#    PolygenicSim requires julia >= 1.10 (see Project.toml [compat]), so use 1.11.1.
+module load julia/1.11.1
+julia --version               # confirm: julia version 1.11.1
 
 # 3. Instantiate the project (one time). Downloads + builds deps.
 julia --project=. -e 'using Pkg; Pkg.instantiate()'

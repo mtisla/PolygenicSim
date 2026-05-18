@@ -10,6 +10,9 @@
 #SBATCH -e out/s2/s2.slurm.err
 set -euo pipefail
 
+# Load Julia on the compute node (sbatch jobs don't inherit login modules).
+module load julia/1.11.1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SEED=2
