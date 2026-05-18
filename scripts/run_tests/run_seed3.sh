@@ -6,14 +6,18 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8gb
-#SBATCH --output=out/s3/s3.slurm.out
-#SBATCH -e out/s3/s3.slurm.err
+#SBATCH --output=s3.slurm-%j.out
+#SBATCH -e s3.slurm-%j.err
 set -euo pipefail
 
 # Load Julia on the compute node (sbatch jobs don't inherit login modules).
 module load julia/1.11.1
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve paths via SLURM_SUBMIT_DIR (the directory where `sbatch` was run).
+# BASH_SOURCE points to SLURM's spool copy of the script on kingspeak,
+# which is not writable by the user.
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+cd "$SCRIPT_DIR"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SEED=3
 OUT_DIR="$SCRIPT_DIR/out/s${SEED}"
