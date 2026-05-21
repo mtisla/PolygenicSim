@@ -385,6 +385,335 @@ function _dp_filtered_mask(mask::BitMatrix, p_pol::Vector{Float64},
     return out
 end
 
+# =============================================================================
+# Left-plane 3D Mahalanobis-style gate test.
+# -----------------------------------------------------------------------------
+# Generalization of hotel2.R's `left_plane_maha_test` from 2D (B, D) to 3D
+# (B, rho, cor). Operates in standardized Z-space:
+#   Z_*_obs   = (* − μ_null) / σ_null
+#   Z_*_perm  = (*_perm − μ_null) / σ_null   (per perm)
+# Rejection region: half-space perpendicular to Z_obs through Z_obs.
+#   u_hat   = Z_obs / ||Z_obs||
+#   s_b     = (Z_perm,b − Z_obs) · u_hat        (signed distance from plane)
+#   reject  = (s_b ≥ 0)        (always outward — no sign(B_obs) switch)
+# The threshold is Z_obs itself, NOT the origin: `B_perm < B_obs` style in
+# the dominant direction defined by u_hat, regardless of B_obs sign.
+# NOTE: hotel2.R `left_plane_maha_test` used a sign(B_obs)-switched rule
+# (outward if B_obs<0, inward otherwise). That works in 2D where B
+# dominates Z_obs direction, but breaks in 3D under strong directional
+# selection where LD restructuring drives B_obs > 0 while rho/cor pull
+# Z_obs far from origin: the "inward" half then engulfs the entire null
+# cloud and gives p ≈ 1.0. "Always outward" handles both regimes.
+#
+# Returns (stat_obs, perm_p, r_radial). `stat_obs` = ||Z_obs||. `r_radial` is
+# sqrt(Z_rho² + Z_cor²) — for the second-stage classifier (directional vs
+# stabilizing) once the gate has rejected.
+function _left_plane_3d_test(B_obs::Float64, B_null::AbstractVector{<:Real},
+                              rho_obs::Float64, rho_null::AbstractVector{Float64},
+                              cor_obs::Float64, cor_null::AbstractVector{Float64})
+    nan_out = (stat = NaN, perm_p = NaN, r_radial = NaN,
+                z_b = NaN, z_rho = NaN, z_cor = NaN)
+
+    # Filter finite perms.
+    isfinite(B_obs) && isfinite(rho_obs) && isfinite(cor_obs) || return nan_out
+    n_perm = length(B_null)
+    n_perm == length(rho_null) == length(cor_null) ||
+        throw(ArgumentError("null vector length mismatch"))
+
+    # Standardize each axis by its own null mean+sd.
+    finite_b   = filter(isfinite, B_null)
+    finite_rho = filter(isfinite, rho_null)
+    finite_cor = filter(isfinite, cor_null)
+    (length(finite_b) >= 5 && length(finite_rho) >= 5 && length(finite_cor) >= 5) ||
+        return nan_out
+
+    μ_B, σ_B = mean(finite_b), std(finite_b; corrected=true)
+    μ_R, σ_R = mean(finite_rho), std(finite_rho; corrected=true)
+    μ_C, σ_C = mean(finite_cor), std(finite_cor; corrected=true)
+    (σ_B > 1e-30 && σ_R > 1e-30 && σ_C > 1e-30) || return nan_out
+
+    z_B   = (B_obs   - μ_B) / σ_B
+    z_R   = (rho_obs - μ_R) / σ_R
+    z_C   = (cor_obs - μ_C) / σ_C
+    norm_obs = sqrt(z_B^2 + z_R^2 + z_C^2)
+    norm_obs > 1e-30 || return nan_out
+
+    u_hat = (z_B / norm_obs, z_R / norm_obs, z_C / norm_obs)
+
+    # Per-perm projection onto u_hat (centered at Z_obs).
+    # s_b = (Z_perm,b − Z_obs) · u_hat. Equivalently: dot(Z_perm,b, u_hat) − norm_obs.
+    reject = 0
+    valid = 0
+    @inbounds for b in 1:n_perm
+        bb, rr, cc = B_null[b], rho_null[b], cor_null[b]
+        (isfinite(bb) && isfinite(rr) && isfinite(cc)) || continue
+        z_bb = (bb - μ_B) / σ_B
+        z_rr = (rr - μ_R) / σ_R
+        z_cc = (cc - μ_C) / σ_C
+        s_b = (z_bb - z_B) * u_hat[1] +
+              (z_rr - z_R) * u_hat[2] +
+              (z_cc - z_C) * u_hat[3]
+        valid += 1
+        # Always reject outward — perms more extreme than Z_obs in the
+        # direction of u_hat. No sign(B_obs) switch.
+        s_b >= 0 && (reject += 1)
+    end
+    valid > 0 || return nan_out
+
+    perm_p   = (1 + reject) / (valid + 1)
+    r_radial = sqrt(z_R^2 + z_C^2)
+    return (stat = norm_obs, perm_p = perm_p, r_radial = r_radial,
+            z_b = z_B, z_rho = z_R, z_cor = z_C)
+end
+
+# Stage-2 test: 2D Mahalanobis on the (z_rho, z_cor) plane only.
+# -----------------------------------------------------------------------------
+# Conditional on stage-1 (3D omnibus gate) rejection. Detects DIRECTIONAL
+# selection specifically — leaves out z_B because under stabilizing the only
+# signal is on the B axis (which gets caught by stage 1), and under
+# directional the rho/cor axes carry the discriminating evidence.
+#
+# Procedure:
+#   v_b   = (z_rho_b, z_cor_b)   per perm (already standardized by each axis's
+#                                 own null mean/sd from the existing stage-1
+#                                 standardization).
+#   μ̂     = mean(v_b)             (≈ 0 by construction)
+#   Σ̂     = cov(v_b) + ridge
+#   D²_obs   = (v_obs − μ̂)' Σ̂⁻¹ (v_obs − μ̂)
+#   D²_null,b same with v_b
+#   p_dir   = (1 + #{D²_null ≥ D²_obs}) / (B+1)
+#
+# Returns (D2, perm_p, v_dir_signed) where v_dir_signed = sign(z_rho + z_cor)
+# carries the direction info for classifier labelling.
+function _2d_dir_test(z_rho_obs::Float64, z_rho_null::Vector{Float64},
+                       z_cor_obs::Float64, z_cor_null::Vector{Float64})
+    nan_out = (D2 = NaN, perm_p = NaN, v_dir_signed = NaN)
+    isfinite(z_rho_obs) && isfinite(z_cor_obs) || return nan_out
+    n_perm = length(z_rho_null)
+    n_perm == length(z_cor_null) ||
+        throw(ArgumentError("null vector length mismatch in 2D dir test"))
+
+    # Build 2D null cloud, filter finites.
+    rho_vec = Float64[]; cor_vec = Float64[]
+    sizehint!(rho_vec, n_perm); sizehint!(cor_vec, n_perm)
+    @inbounds for b in 1:n_perm
+        if isfinite(z_rho_null[b]) && isfinite(z_cor_null[b])
+            push!(rho_vec, z_rho_null[b])
+            push!(cor_vec, z_cor_null[b])
+        end
+    end
+    length(rho_vec) >= 5 || return nan_out
+
+    μ_r = mean(rho_vec); μ_c = mean(cor_vec)
+    # 2×2 empirical covariance under sign-flip null.
+    s_rr = 0.0; s_rc = 0.0; s_cc = 0.0
+    n_v = length(rho_vec)
+    @inbounds for b in 1:n_v
+        dr = rho_vec[b] - μ_r
+        dc = cor_vec[b] - μ_c
+        s_rr += dr * dr
+        s_rc += dr * dc
+        s_cc += dc * dc
+    end
+    inv_nm1 = 1.0 / max(1, n_v - 1)
+    s_rr *= inv_nm1; s_rc *= inv_nm1; s_cc *= inv_nm1
+    # Ridge for numerical stability when |corr| ≈ 1.
+    tr  = s_rr + s_cc
+    ridge = 1e-8 * tr
+    s_rr += ridge; s_cc += ridge
+
+    det = s_rr * s_cc - s_rc * s_rc
+    det > 1e-30 || return nan_out
+    inv_det = 1.0 / det
+    inv_rr =  s_cc * inv_det
+    inv_cc =  s_rr * inv_det
+    inv_rc = -s_rc * inv_det
+
+    @inline mahal2(x, y) = inv_rr * x * x + 2 * inv_rc * x * y + inv_cc * y * y
+
+    D2_obs = mahal2(z_rho_obs - μ_r, z_cor_obs - μ_c)
+    isfinite(D2_obs) || return nan_out
+
+    reject = 0
+    @inbounds for b in 1:n_v
+        d2_b = mahal2(rho_vec[b] - μ_r, cor_vec[b] - μ_c)
+        if isfinite(d2_b) && d2_b >= D2_obs
+            reject += 1
+        end
+    end
+    perm_p = (1 + reject) / (n_v + 1)
+    return (D2 = D2_obs, perm_p = perm_p, v_dir_signed = z_rho_obs + z_cor_obs)
+end
+
+# Stage-2 (alternative): 1D directional test along v_dir = (z_rho + z_cor)/√2.
+# -----------------------------------------------------------------------------
+# Single-degree-of-freedom test on the canonical "positive directional" ray
+# in the (z_rho, z_cor) plane. Sign-preserving: v > 0 for positive directional,
+# v < 0 for negative directional. Two-sided permutation-p so both signs are
+# rejectable. The /√2 standardizes variance to ~N(0,1) under sign-flip null
+# (assuming approximately uncorrelated rho/cor).
+#
+# Advantage over the 2D Mahalanobis: when one axis carries the signal (e.g.,
+# z_cor strong at late-stage directional after z_rho relaxes), 1D loses no DF
+# to a dead axis. Disadvantage: rho_pearson and cor_alpha_p are weighted
+# equally, which may not be optimal at every phase.
+#
+# Returns (v_obs, perm_p, sign_obs).
+function _1d_dir_test(rho_obs::Float64, rho_null::Vector{Float64},
+                       cor_obs::Float64, cor_null::Vector{Float64})
+    # Inputs are RAW (rho_pearson, cor_alpha_p) values — standardize each
+    # axis by its own null mean/sd before combining.
+    nan_out = (v = NaN, perm_p = NaN, sign_obs = NaN)
+    isfinite(rho_obs) && isfinite(cor_obs) || return nan_out
+    n_perm = length(rho_null)
+    n_perm == length(cor_null) ||
+        throw(ArgumentError("null vector length mismatch in 1D dir test"))
+
+    finite_rho = filter(isfinite, rho_null)
+    finite_cor = filter(isfinite, cor_null)
+    length(finite_rho) >= 5 && length(finite_cor) >= 5 || return nan_out
+    μ_r = mean(finite_rho); σ_r = std(finite_rho; corrected=true)
+    μ_c = mean(finite_cor); σ_c = std(finite_cor; corrected=true)
+    (σ_r > 1e-30 && σ_c > 1e-30) || return nan_out
+
+    z_rho_obs = (rho_obs - μ_r) / σ_r
+    z_cor_obs = (cor_obs - μ_c) / σ_c
+    v_obs = (z_rho_obs + z_cor_obs) / sqrt(2.0)
+    isfinite(v_obs) || return nan_out
+
+    abs_v_obs = abs(v_obs)
+    reject = 0
+    valid = 0
+    @inbounds for b in 1:n_perm
+        r_b = rho_null[b]; c_b = cor_null[b]
+        (isfinite(r_b) && isfinite(c_b)) || continue
+        z_r = (r_b - μ_r) / σ_r
+        z_c = (c_b - μ_c) / σ_c
+        v_b = (z_r + z_c) / sqrt(2.0)
+        valid += 1
+        abs(v_b) >= abs_v_obs && (reject += 1)
+    end
+    valid >= 5 || return nan_out
+    perm_p = (1 + reject) / (valid + 1)
+    return (v = v_obs, perm_p = perm_p, sign_obs = sign(v_obs))
+end
+
+# Pick the (rho_obs, rho_null_vector) pair to use as the middle axis of the
+# 3D Mahalanobis-style gate. Returns `nothing` when the selected variant
+# wasn't computed (e.g., :rho_pearson_dp80 selected but the dp80 mask was
+# empty for this scope). Used by oracle_stats.
+@inline function _pick_rho_axis(axis::Symbol, r, rq05, rq10, rq25,
+                                  rdp80, rq05d80, rq10d80, rq25d80)
+    if axis === :rho_pearson
+        return (r.rho, r.null)
+    elseif axis === :rho_pearson_q05
+        return (rq05.rho, rq05.null)
+    elseif axis === :rho_pearson_q10
+        return (rq10.rho, rq10.null)
+    elseif axis === :rho_pearson_q25
+        return (rq25.rho, rq25.null)
+    elseif axis === :rho_pearson_dp80
+        rdp80 === nothing && return nothing
+        return (rdp80.rho, rdp80.null)
+    elseif axis === :rho_pearson_q05_dp80
+        rq05d80 === nothing && return nothing
+        return (rq05d80.rho, rq05d80.null)
+    elseif axis === :rho_pearson_q10_dp80
+        rq10d80 === nothing && return nothing
+        return (rq10d80.rho, rq10d80.null)
+    elseif axis === :rho_pearson_q25_dp80
+        rq25d80 === nothing && return nothing
+        return (rq25d80.rho, rq25d80.null)
+    else
+        error("unhandled oracle_mahal_rho_axis: $axis (validation should have caught this)")
+    end
+end
+
+# cor_alpha_p — per-locus Pearson correlation of α_j against p_j (raw allele
+# frequency, not polarized). No LD/Bulmer machinery: a pure per-locus
+# directional-selection signal. Under positive directional selection on the
+# trait, alleles with α_j > 0 are favored ⇒ p_j elevated ⇒ cor(α, p) > 0.
+# The sign-flip null uses the same `raw_signs` matrix as rho_pearson, so the
+# null permutations are identical: cor(ε_b ⊙ α, p_j) per perm.
+#
+# Math (per scope):
+#   in_scope[j] = ∃ k≠j with mask[j,k]   (loci with at least one off-diag partner)
+#   obs         = cor(α[in_scope], p_pool[in_scope])
+#   null_b      = cor((ε_b ⊙ α)[in_scope], p_pool[in_scope])
+#   Z           = (obs − mean(null)) / sd(null)
+#   perm_p      = (1 + #{b : |null_b − mean(null)| ≥ |obs − mean(null)|}) / (B+1)
+function _per_locus_corr_one(α::Vector{T}, p_pool::Vector{Float64},
+                              raw_signs::Matrix{T},
+                              mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
+               null = fill(NaN, n_perm))
+
+    # In-scope loci: ≥ 1 off-diag partner in mask.
+    in_scope = falses(p)
+    @inbounds for j in 1:p
+        for k in 1:p
+            if k != j && mask[j, k]
+                in_scope[j] = true
+                break
+            end
+        end
+    end
+    valid = findall(in_scope)
+    n_v = length(valid)
+    n_v < 5 && return nan_out
+
+    α_v = Float64[Float64(α[j]) for j in valid]
+    p_v = Float64[p_pool[j]     for j in valid]
+
+    # Observed Pearson cor. Reject if p has zero variance (degenerate).
+    cor_obs = _fast_cor(α_v, p_v)
+    isnan(cor_obs) && return nan_out
+
+    # Permutation null: cor(ε_b ⊙ α, p) on the same in_scope subset.
+    rho_null = Vector{Float64}(undef, n_perm)
+    α_perm = Vector{Float64}(undef, n_v)
+    @inbounds for b in 1:n_perm
+        for vi in 1:n_v
+            j = valid[vi]
+            α_perm[vi] = Float64(raw_signs[j, b]) * α_v[vi]
+        end
+        rho_null[b] = _fast_cor(α_perm, p_v)
+    end
+
+    valid_null = filter(!isnan, rho_null)
+    isempty(valid_null) && return nan_out
+    null_mean = mean(valid_null)
+    null_sd   = length(valid_null) > 1 ? std(valid_null; corrected=true) : 0.0
+    Z = null_sd > 1e-30 ? (cor_obs - null_mean) / null_sd : NaN
+    abs_dev = abs(cor_obs - null_mean)
+    perm_p = (1 + count(r -> !isnan(r) && abs(r - null_mean) >= abs_dev,
+                          rho_null)) / (n_perm + 1)
+    return (rho = cor_obs, null_mean = null_mean, null_sd = null_sd,
+            Z = Z, perm_p = perm_p, null = rho_null)
+end
+
+# Two-pass Pearson correlation of two equal-length Float64 vectors.
+# Returns NaN if either is constant (zero variance).
+@inline function _fast_cor(x::Vector{Float64}, y::Vector{Float64})
+    n = length(x); @assert n == length(y)
+    mx = 0.0; my = 0.0
+    @inbounds for i in 1:n
+        mx += x[i]; my += y[i]
+    end
+    mx /= n; my /= n
+    sxx = 0.0; syy = 0.0; sxy = 0.0
+    @inbounds for i in 1:n
+        dx = x[i] - mx; dy = y[i] - my
+        sxx += dx * dx
+        syy += dy * dy
+        sxy += dx * dy
+    end
+    (sxx > 1e-30 && syy > 1e-30) || return NaN
+    return sxy / sqrt(sxx * syy)
+end
+
 # rho_pearson — Pearson correlation of the studentized per-locus marginal
 # Bulmer effect against logit(p_pol_j). Direction-aware: sign(ρ) > 0 under
 # positive directional selection, < 0 under negative directional selection.
@@ -412,10 +741,13 @@ end
 # of ρ. Two-tailed p via the dc convention: |null − null_mean| ≥ |obs − null_mean|.
 function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
                             p_pool::Vector{Float64}, raw_signs::Matrix{T},
-                            mask::BitMatrix) where {T<:AbstractFloat}
+                            mask::BitMatrix;
+                            use_logit::Bool=true,
+                            demean::Bool=true) where {T<:AbstractFloat}
     p = length(α)
     n_perm = size(raw_signs, 2)
-    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN)
+    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
+               null = fill(NaN, n_perm))
 
     # 1. Build R_masked = R_meta with diag zero and off-diagonals masked.
     R_masked = Matrix{T}(undef, p, p)
@@ -467,12 +799,12 @@ function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
         Bj_sd[j] = sqrt(ss * inv_nm1)
     end
 
-    # 6. Polarized logit p, clamped.
+    # 6. Polarized p (raw or logit, controlled by use_logit kwarg).
     logit_p = Vector{Float64}(undef, p)
     @inbounds for j in 1:p
         pj = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
         pj = clamp(pj, 0.005, 0.995)
-        logit_p[j] = log(pj / (1.0 - pj))
+        logit_p[j] = use_logit ? log(pj / (1.0 - pj)) : pj
     end
 
     # 7. Filter to loci with usable sd and finite logit. Build B_std_obs and
@@ -490,7 +822,12 @@ function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
     logit_p_v = Vector{Float64}(undef, n_v)
     @inbounds for vi in 1:n_v
         j = valid[vi]
-        B_std_obs[vi] = (Bj_obs[j] - Bj_mean[j]) / Bj_sd[j]   # empirical demean + sd
+        # Studentize: divide by per-locus perm-null sd. Optionally demean
+        # by the empirical null mean (default true). Under sign-flip
+        # E[B_j_null] = 0 theoretically; the demean only corrects finite-
+        # sample drift in μ_Bj.
+        B_std_obs[vi] = demean ? (Bj_obs[j] - Bj_mean[j]) / Bj_sd[j] :
+                                    Bj_obs[j] / Bj_sd[j]
         logit_p_v[vi] = logit_p[j]
     end
 
@@ -517,13 +854,21 @@ function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
     bxb = Vector{Float64}(undef, n_v)
     ly_perm = Vector{Float64}(undef, n_v)
     @inbounds for b in 1:n_perm
-        # Pass 1: build standardized null B (empirical demean + sd) and
-        # repolarized logit_p; sums.
+        # Pass 1: build standardized null B (per-locus sd, optional demean)
+        # and repolarized predictor; sums.
+        # Repolarization depends on transform:
+        #   logit: logit(p_pol_perm) = ε · logit(p_pol_obs)
+        #     because logit(1−p) = −logit(p)  (antisymmetric around 0)
+        #   raw p: p_pol_perm = p_pol_obs if ε=+1 else (1 − p_pol_obs)
+        #     reflection around 0.5, NOT multiplication by ε
         sx = 0.0; sy = 0.0
         for vi in 1:n_v
             j = valid[vi]
-            bxb[vi]    = (Bj_null[j, b] - Bj_mean[j]) / Bj_sd[j]
-            ly_perm[vi] = Float64(raw_signs[j, b]) * logit_p_v[vi]
+            bxb[vi]    = demean ? (Bj_null[j, b] - Bj_mean[j]) / Bj_sd[j] :
+                                     Bj_null[j, b] / Bj_sd[j]
+            ε = Float64(raw_signs[j, b])
+            ly_perm[vi] = use_logit ? (ε * logit_p_v[vi]) :
+                             (ε >= 0 ? logit_p_v[vi] : (1.0 - logit_p_v[vi]))
             sx += bxb[vi]; sy += ly_perm[vi]
         end
         mxb = sx / n_v
@@ -552,7 +897,7 @@ function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
     perm_p = (1 + count(r -> !isnan(r) && abs(r - null_mean) >= abs_dev_obs,
                           rho_null)) / (n_perm + 1)
     return (rho = rho_obs, null_mean = null_mean, null_sd = null_sd,
-            Z = Z, perm_p = perm_p)
+            Z = Z, perm_p = perm_p, null = rho_null)
 end
 
 # =============================================================================
@@ -569,7 +914,8 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
                                 q::Float64 = 0.25) where {T<:AbstractFloat}
     p = length(α)
     n_perm = size(raw_signs, 2)
-    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN)
+    nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
+               null = fill(NaN, n_perm))
 
     Bj_obs  = fill(NaN, p)
     Bj_null = fill(NaN, p, n_perm)
@@ -739,7 +1085,8 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
     abs_dev = abs(rho_obs - nm)
     perm_p = (1 + count(r -> isfinite(r) && abs(r - nm) >= abs_dev, rho_null)) /
                  (length(rho_null) + 1)
-    return (rho = rho_obs, null_mean = nm, null_sd = nsd, Z = Z, perm_p = perm_p)
+    return (rho = rho_obs, null_mean = nm, null_sd = nsd, Z = Z,
+            perm_p = perm_p, null = rho_null)
 end
 
 
@@ -804,7 +1151,12 @@ function oracle_stats(result::SimResult;
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_dp80 (5)
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q05_dp80 (5)
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q10_dp80 (5)
-            nv(), nv(), nv(), nv(), nv())              # rho_pearson_q25_dp80 (5)
+            nv(), nv(), nv(), nv(), nv(),              # rho_pearson_q25_dp80 (5)
+            nv(), nv(), nv(), nv(), nv(),              # cor_alpha_p (5)
+            nv(), nv(), nv(), nv(), nv(), nv(),         # mahal_3d (6)
+            nv(), nv(),                                 # mahal_2d_dir (2)
+            fill(:neutral, n_scopes),                   # selection_class
+            nv(), nv())                                 # dir_1d (2)
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -857,6 +1209,19 @@ function oracle_stats(result::SimResult;
     Q10D80_nsd = fill(NaN, n_scopes); Q10D80_Z  = fill(NaN, n_scopes); Q10D80_p  = fill(NaN, n_scopes)
     Q25D80_obs = fill(NaN, n_scopes); Q25D80_nm = fill(NaN, n_scopes)
     Q25D80_nsd = fill(NaN, n_scopes); Q25D80_Z  = fill(NaN, n_scopes); Q25D80_p  = fill(NaN, n_scopes)
+    # cor_alpha_p — per-locus directional test, scope-restricted via the
+    # same `mask` as rho_pearson (in-scope = ≥ 1 off-diag partner).
+    Cap_obs = fill(NaN, n_scopes); Cap_nm  = fill(NaN, n_scopes)
+    Cap_nsd = fill(NaN, n_scopes); Cap_Z   = fill(NaN, n_scopes); Cap_p   = fill(NaN, n_scopes)
+    # 3D left-plane Mahalanobis gate test, per scope.
+    M3D_stat  = fill(NaN, n_scopes); M3D_p     = fill(NaN, n_scopes)
+    M3D_rrad  = fill(NaN, n_scopes); M3D_zb    = fill(NaN, n_scopes)
+    M3D_zrho  = fill(NaN, n_scopes); M3D_zcor  = fill(NaN, n_scopes)
+    # Stage-2: 2D directional Mahalanobis on (z_rho, z_cor) plane.
+    M2D_stat  = fill(NaN, n_scopes); M2D_p     = fill(NaN, n_scopes)
+    sel_class = fill(:neutral, n_scopes)
+    # Stage-2 alternative: 1D test on v_dir = (z_rho + z_cor)/√2.
+    D1D_v     = fill(NaN, n_scopes); D1D_p     = fill(NaN, n_scopes)
 
     if !failed
         # Polarized freqs reused for the dp80 mask construction.
@@ -867,6 +1232,12 @@ function oracle_stats(result::SimResult;
             rho_obs[s] = r.rho;     rho_nm[s] = r.null_mean
             rho_nsd[s] = r.null_sd; rho_Z[s]  = r.Z
             rho_pp[s]  = r.perm_p
+
+            # cor_alpha_p — per-locus directional test, same in-scope filter.
+            cap = _per_locus_corr_one(α, p_pool, raw_signs, masks[s])
+            Cap_obs[s] = cap.rho;     Cap_nm[s] = cap.null_mean
+            Cap_nsd[s] = cap.null_sd; Cap_Z[s]  = cap.Z
+            Cap_p[s]   = cap.perm_p
 
             rq05 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.05)
             Rq05_obs[s] = rq05.rho;     Rq05_nm[s] = rq05.null_mean
@@ -885,23 +1256,95 @@ function oracle_stats(result::SimResult;
             # of in-scope |Δp_pol| values. `nothing` return ⇒ scope has
             # fewer than 5 in-scope pairs.
             dp80_mask = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
+            rdp80 = nothing; rq05d80_ = nothing; rq10d80_ = nothing; rq25d80_ = nothing
             if dp80_mask !== nothing
                 rdp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask)
                 Rdp80_obs[s] = rdp80.rho;     Rdp80_nm[s] = rdp80.null_mean
                 Rdp80_nsd[s] = rdp80.null_sd; Rdp80_Z[s]  = rdp80.Z
                 Rdp80_p[s]   = rdp80.perm_p
-                rq05d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.05)
+                rq05d80_ = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.05)
+                rq05d80  = rq05d80_
                 Q05D80_obs[s] = rq05d80.rho;     Q05D80_nm[s] = rq05d80.null_mean
                 Q05D80_nsd[s] = rq05d80.null_sd; Q05D80_Z[s]  = rq05d80.Z
                 Q05D80_p[s]   = rq05d80.perm_p
-                rq10d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.10)
+                rq10d80_ = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.10)
+                rq10d80  = rq10d80_
                 Q10D80_obs[s] = rq10d80.rho;     Q10D80_nm[s] = rq10d80.null_mean
                 Q10D80_nsd[s] = rq10d80.null_sd; Q10D80_Z[s]  = rq10d80.Z
                 Q10D80_p[s]   = rq10d80.perm_p
-                rq25d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.25)
+                rq25d80_ = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.25)
+                rq25d80  = rq25d80_
                 Q25D80_obs[s] = rq25d80.rho;     Q25D80_nm[s] = rq25d80.null_mean
                 Q25D80_nsd[s] = rq25d80.null_sd; Q25D80_Z[s]  = rq25d80.Z
                 Q25D80_p[s]   = rq25d80.perm_p
+            end
+
+            # 3D left-plane Mahalanobis-style gate. The middle axis is the
+            # rho-family variant selected by cfg.oracle_mahal_rho_axis (default
+            # :rho_pearson; alternatives include :rho_pearson_dp80 and the
+            # bottom-q variants). B axis is fixed at the "within"-chromosome
+            # scope for ALL rho scopes — B aggregates over more pairs at
+            # within-chr than at narrow windows so this carries the strongest
+            # B signal regardless of the rho window choice.
+            within_idx = findfirst(==("within"), scope_names)
+            if within_idx !== nothing && is_B_scope[within_idx] &&
+                 !failed && !isnan(B[within_idx])
+                # EXPERIMENT: rho_pearson with raw p (no logit) AND
+                # studentize B by sd only (no demean). User hypothesis: the
+                # demean step adds finite-sample null-mean noise that can
+                # flip sign at marginal selection. Theoretical E[B_j_null]=0
+                # under sign-flip, so demean is only a noise-correction step.
+                r_rawp = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s];
+                                            use_logit=false, demean=false)
+                axis_pair = (r_rawp.rho, r_rawp.null)
+                if axis_pair !== nothing
+                    B_null_within = view(VG_off_null_meta, :, within_idx) ./ VA_meta
+                    rho_axis_obs, rho_axis_null = axis_pair
+                    m3d = _left_plane_3d_test(B[within_idx], B_null_within,
+                                                rho_axis_obs, rho_axis_null,
+                                                cap.rho, cap.null)
+                    M3D_stat[s] = m3d.stat; M3D_p[s]    = m3d.perm_p
+                    M3D_rrad[s] = m3d.r_radial
+                    M3D_zb[s]   = m3d.z_b
+                    M3D_zrho[s] = m3d.z_rho
+                    M3D_zcor[s] = m3d.z_cor
+
+                    # Stage 2: 2D directional Mahalanobis test on (rho, cor)
+                    # using the same axis selection. Always compute and store;
+                    # the class label below applies the α=0.05 hierarchy.
+                    m2d = _2d_dir_test(rho_axis_obs, rho_axis_null,
+                                          cap.rho, cap.null)
+                    M2D_stat[s] = m2d.D2; M2D_p[s] = m2d.perm_p
+
+                    # Stage-2 alternative: 1D combined directional projection
+                    # v_dir = (z_rho + z_cor)/√2, two-sided permutation-p.
+                    # Exposed for comparison with the 2D Mahalanobis; not used
+                    # in `selection_class`.
+                    d1d = _1d_dir_test(rho_axis_obs, rho_axis_null,
+                                          cap.rho, cap.null)
+                    D1D_v[s] = d1d.v; D1D_p[s] = d1d.perm_p
+
+                    # Classifier (α_thr = 0.05): hierarchical decision tree.
+                    #   p3D ≥ α_thr                              → :neutral
+                    #   p3D < α_thr  AND  p_dir ≥ α_thr          → :stabilizing
+                    #   p3D < α_thr  AND  p_dir < α_thr  AND >0  → :directional_pos
+                    #   p3D < α_thr  AND  p_dir < α_thr  AND <0  → :directional_neg
+                    # Direction sign uses the *standardized* (z_rho + z_cor)
+                    # — i.e., the 1D test's signed v_obs — because the raw
+                    # rho_obs + cor_obs sum can have opposite sign from the
+                    # standardized sum when the rho/cor null means are non-
+                    # zero (causes the classifier to flip label).
+                    α_thr = 0.05
+                    sign_v = isfinite(d1d.v) ? d1d.v : m2d.v_dir_signed
+                    if isnan(m3d.perm_p) || m3d.perm_p >= α_thr
+                        sel_class[s] = :neutral
+                    elseif isnan(m2d.perm_p) || m2d.perm_p >= α_thr
+                        sel_class[s] = :stabilizing
+                    else
+                        sel_class[s] = sign_v >= 0 ?
+                                            :directional_pos : :directional_neg
+                    end
+                end
             end
         end
     end
@@ -916,7 +1359,11 @@ function oracle_stats(result::SimResult;
                          Rdp80_obs, Rdp80_nm, Rdp80_nsd, Rdp80_Z, Rdp80_p,
                          Q05D80_obs, Q05D80_nm, Q05D80_nsd, Q05D80_Z, Q05D80_p,
                          Q10D80_obs, Q10D80_nm, Q10D80_nsd, Q10D80_Z, Q10D80_p,
-                         Q25D80_obs, Q25D80_nm, Q25D80_nsd, Q25D80_Z, Q25D80_p)
+                         Q25D80_obs, Q25D80_nm, Q25D80_nsd, Q25D80_Z, Q25D80_p,
+                         Cap_obs, Cap_nm, Cap_nsd, Cap_Z, Cap_p,
+                         M3D_stat, M3D_p, M3D_rrad, M3D_zb, M3D_zrho, M3D_zcor,
+                         M2D_stat, M2D_p, sel_class,
+                         D1D_v, D1D_p)
 end
 
 """
@@ -997,6 +1444,11 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                                 oracle.rho_pearson_q25_dp80_null_sd,
                                 oracle.rho_pearson_q25_dp80_Z,
                                 oracle.rho_pearson_q25_dp80_perm_p),
+            ("cor_alpha_p",     oracle.cor_alpha_p,
+                                oracle.cor_alpha_p_null_mean,
+                                oracle.cor_alpha_p_null_sd,
+                                oracle.cor_alpha_p_Z,
+                                oracle.cor_alpha_p_perm_p),
         )
         for (pfx, obs, nm, nsd, z, pp) in rho_specs
             for (s, name) in enumerate(oracle.scope_names)
@@ -1006,6 +1458,26 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                 println(io, pfx, "_Z_",         name, "\t", z[s])
                 println(io, pfx, "_perm_p_",    name, "\t", pp[s])
             end
+        end
+        # 3D left-plane Mahalanobis gate — 6 fields per scope.
+        for (s, name) in enumerate(oracle.scope_names)
+            println(io, "mahal_3d_stat_",     name, "\t", oracle.mahal_3d_stat[s])
+            println(io, "mahal_3d_perm_p_",   name, "\t", oracle.mahal_3d_perm_p[s])
+            println(io, "mahal_3d_r_radial_", name, "\t", oracle.mahal_3d_r_radial[s])
+            println(io, "mahal_3d_z_b_",      name, "\t", oracle.mahal_3d_z_b[s])
+            println(io, "mahal_3d_z_rho_",    name, "\t", oracle.mahal_3d_z_rho[s])
+            println(io, "mahal_3d_z_cor_",    name, "\t", oracle.mahal_3d_z_cor[s])
+        end
+        # 2D directional Mahalanobis (stage 2) + classifier label per scope.
+        for (s, name) in enumerate(oracle.scope_names)
+            println(io, "mahal_2d_dir_stat_",   name, "\t", oracle.mahal_2d_dir_stat[s])
+            println(io, "mahal_2d_dir_perm_p_", name, "\t", oracle.mahal_2d_dir_perm_p[s])
+            println(io, "selection_class_",     name, "\t", String(oracle.selection_class[s]))
+        end
+        # 1D combined directional (alternative stage 2).
+        for (s, name) in enumerate(oracle.scope_names)
+            println(io, "dir_1d_v_",      name, "\t", oracle.dir_1d_v[s])
+            println(io, "dir_1d_perm_p_", name, "\t", oracle.dir_1d_perm_p[s])
         end
     end
     return path

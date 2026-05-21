@@ -287,6 +287,12 @@ Base.@kwdef mutable struct Config
         Symbol[:win_50pct, :within, :genome]
     oracle_rho_scopes::Vector{Symbol} =
         Symbol[:win_5pct, :win_10pct, :win_25pct]
+    # 3D Mahalanobis-gate axis selector. Picks which rho-family variant is
+    # used as the second axis of the 3D left-plane gate (B, rho_X, cor_alpha_p).
+    # Valid: `:rho_pearson` (default), `:rho_pearson_q05`, `:rho_pearson_q10`,
+    # `:rho_pearson_q25`, `:rho_pearson_dp80`, `:rho_pearson_q05_dp80`,
+    # `:rho_pearson_q10_dp80`, `:rho_pearson_q25_dp80`.
+    oracle_mahal_rho_axis::Symbol = :rho_pearson
     # Phases at which to record oracle statistics. Effective only when
     # `:oracle ∈ output_formats`. Each entry must be one of:
     #   :init    — gen 0, immediately after init + V_E computation.
@@ -675,6 +681,12 @@ function validate(cfg::Config)
         throw(ArgumentError("oracle_B_scopes is empty; use [:all] for all scopes"))
     isempty(cfg.oracle_rho_scopes) &&
         throw(ArgumentError("oracle_rho_scopes is empty; use [:all] for all scopes"))
+    cfg.oracle_mahal_rho_axis in
+        (:rho_pearson, :rho_pearson_q05, :rho_pearson_q10, :rho_pearson_q25,
+         :rho_pearson_dp80, :rho_pearson_q05_dp80, :rho_pearson_q10_dp80,
+         :rho_pearson_q25_dp80) ||
+        throw(ArgumentError("oracle_mahal_rho_axis must be one of the rho_pearson family; " *
+                             "got :$(cfg.oracle_mahal_rho_axis)"))
     isempty(cfg.oracle_phases) &&
         throw(ArgumentError("oracle_phases must contain at least one of :init, :settled, :final"))
     for ph in cfg.oracle_phases

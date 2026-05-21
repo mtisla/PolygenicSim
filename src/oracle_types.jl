@@ -92,6 +92,57 @@ struct OracleResult
     rho_pearson_q25_dp80_null_sd::Vector{Float64}
     rho_pearson_q25_dp80_Z::Vector{Float64}
     rho_pearson_q25_dp80_perm_p::Vector{Float64}
+    # cor_alpha_p — per-locus directional test (experimental). Pearson
+    # correlation of α_j with raw p_j across in-scope QTLs. Sign-flip null
+    # shared with the rho_pearson family (same raw_signs matrix). No LD
+    # machinery: a baseline for comparing how much directional signal the
+    # per-locus statistic carries vs. the LD-aggregating rho_pearson.
+    cor_alpha_p::Vector{Float64}
+    cor_alpha_p_null_mean::Vector{Float64}
+    cor_alpha_p_null_sd::Vector{Float64}
+    cor_alpha_p_Z::Vector{Float64}
+    cor_alpha_p_perm_p::Vector{Float64}
+    # 3D left-plane Mahalanobis-style gate test (experimental). Operates on
+    # standardized (Z_B, Z_rho, Z_cor) per scope. Rejection: half-space
+    # perpendicular to Z_obs through Z_obs (NOT through origin); side picked
+    # by sign(B_obs) — outward when B_obs<0 (extreme stabilizing), inward
+    # otherwise. Generalizes hotel2.R `left_plane_maha_test` from 2D to 3D.
+    # Output:
+    #   mahal_3d_stat   = ||Z_obs||                          (effect size)
+    #   mahal_3d_perm_p = (1 + #reject)/(B+1)                (gate p-value)
+    #   mahal_3d_r_radial = sqrt(Z_rho² + Z_cor²)            (stage-2 classifier)
+    #   mahal_3d_z_b / z_rho / z_cor                         (raw axis Z's)
+    # Two-stage decision: if perm_p < α, "selection detected". Then use
+    # r_radial + signs to classify as directional (large r_radial, signs of
+    # rho/cor agree) vs stabilizing (r_radial small, z_b strongly negative).
+    mahal_3d_stat::Vector{Float64}
+    mahal_3d_perm_p::Vector{Float64}
+    mahal_3d_r_radial::Vector{Float64}
+    mahal_3d_z_b::Vector{Float64}
+    mahal_3d_z_rho::Vector{Float64}
+    mahal_3d_z_cor::Vector{Float64}
+    # Stage 2: 2D Mahalanobis directional test on (z_rho, z_cor) plane.
+    # Run conditional on stage-1 (3D omnibus) rejection. Empirical sign-flip
+    # null, no chi-square. Output:
+    #   mahal_2d_dir_stat   = Mahalanobis D² obs in (z_rho, z_cor) plane
+    #   mahal_2d_dir_perm_p = empirical perm-p
+    #   selection_class     = derived label per scope using α=0.05:
+    #     :neutral           — p3D ≥ α
+    #     :stabilizing       — p3D < α AND p_dir ≥ α
+    #     :directional_pos   — p3D < α AND p_dir < α AND (z_rho+z_cor) > 0
+    #     :directional_neg   — p3D < α AND p_dir < α AND (z_rho+z_cor) < 0
+    mahal_2d_dir_stat::Vector{Float64}
+    mahal_2d_dir_perm_p::Vector{Float64}
+    selection_class::Vector{Symbol}
+    # 1D directional test along v_dir = (z_rho + z_cor)/√2. Two-sided
+    # permutation-p (positive directional → v_dir > 0, negative → v_dir < 0).
+    # Exposed alongside the 2D Mahalanobis test so the analyst can compare
+    # which stage-2 form is more powerful at each regime. Not used in
+    # selection_class (which still uses the 2D test); a derived 1D-classifier
+    # can be constructed offline by combining `mahal_3d_perm_p < α` with
+    # `dir_1d_perm_p < α` and the sign of `dir_1d_v`.
+    dir_1d_v::Vector{Float64}
+    dir_1d_perm_p::Vector{Float64}
 end
 
 export OracleResult

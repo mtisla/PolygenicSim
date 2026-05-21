@@ -83,6 +83,7 @@ const _CONFIG_CATEGORIES = (
                        :oracle_memory_path_threshold,
                        :oracle_precision, :oracle_phases,
                        :oracle_B_scopes, :oracle_rho_scopes,
+                       :oracle_mahal_rho_axis,
                        :oracle_maf_min),
 )
 
