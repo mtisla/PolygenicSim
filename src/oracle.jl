@@ -545,6 +545,131 @@ function _2d_dir_test(z_rho_obs::Float64, z_rho_null::Vector{Float64},
     return (D2 = D2_obs, perm_p = perm_p, v_dir_signed = z_rho_obs + z_cor_obs)
 end
 
+# =============================================================================
+# Alternative directional sums Dp and Dld (raw, unstandardized at locus level).
+# -----------------------------------------------------------------------------
+#   Dp  = Σ_{j ∈ scope} α_j · p_j        (per-locus signed score, raw)
+#   Dld = Σ_{j ∈ scope} B_j · p_j        (Bulmer-weighted, B_j raw, NOT studentized)
+#       where B_j = α_j · Σ_k R_jk · α_k  (off-diagonal masked)
+#
+# Under sign-flip null α_perm = ε ⊙ α:
+#   E[Dp_null]  = Σ p_j · α_j · E[ε_j]            = 0
+#   E[Dld_null] = Σ p_j · α_j · Σ_k R_jk · α_k · E[ε_j ε_k]
+#               = Σ p_j · α_j² · R_jj   (diag = 0)  = 0
+# So both have theoretical null mean 0; empirical mean from n_perm draws is
+# close to 0 and used for standardization.
+#
+# Z_Dp  = (Dp_obs  − μ_Dp_null) / σ_Dp_null
+# Z_Dld = (Dld_obs − μ_Dld_null) / σ_Dld_null
+#
+# Hypothesis: removing the per-locus B_std step (which introduces noisy
+# division by σ_B_j when n_qtl is modest) gives a signed test that retains
+# direction information without the sign-flipping artifact of rho_pearson.
+# Global Dp = Σ α_j · p_pol_j over ALL polymorphic α≠0 loci (no scope).
+#   p_pol_j = p_j if α_j ≥ 0 else 1 − p_j
+# Sign-flip null: α_perm = ε ⊙ α; p_pol re-polarizes consistently with
+# α_perm, which collapses to:
+#   p_pol_perm[j,b] = p_pol_obs[j] if ε[j,b] = +1, else 1 − p_pol_obs[j]
+# E[Dp_null] = 0 by symmetry. Null sd estimated empirically.
+function _compute_dp_global(α::Vector{T}, p_pool::Vector{Float64},
+                              raw_signs::Matrix{T}) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+
+    # Polarized p (same convention as rho_pearson).
+    p_pol = Vector{Float64}(undef, p)
+    @inbounds for j in 1:p
+        p_pol[j] = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
+    end
+
+    # Observed.
+    Dp_obs = 0.0
+    @inbounds for j in 1:p
+        Dp_obs += Float64(α[j]) * p_pol[j]
+    end
+
+    # Per perm: Dp_perm = Σ (ε·α)_j · p_pol_perm[j]
+    #   where p_pol_perm = p_pol_obs when ε=+1, (1−p_pol_obs) when ε=-1.
+    Dp_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        s = 0.0
+        for j in 1:p
+            ε = raw_signs[j, b]
+            pp = ε >= 0 ? p_pol[j] : 1.0 - p_pol[j]
+            s += Float64(ε) * Float64(α[j]) * pp
+        end
+        Dp_null[b] = s
+    end
+
+    return (Dp_obs = Dp_obs, Dp_null = Dp_null)
+end
+
+# Per-scope Dld = Σ_{j in-scope} B_j · p_pol_j, B_j raw (NOT standardized).
+#   B_j = α_j · Σ_k R_jk · α_k  (R off-diag masked to scope)
+# Sign-flip null: B_j_perm = α_perm_j · Σ R_jk · α_perm_k; p_pol re-polarizes.
+function _compute_dld_one(α::Vector{T}, p_pool::Vector{Float64},
+                            R_meta::Matrix{T}, raw_signs::Matrix{T},
+                            mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (Dld_obs = NaN, Dld_null = fill(NaN, n_perm))
+
+    # In-scope loci: ≥ 1 off-diag partner in mask.
+    in_scope = falses(p)
+    @inbounds for j in 1:p
+        for k in 1:p
+            if k != j && mask[j, k]; in_scope[j] = true; break; end
+        end
+    end
+    count(in_scope) >= 5 || return nan_out
+
+    # Polarized p.
+    p_pol = Vector{Float64}(undef, p)
+    @inbounds for j in 1:p
+        p_pol[j] = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
+    end
+
+    # R_masked.
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    # Observed B_j and Dld.
+    R_a = R_masked * α
+    Dld_obs = 0.0
+    @inbounds for j in 1:p
+        if in_scope[j]
+            Bj = Float64(α[j]) * Float64(R_a[j])
+            Dld_obs += Bj * p_pol[j]
+        end
+    end
+
+    # Null.
+    a_perm = Matrix{T}(undef, p, n_perm)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_perm[j, b] = raw_signs[j, b] * α[j]
+    end
+    R_aperm = R_masked * a_perm
+    Dld_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        s = 0.0
+        for j in 1:p
+            if in_scope[j]
+                ap  = Float64(a_perm[j, b])
+                Rap = Float64(R_aperm[j, b])
+                Bj_perm = ap * Rap
+                ε = raw_signs[j, b]
+                pp_perm = ε >= 0 ? p_pol[j] : 1.0 - p_pol[j]
+                s += Bj_perm * pp_perm
+            end
+        end
+        Dld_null[b] = s
+    end
+
+    return (Dld_obs = Dld_obs, Dld_null = Dld_null)
+end
+
 # Stage-2 (alternative): 1D directional test along v_dir = (z_rho + z_cor)/√2.
 # -----------------------------------------------------------------------------
 # Single-degree-of-freedom test on the canonical "positive directional" ray
@@ -1156,7 +1281,13 @@ function oracle_stats(result::SimResult;
             nv(), nv(), nv(), nv(), nv(), nv(),         # mahal_3d (6)
             nv(), nv(),                                 # mahal_2d_dir (2)
             fill(:neutral, n_scopes),                   # selection_class
-            nv(), nv())                                 # dir_1d (2)
+            nv(), nv(),                                 # dir_1d (2)
+            nv(), nv(), nv(),                           # Dp obs/Z/p (3)
+            nv(), nv(), nv(),                           # Dld obs/Z/p (3)
+            nv(), nv(),                                 # mahal_3d_v2 stat+p (2)
+            nv(),                                       # mahal_2d_v2 p (1)
+            nv(), nv(),                                 # dir_1d_v2 v+p (2)
+            fill(:neutral, n_scopes))                   # selection_class_v2
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -1222,10 +1353,29 @@ function oracle_stats(result::SimResult;
     sel_class = fill(:neutral, n_scopes)
     # Stage-2 alternative: 1D test on v_dir = (z_rho + z_cor)/√2.
     D1D_v     = fill(NaN, n_scopes); D1D_p     = fill(NaN, n_scopes)
+    # ─── Alternative directional stats Dp = Σ α·p and Dld = Σ B·p ───
+    Dp_obs_v   = fill(NaN, n_scopes); Dp_Z_v   = fill(NaN, n_scopes); Dp_p_v   = fill(NaN, n_scopes)
+    Dld_obs_v  = fill(NaN, n_scopes); Dld_Z_v  = fill(NaN, n_scopes); Dld_p_v  = fill(NaN, n_scopes)
+    M3D_v2_st  = fill(NaN, n_scopes); M3D_v2_p = fill(NaN, n_scopes)
+    M2D_v2_p   = fill(NaN, n_scopes)
+    D1D_v2_v   = fill(NaN, n_scopes); D1D_v2_p = fill(NaN, n_scopes)
+    sel_class_v2 = fill(:neutral, n_scopes)
 
     if !failed
         # Polarized freqs reused for the dp80 mask construction.
         p_pol_obs = [α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j] for j in 1:p]
+        # ─── Global Dp = Σ α_j · p_pol_j (no scope), computed ONCE ──────
+        _dp_global = _compute_dp_global(α, p_pool, raw_signs)
+        _dp_global_obs  = _dp_global.Dp_obs
+        _dp_global_null = _dp_global.Dp_null
+        _μ_dp = isfinite(_dp_global_obs) ? mean(filter(isfinite, _dp_global_null)) : NaN
+        _σ_dp = isfinite(_dp_global_obs) ?
+                    std(filter(isfinite, _dp_global_null); corrected=true) : NaN
+        _adev_dp = isfinite(_dp_global_obs) && isfinite(_μ_dp) ?
+                       abs(_dp_global_obs - _μ_dp) : NaN
+        _dp_global_perm_p = isfinite(_dp_global_obs) && isfinite(_μ_dp) ?
+            (1 + count(x -> isfinite(x) && abs(x - _μ_dp) >= _adev_dp,
+                          _dp_global_null)) / (n_perm + 1) : NaN
         for s in 1:n_scopes
             is_rho_scope[s] || continue
             r = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s])
@@ -1344,6 +1494,49 @@ function oracle_stats(result::SimResult;
                         sel_class[s] = sign_v >= 0 ?
                                             :directional_pos : :directional_neg
                     end
+
+                    # ─── Parallel classifier on (z_B, Z_Dp_GLOBAL, Z_Dld_s) ───
+                    # Dp is computed ONCE globally (above the per-scope loop)
+                    # and reused here. Dld is scope-specific.
+                    dld = _compute_dld_one(α, p_pool, R_meta, raw_signs, masks[s])
+                    if isfinite(_dp_global_obs) && isfinite(dld.Dld_obs)
+                        Dp_obs_v[s]  = _dp_global_obs
+                        Dld_obs_v[s] = dld.Dld_obs
+                        # Standardize Dp (global) and Dld (this scope).
+                        if _σ_dp > 1e-30
+                            Dp_Z_v[s] = (_dp_global_obs - _μ_dp) / _σ_dp
+                            Dp_p_v[s] = _dp_global_perm_p
+                        end
+                        μ_dl = mean(filter(isfinite, dld.Dld_null))
+                        σ_dl = std(filter(isfinite, dld.Dld_null); corrected=true)
+                        if σ_dl > 1e-30
+                            Dld_Z_v[s] = (dld.Dld_obs - μ_dl) / σ_dl
+                            adev_dld = abs(dld.Dld_obs - μ_dl)
+                            Dld_p_v[s] = (1 + count(x -> isfinite(x) && abs(x - μ_dl) >= adev_dld,
+                                                       dld.Dld_null)) / (n_perm + 1)
+                            # 3D, 2D, 1D with (B, Dp_global, Dld_s).
+                            m3d_v2 = _left_plane_3d_test(
+                                B[within_idx], B_null_within,
+                                _dp_global_obs, _dp_global_null,
+                                dld.Dld_obs, dld.Dld_null)
+                            M3D_v2_st[s] = m3d_v2.stat; M3D_v2_p[s] = m3d_v2.perm_p
+                            m2d_v2 = _2d_dir_test(_dp_global_obs, _dp_global_null,
+                                                     dld.Dld_obs, dld.Dld_null)
+                            M2D_v2_p[s] = m2d_v2.perm_p
+                            d1d_v2 = _1d_dir_test(_dp_global_obs, _dp_global_null,
+                                                     dld.Dld_obs, dld.Dld_null)
+                            D1D_v2_v[s] = d1d_v2.v; D1D_v2_p[s] = d1d_v2.perm_p
+                            sign_v2 = isfinite(d1d_v2.v) ? d1d_v2.v : m2d_v2.v_dir_signed
+                            if isnan(m3d_v2.perm_p) || m3d_v2.perm_p >= α_thr
+                                sel_class_v2[s] = :neutral
+                            elseif isnan(m2d_v2.perm_p) || m2d_v2.perm_p >= α_thr
+                                sel_class_v2[s] = :stabilizing
+                            else
+                                sel_class_v2[s] = sign_v2 >= 0 ?
+                                                    :directional_pos : :directional_neg
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -1363,7 +1556,13 @@ function oracle_stats(result::SimResult;
                          Cap_obs, Cap_nm, Cap_nsd, Cap_Z, Cap_p,
                          M3D_stat, M3D_p, M3D_rrad, M3D_zb, M3D_zrho, M3D_zcor,
                          M2D_stat, M2D_p, sel_class,
-                         D1D_v, D1D_p)
+                         D1D_v, D1D_p,
+                         Dp_obs_v, Dp_Z_v, Dp_p_v,
+                         Dld_obs_v, Dld_Z_v, Dld_p_v,
+                         M3D_v2_st, M3D_v2_p,
+                         M2D_v2_p,
+                         D1D_v2_v, D1D_v2_p,
+                         sel_class_v2)
 end
 
 """
@@ -1478,6 +1677,21 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
         for (s, name) in enumerate(oracle.scope_names)
             println(io, "dir_1d_v_",      name, "\t", oracle.dir_1d_v[s])
             println(io, "dir_1d_perm_p_", name, "\t", oracle.dir_1d_perm_p[s])
+        end
+        # v2 parallel: Dp/Dld + 3D/2D/1D Mahalanobis classifier on those.
+        for (s, name) in enumerate(oracle.scope_names)
+            println(io, "Dp_obs_",            name, "\t", oracle.Dp_obs[s])
+            println(io, "Dp_Z_",              name, "\t", oracle.Dp_Z[s])
+            println(io, "Dp_perm_p_",         name, "\t", oracle.Dp_perm_p[s])
+            println(io, "Dld_obs_",           name, "\t", oracle.Dld_obs[s])
+            println(io, "Dld_Z_",             name, "\t", oracle.Dld_Z[s])
+            println(io, "Dld_perm_p_",        name, "\t", oracle.Dld_perm_p[s])
+            println(io, "mahal_3d_v2_stat_",  name, "\t", oracle.mahal_3d_v2_stat[s])
+            println(io, "mahal_3d_v2_perm_p_",name, "\t", oracle.mahal_3d_v2_perm_p[s])
+            println(io, "mahal_2d_v2_perm_p_",name, "\t", oracle.mahal_2d_v2_perm_p[s])
+            println(io, "dir_1d_v2_v_",       name, "\t", oracle.dir_1d_v2_v[s])
+            println(io, "dir_1d_v2_perm_p_",  name, "\t", oracle.dir_1d_v2_perm_p[s])
+            println(io, "selection_class_v2_",name, "\t", String(oracle.selection_class_v2[s]))
         end
     end
     return path

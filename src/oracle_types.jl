@@ -143,6 +143,24 @@ struct OracleResult
     # `dir_1d_perm_p < α` and the sign of `dir_1d_v`.
     dir_1d_v::Vector{Float64}
     dir_1d_perm_p::Vector{Float64}
+    # ─────────────────────────────────────────────────────────────────────
+    # Alternative directional summaries Dp = Σ α_j·p_j  and  Dld = Σ B_j·p_j
+    # (B_j raw, NOT studentized per-locus). Sign-flip null gives Z_Dp, Z_Dld.
+    # Parallel 3D/2D/1D classifier built on (z_B, Z_Dp, Z_Dld) and a
+    # selection_class_v2 label. Tests whether removing per-locus B
+    # standardization eliminates the rho_pearson sign-flip artifact.
+    Dp_obs::Vector{Float64}
+    Dp_Z::Vector{Float64}
+    Dp_perm_p::Vector{Float64}
+    Dld_obs::Vector{Float64}
+    Dld_Z::Vector{Float64}
+    Dld_perm_p::Vector{Float64}
+    mahal_3d_v2_stat::Vector{Float64}
+    mahal_3d_v2_perm_p::Vector{Float64}
+    mahal_2d_v2_perm_p::Vector{Float64}
+    dir_1d_v2_v::Vector{Float64}
+    dir_1d_v2_perm_p::Vector{Float64}
+    selection_class_v2::Vector{Symbol}
 end
 
 export OracleResult
