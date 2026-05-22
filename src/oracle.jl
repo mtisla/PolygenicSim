@@ -546,57 +546,45 @@ function _2d_dir_test(z_rho_obs::Float64, z_rho_null::Vector{Float64},
 end
 
 # =============================================================================
-# Alternative directional sums Dp and Dld (raw, unstandardized at locus level).
+# Alternative directional summaries: Dp (signed, global) + D_ld (quadratic).
 # -----------------------------------------------------------------------------
-#   Dp  = Σ_{j ∈ scope} α_j · p_j        (per-locus signed score, raw)
-#   Dld = Σ_{j ∈ scope} B_j · p_j        (Bulmer-weighted, B_j raw, NOT studentized)
-#       where B_j = α_j · Σ_k R_jk · α_k  (off-diagonal masked)
+#   Dp  = Σ_{j ∈ ALL polymorphic α≠0} α_j · p_j           (raw, no polarization)
+#   D_ld = u' R_masked u   with   u_j = α_j · (p_j − 0.5)
+#        = Σ_{j ≠ k, mask[j,k]} α_j α_k R_jk (p_j−0.5)(p_k−0.5)
 #
-# Under sign-flip null α_perm = ε ⊙ α:
-#   E[Dp_null]  = Σ p_j · α_j · E[ε_j]            = 0
-#   E[Dld_null] = Σ p_j · α_j · Σ_k R_jk · α_k · E[ε_j ε_k]
-#               = Σ p_j · α_j² · R_jj   (diag = 0)  = 0
-# So both have theoretical null mean 0; empirical mean from n_perm draws is
-# close to 0 and used for standardization.
+# Sign-flip null α_perm = ε ⊙ α  ⇒  u_perm = ε ⊙ u_obs:
+#   Dp_null[b]   = Σ ε_j · α_j · p_j          ; E[·] = 0
+#   D_ld_null[b] = Σ_{j,k} ε_j ε_k · α_j α_k R_jk · (p_j-0.5)(p_k-0.5)
+#                                              ; E[·] = 0 (diag masked)
 #
-# Z_Dp  = (Dp_obs  − μ_Dp_null) / σ_Dp_null
-# Z_Dld = (Dld_obs − μ_Dld_null) / σ_Dld_null
+# Z_Dp  = (Dp_obs  − μ_Dp_null) / σ_Dp_null     ← signed, infers direction
+# Z_Dld = (Dld_obs − μ_Dld_null) / σ_Dld_null   ← magnitude, sign-blind
 #
-# Hypothesis: removing the per-locus B_std step (which introduces noisy
-# division by σ_B_j when n_qtl is modest) gives a signed test that retains
-# direction information without the sign-flipping artifact of rho_pearson.
-# Global Dp = Σ α_j · p_pol_j over ALL polymorphic α≠0 loci (no scope).
-#   p_pol_j = p_j if α_j ≥ 0 else 1 − p_j
-# Sign-flip null: α_perm = ε ⊙ α; p_pol re-polarizes consistently with
-# α_perm, which collapses to:
-#   p_pol_perm[j,b] = p_pol_obs[j] if ε[j,b] = +1, else 1 − p_pol_obs[j]
-# E[Dp_null] = 0 by symmetry. Null sd estimated empirically.
+# Hypothesis: Dp (raw, unpolarized) captures direction WITHOUT cancellation
+# (polarized Σ α·p_pol cancels under symmetric α); D_ld as a quadratic form
+# captures the magnitude of directional LD structure under either direction.
+# Classifier uses sign(Z_Dp) for direction; Z_Dld is the omnibus magnitude.
+# Global Dp = Σ α_j · p_j over ALL polymorphic α≠0 loci (no scope, no
+# polarization). Sign of Z_Dp infers direction (positive → +directional,
+# negative → −directional). Sign-flip null:
+#   Dp_perm[b] = Σ (ε_j·α_j) · p_j     ;     E[Dp_null] = 0 by symmetry.
 function _compute_dp_global(α::Vector{T}, p_pool::Vector{Float64},
                               raw_signs::Matrix{T}) where {T<:AbstractFloat}
     p = length(α)
     n_perm = size(raw_signs, 2)
 
-    # Polarized p (same convention as rho_pearson).
-    p_pol = Vector{Float64}(undef, p)
-    @inbounds for j in 1:p
-        p_pol[j] = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
-    end
-
     # Observed.
     Dp_obs = 0.0
     @inbounds for j in 1:p
-        Dp_obs += Float64(α[j]) * p_pol[j]
+        Dp_obs += Float64(α[j]) * p_pool[j]
     end
 
-    # Per perm: Dp_perm = Σ (ε·α)_j · p_pol_perm[j]
-    #   where p_pol_perm = p_pol_obs when ε=+1, (1−p_pol_obs) when ε=-1.
+    # Per perm: Dp_perm = Σ (ε·α)_j · p_j (no polarization).
     Dp_null = Vector{Float64}(undef, n_perm)
     @inbounds for b in 1:n_perm
         s = 0.0
         for j in 1:p
-            ε = raw_signs[j, b]
-            pp = ε >= 0 ? p_pol[j] : 1.0 - p_pol[j]
-            s += Float64(ε) * Float64(α[j]) * pp
+            s += Float64(raw_signs[j, b]) * Float64(α[j]) * p_pool[j]
         end
         Dp_null[b] = s
     end
@@ -604,9 +592,20 @@ function _compute_dp_global(α::Vector{T}, p_pool::Vector{Float64},
     return (Dp_obs = Dp_obs, Dp_null = Dp_null)
 end
 
-# Per-scope Dld = Σ_{j in-scope} B_j · p_pol_j, B_j raw (NOT standardized).
-#   B_j = α_j · Σ_k R_jk · α_k  (R off-diag masked to scope)
-# Sign-flip null: B_j_perm = α_perm_j · Σ R_jk · α_perm_k; p_pol re-polarizes.
+# Per-scope D_ld = u' R_masked u, where u_j = α_j · (p_j − 0.5).
+#   = Σ_{j ≠ k, mask[j,k]} α_j α_k R_jk (p_j − 0.5)(p_k − 0.5)
+#
+# Quadratic form in u. R_masked is PSD (sample-covariance derived) so
+# D_ld ≥ 0 always. Under directional+ AND directional−:
+#   sign(p_j − 0.5) tends to match sign(α_j) at selected loci, so
+#   u_j > 0 (for +dir) or u_j < 0 (for −dir) systematically across
+#   loci. Either way, u' R u captures the "is u aligned along the
+#   dominant LD direction" magnitude. Z_D_ld > 0 under any directional;
+#   direction must be inferred from sign(Z_Dp).
+#
+# Sign-flip null: α_perm = ε ⊙ α ⇒ u_perm = ε ⊙ u_obs.
+#   D_ld_perm[b] = (ε ⊙ u)' R_masked (ε ⊙ u) = Σ_{j,k} ε_j ε_k u_j R_jk u_k
+# Computed efficiently via R_masked · (ε ⊙ u) per perm.
 function _compute_dld_one(α::Vector{T}, p_pool::Vector{Float64},
                             R_meta::Matrix{T}, raw_signs::Matrix{T},
                             mask::BitMatrix) where {T<:AbstractFloat}
@@ -623,46 +622,36 @@ function _compute_dld_one(α::Vector{T}, p_pool::Vector{Float64},
     end
     count(in_scope) >= 5 || return nan_out
 
-    # Polarized p.
-    p_pol = Vector{Float64}(undef, p)
-    @inbounds for j in 1:p
-        p_pol[j] = α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]
-    end
-
-    # R_masked.
+    # R_masked (off-diag, scope-filtered).
     R_masked = Matrix{T}(undef, p, p)
     @inbounds for k in 1:p, j in 1:p
         R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
     end
 
-    # Observed B_j and Dld.
-    R_a = R_masked * α
-    Dld_obs = 0.0
+    # u_j = α_j · (p_j − 0.5).
+    u_obs = Vector{T}(undef, p)
     @inbounds for j in 1:p
-        if in_scope[j]
-            Bj = Float64(α[j]) * Float64(R_a[j])
-            Dld_obs += Bj * p_pol[j]
-        end
+        u_obs[j] = α[j] * T(p_pool[j] - 0.5)
     end
 
-    # Null.
-    a_perm = Matrix{T}(undef, p, n_perm)
-    @inbounds for b in 1:n_perm, j in 1:p
-        a_perm[j, b] = raw_signs[j, b] * α[j]
+    # Observed: D_ld_obs = u' R_masked u.
+    R_u = R_masked * u_obs
+    Dld_obs = 0.0
+    @inbounds for j in 1:p
+        Dld_obs += Float64(u_obs[j]) * Float64(R_u[j])
     end
-    R_aperm = R_masked * a_perm
+
+    # Null: U_perm[:, b] = ε[:, b] ⊙ u_obs.
+    U_perm = Matrix{T}(undef, p, n_perm)
+    @inbounds for b in 1:n_perm, j in 1:p
+        U_perm[j, b] = raw_signs[j, b] * u_obs[j]
+    end
+    R_Uperm = R_masked * U_perm
     Dld_null = Vector{Float64}(undef, n_perm)
     @inbounds for b in 1:n_perm
         s = 0.0
         for j in 1:p
-            if in_scope[j]
-                ap  = Float64(a_perm[j, b])
-                Rap = Float64(R_aperm[j, b])
-                Bj_perm = ap * Rap
-                ε = raw_signs[j, b]
-                pp_perm = ε >= 0 ? p_pol[j] : 1.0 - p_pol[j]
-                s += Bj_perm * pp_perm
-            end
+            s += Float64(U_perm[j, b]) * Float64(R_Uperm[j, b])
         end
         Dld_null[b] = s
     end
@@ -1526,13 +1515,16 @@ function oracle_stats(result::SimResult;
                             d1d_v2 = _1d_dir_test(_dp_global_obs, _dp_global_null,
                                                      dld.Dld_obs, dld.Dld_null)
                             D1D_v2_v[s] = d1d_v2.v; D1D_v2_p[s] = d1d_v2.perm_p
-                            sign_v2 = isfinite(d1d_v2.v) ? d1d_v2.v : m2d_v2.v_dir_signed
+                            # D_ld is sign-blind (quadratic form ≥ 0), so v_dir
+                            # = (Z_Dp + Z_Dld)/√2 doesn't reliably carry sign.
+                            # Use sign(Z_Dp) — Z_Dp is signed and infers direction.
+                            sign_v2 = Dp_Z_v[s]
                             if isnan(m3d_v2.perm_p) || m3d_v2.perm_p >= α_thr
                                 sel_class_v2[s] = :neutral
                             elseif isnan(m2d_v2.perm_p) || m2d_v2.perm_p >= α_thr
                                 sel_class_v2[s] = :stabilizing
                             else
-                                sel_class_v2[s] = sign_v2 >= 0 ?
+                                sel_class_v2[s] = (isfinite(sign_v2) && sign_v2 >= 0) ?
                                                     :directional_pos : :directional_neg
                             end
                         end
