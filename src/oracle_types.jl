@@ -145,13 +145,13 @@ struct OracleResult
     dir_1d_perm_p::Vector{Float64}
     # ─────────────────────────────────────────────────────────────────────
     # Alternative directional summaries Dp = Σ α_j·p_j  and  Dld = Σ B_j·p_j
-    # (B_j raw, NOT studentized per-locus). Sign-flip null gives Z_Dp, Z_Dld.
-    # Parallel 3D/2D/1D classifier built on (z_B, Z_Dp, Z_Dld) and a
+    # (B_j raw, NOT studentized per-locus). Sign-flip null gives Z_dir_ap, Z_Dld.
+    # Parallel 3D/2D/1D classifier built on (z_B, Z_dir_ap, Z_Dld) and a
     # selection_class_v2 label. Tests whether removing per-locus B
     # standardization eliminates the rho_pearson sign-flip artifact.
-    Dp_obs::Vector{Float64}
-    Dp_Z::Vector{Float64}
-    Dp_perm_p::Vector{Float64}
+    dir_ap_obs::Vector{Float64}
+    Z_dir_ap::Vector{Float64}
+    dir_ap_perm_p::Vector{Float64}
     Dld_obs::Vector{Float64}
     Dld_Z::Vector{Float64}
     Dld_perm_p::Vector{Float64}
@@ -162,10 +162,10 @@ struct OracleResult
     dir_1d_v2_perm_p::Vector{Float64}
     selection_class_v2::Vector{Symbol}
     # Sign-blind magnitude stage-2 test for directional-vs-stabilizing
-    # discrimination. M² = z_rho² + z_cor² + Z_Dp² with empirical sign-flip
+    # discrimination. M² = z_rho² + z_cor² + Z_dir_ap² with empirical sign-flip
     # null. Under stabilizing/neutral, M² ~ χ²₃ (mean 3). Under directional
     # in either sign, M² is large because the three Z's combine in
-    # complementary ways (z_rho big under −dir, z_cor & Z_Dp big under +dir).
+    # complementary ways (z_rho big under −dir, z_cor & Z_dir_ap big under +dir).
     # Paired with the standard p3D omnibus to build selection_class_mag:
     #   p3D ≥ α       → :neutral
     #   p3D < α, pM ≥ α → :stabilizing
@@ -177,7 +177,7 @@ struct OracleResult
     # Equivalent to Σ_{j ∈ scope} α_j (p_j − p̄_scope) because demeaning p
     # makes the α-demean term vanish. Uses the same scope masks as
     # rho_pearson (loci with ≥ 1 in-scope partner). Sign-flip null on α
-    # gives Z_Dp_demean per scope.
+    # gives Z_dir_ap_demean per scope.
     Dp_demean_obs::Vector{Float64}
     Dp_demean_Z::Vector{Float64}
     Dp_demean_perm_p::Vector{Float64}

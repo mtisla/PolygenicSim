@@ -600,13 +600,13 @@ end
 
 # Sign-blind magnitude stage-2 test for directional-vs-stabilizing.
 # Combines three direction-bearing axes by SUMMING SQUARED standardized Z's:
-#   M² = z_rho² + z_cor² + Z_Dp²
+#   M² = z_rho² + z_cor² + Z_dir_ap²
 # Each axis is standardized using its own sign-flip null (raw_obs and raw_null
 # inputs). Under stabilizing/neutral H0, each z ~ N(0,1) approximately, so
 # M² ~ χ²₃ with mean 3. Under directional in either sign, the three Z's
-# combine to large M² because z_rho, z_cor, Z_Dp are coherently
+# combine to large M² because z_rho, z_cor, Z_dir_ap are coherently
 # direction-sensitive but in *complementary* ways (z_rho big under −dir,
-# z_cor & Z_Dp big under +dir, etc.).
+# z_cor & Z_dir_ap big under +dir, etc.).
 # Returns M2_obs and empirical perm_p.
 function _magnitude_stage2_test(rho_obs::Float64, rho_null::Vector{Float64},
                                   cor_obs::Float64, cor_null::Vector{Float64},
@@ -669,42 +669,42 @@ end
 #   D_ld_null[b] = Σ_{j,k} ε_j ε_k · α_j α_k R_jk · (p_j-0.5)(p_k-0.5)
 #                                              ; E[·] = 0 (diag masked)
 #
-# Z_Dp  = (Dp_obs  − μ_Dp_null) / σ_Dp_null     ← signed, infers direction
+# Z_dir_ap  = (Dp_obs  − μ_Dp_null) / σ_Dp_null     ← signed, infers direction
 # Z_Dld = (Dld_obs − μ_Dld_null) / σ_Dld_null   ← magnitude, sign-blind
 #
 # Hypothesis: Dp (raw, unpolarized) captures direction WITHOUT cancellation
 # (polarized Σ α·p_pol cancels under symmetric α); D_ld as a quadratic form
 # captures the magnitude of directional LD structure under either direction.
-# Classifier uses sign(Z_Dp) for direction; Z_Dld is the omnibus magnitude.
-# Global Dp = Σ α_j · p_j over ALL polymorphic α≠0 loci (no scope, no
-# polarization). Sign of Z_Dp infers direction (positive → +directional,
+# Classifier uses sign(Z_dir_ap) for direction; Z_Dld is the omnibus magnitude.
+# Global dir_ap = Σ α_j · p_j over ALL polymorphic α≠0 loci (no scope, no
+# polarization). Sign of Z_dir_ap infers direction (positive → +directional,
 # negative → −directional). Sign-flip null:
-#   Dp_perm[b] = Σ (ε_j·α_j) · p_j     ;     E[Dp_null] = 0 by symmetry.
+#   dir_ap_perm[b] = Σ (ε_j·α_j) · p_j  ; E[dir_ap_null] = 0 by symmetry.
 # Tried Σα·(p−0.5), Σα·(p−p̄), and Σ|α|·(p_pol−p̄_bin) [5% bin-demeaned] —
 # all worse than raw Σα·p. ISM rare-allele tail IS direction-informative;
 # demeaning it away destroys signal.
-function _compute_dp_global(α::Vector{T}, p_pool::Vector{Float64},
-                              raw_signs::Matrix{T}) where {T<:AbstractFloat}
+function _compute_dir_ap_global(α::Vector{T}, p_pool::Vector{Float64},
+                                  raw_signs::Matrix{T}) where {T<:AbstractFloat}
     p = length(α)
     n_perm = size(raw_signs, 2)
 
     # Observed.
-    Dp_obs = 0.0
+    dir_ap_obs = 0.0
     @inbounds for j in 1:p
-        Dp_obs += Float64(α[j]) * p_pool[j]
+        dir_ap_obs += Float64(α[j]) * p_pool[j]
     end
 
-    # Per perm: Dp_perm = Σ (ε·α)_j · p_j (no polarization).
-    Dp_null = Vector{Float64}(undef, n_perm)
+    # Per perm: dir_ap_perm = Σ (ε·α)_j · p_j (no polarization).
+    dir_ap_null = Vector{Float64}(undef, n_perm)
     @inbounds for b in 1:n_perm
         s = 0.0
         for j in 1:p
             s += Float64(raw_signs[j, b]) * Float64(α[j]) * p_pool[j]
         end
-        Dp_null[b] = s
+        dir_ap_null[b] = s
     end
 
-    return (Dp_obs = Dp_obs, Dp_null = Dp_null)
+    return (dir_ap_obs = dir_ap_obs, dir_ap_null = dir_ap_null)
 end
 
 # Global MAF-binned demeaned Dp.
@@ -826,7 +826,7 @@ end
 #   u_j > 0 (for +dir) or u_j < 0 (for −dir) systematically across
 #   loci. Either way, u' R u captures the "is u aligned along the
 #   dominant LD direction" magnitude. Z_D_ld > 0 under any directional;
-#   direction must be inferred from sign(Z_Dp).
+#   direction must be inferred from sign(Z_dir_ap).
 #
 # Sign-flip null: α_perm = ε ⊙ α ⇒ u_perm = ε ⊙ u_obs.
 #   D_ld_perm[b] = (ε ⊙ u)' R_masked (ε ⊙ u) = Σ_{j,k} ε_j ε_k u_j R_jk u_k
@@ -1934,7 +1934,7 @@ function oracle_stats(result::SimResult;
     # Stage-2 alternative: 1D test on v_dir = (z_rho + z_cor)/√2.
     D1D_v     = fill(NaN, n_scopes); D1D_p     = fill(NaN, n_scopes)
     # ─── Alternative directional stats Dp = Σ α·p and Dld = Σ B·p ───
-    Dp_obs_v   = fill(NaN, n_scopes); Dp_Z_v   = fill(NaN, n_scopes); Dp_p_v   = fill(NaN, n_scopes)
+    dir_ap_obs_v = fill(NaN, n_scopes); Z_dir_ap_v = fill(NaN, n_scopes); dir_ap_p_v = fill(NaN, n_scopes)
     Dld_obs_v  = fill(NaN, n_scopes); Dld_Z_v  = fill(NaN, n_scopes); Dld_p_v  = fill(NaN, n_scopes)
     M3D_v2_st  = fill(NaN, n_scopes); M3D_v2_p = fill(NaN, n_scopes)
     M2D_v2_p   = fill(NaN, n_scopes)
@@ -1968,17 +1968,17 @@ function oracle_stats(result::SimResult;
         # Polarized freqs reused for the dp80 mask construction.
         p_pol_obs = [α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j] for j in 1:p]
         # ─── Global Dp = Σ α_j · p_pol_j (no scope), computed ONCE ──────
-        _dp_global = _compute_dp_global(α, p_pool, raw_signs)
-        _dp_global_obs  = _dp_global.Dp_obs
-        _dp_global_null = _dp_global.Dp_null
-        _μ_dp = isfinite(_dp_global_obs) ? mean(filter(isfinite, _dp_global_null)) : NaN
-        _σ_dp = isfinite(_dp_global_obs) ?
-                    std(filter(isfinite, _dp_global_null); corrected=true) : NaN
-        _adev_dp = isfinite(_dp_global_obs) && isfinite(_μ_dp) ?
-                       abs(_dp_global_obs - _μ_dp) : NaN
-        _dp_global_perm_p = isfinite(_dp_global_obs) && isfinite(_μ_dp) ?
-            (1 + count(x -> isfinite(x) && abs(x - _μ_dp) >= _adev_dp,
-                          _dp_global_null)) / (n_perm + 1) : NaN
+        _dir_ap_global = _compute_dir_ap_global(α, p_pool, raw_signs)
+        _dir_ap_obs  = _dir_ap_global.dir_ap_obs
+        _dir_ap_null = _dir_ap_global.dir_ap_null
+        _μ_dap = isfinite(_dir_ap_obs) ? mean(filter(isfinite, _dir_ap_null)) : NaN
+        _σ_dap = isfinite(_dir_ap_obs) ?
+                    std(filter(isfinite, _dir_ap_null); corrected=true) : NaN
+        _adev_dap = isfinite(_dir_ap_obs) && isfinite(_μ_dap) ?
+                       abs(_dir_ap_obs - _μ_dap) : NaN
+        _dir_ap_perm_p = isfinite(_dir_ap_obs) && isfinite(_μ_dap) ?
+            (1 + count(x -> isfinite(x) && abs(x - _μ_dap) >= _adev_dap,
+                          _dir_ap_null)) / (n_perm + 1) : NaN
 
         # Dp_mafbin compute pruned (Dp_mafbin_* fields stay NaN).
 
@@ -2028,27 +2028,27 @@ function oracle_stats(result::SimResult;
                 if axis_pair !== nothing
                     B_null_within = view(VG_off_null_meta, :, within_idx) ./ VA_meta
                     rho_axis_obs, rho_axis_null = axis_pair
-                    # 3D Mahalanobis: (z_B@within, rho_pearson@scope, Z_Dp@global).
-                    # Replaced cor_alpha_p (z_cor) with Z_Dp — Z_Dp has higher
+                    # 3D Mahalanobis: (z_B@within, rho_pearson@scope, Z_dir_ap@global).
+                    # Replaced cor_alpha_p (z_cor) with Z_dir_ap — Z_dir_ap has higher
                     # power and cleaner H0 calibration (post-RNG-decouple).
                     m3d = _left_plane_3d_test(B[within_idx], B_null_within,
                                                 rho_axis_obs, rho_axis_null,
-                                                _dp_global_obs, _dp_global_null)
+                                                _dir_ap_obs, _dir_ap_null)
                     M3D_stat[s] = m3d.stat; M3D_p[s]    = m3d.perm_p
                     M3D_rrad[s] = m3d.r_radial
                     M3D_zb[s]   = m3d.z_b
                     M3D_zrho[s] = m3d.z_rho
                     M3D_zcor[s] = m3d.z_cor   # stored as z_Dp in the new design
 
-                    # Stage 2: 2D directional Mahalanobis test on (rho, Z_Dp).
+                    # Stage 2: 2D directional Mahalanobis test on (rho, Z_dir_ap).
                     m2d = _2d_dir_test(rho_axis_obs, rho_axis_null,
-                                          _dp_global_obs, _dp_global_null)
+                                          _dir_ap_obs, _dir_ap_null)
                     M2D_stat[s] = m2d.D2; M2D_p[s] = m2d.perm_p
 
                     # Stage-2 alternative: 1D combined directional projection
                     # v_dir = (z_rho + z_Dp)/√2, two-sided permutation-p.
                     d1d = _1d_dir_test(rho_axis_obs, rho_axis_null,
-                                          _dp_global_obs, _dp_global_null)
+                                          _dir_ap_obs, _dir_ap_null)
                     D1D_v[s] = d1d.v; D1D_p[s] = d1d.perm_p
 
                     # Classifier (α_thr = 0.05): hierarchical decision tree.
@@ -2073,14 +2073,14 @@ function oracle_stats(result::SimResult;
                     end
 
                     # mag_stage2 / Dp_demean / Dld / v2 Mahalanobis pruned —
-                    # superseded by the updated v1 Mahalanobis on (rho, Z_Dp).
-                    # Fields stay NaN. Also fill Z_Dp into the v2 Dp_obs/Z/p
-                    # storage so the global Z_Dp is broadcast across scopes
+                    # superseded by the updated v1 Mahalanobis on (rho, Z_dir_ap).
+                    # Fields stay NaN. Also fill Z_dir_ap into the broadcast
+                    # storage so the global Z_dir_ap is available per scope
                     # for the analysis scripts that read those fields.
-                    if isfinite(_dp_global_obs) && _σ_dp > 1e-30
-                        Dp_obs_v[s] = _dp_global_obs
-                        Dp_Z_v[s]   = (_dp_global_obs - _μ_dp) / _σ_dp
-                        Dp_p_v[s]   = _dp_global_perm_p
+                    if isfinite(_dir_ap_obs) && _σ_dap > 1e-30
+                        dir_ap_obs_v[s] = _dir_ap_obs
+                        Z_dir_ap_v[s]   = (_dir_ap_obs - _μ_dap) / _σ_dap
+                        dir_ap_p_v[s]   = _dir_ap_perm_p
                     end
                 end
             end
@@ -2102,7 +2102,7 @@ function oracle_stats(result::SimResult;
                          M3D_stat, M3D_p, M3D_rrad, M3D_zb, M3D_zrho, M3D_zcor,
                          M2D_stat, M2D_p, sel_class,
                          D1D_v, D1D_p,
-                         Dp_obs_v, Dp_Z_v, Dp_p_v,
+                         dir_ap_obs_v, Z_dir_ap_v, dir_ap_p_v,
                          Dld_obs_v, Dld_Z_v, Dld_p_v,
                          M3D_v2_st, M3D_v2_p,
                          M2D_v2_p,
@@ -2232,9 +2232,9 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
         end
         # v2 parallel: Dp/Dld + 3D/2D/1D Mahalanobis classifier on those.
         for (s, name) in enumerate(oracle.scope_names)
-            println(io, "Dp_obs_",            name, "\t", oracle.Dp_obs[s])
-            println(io, "Dp_Z_",              name, "\t", oracle.Dp_Z[s])
-            println(io, "Dp_perm_p_",         name, "\t", oracle.Dp_perm_p[s])
+            println(io, "dir_ap_obs_",        name, "\t", oracle.dir_ap_obs[s])
+            println(io, "Z_dir_ap_",          name, "\t", oracle.Z_dir_ap[s])
+            println(io, "dir_ap_perm_p_",     name, "\t", oracle.dir_ap_perm_p[s])
             println(io, "Dld_obs_",           name, "\t", oracle.Dld_obs[s])
             println(io, "Dld_Z_",             name, "\t", oracle.Dld_Z[s])
             println(io, "Dld_perm_p_",        name, "\t", oracle.Dld_perm_p[s])
