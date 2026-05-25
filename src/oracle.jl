@@ -1980,23 +1980,7 @@ function oracle_stats(result::SimResult;
             (1 + count(x -> isfinite(x) && abs(x - _μ_dp) >= _adev_dp,
                           _dp_global_null)) / (n_perm + 1) : NaN
 
-        # ─── Global MAF-binned demeaned Dp (computed ONCE, broadcast) ───
-        _dp_mb = _compute_dp_mafbin_global(α, p_pool, raw_signs; bin_width=0.05)
-        _mb_obs   = _dp_mb.Dp_obs
-        _mb_null  = _dp_mb.Dp_null
-        _mb_μ     = isfinite(_mb_obs) ? mean(filter(isfinite, _mb_null)) : NaN
-        _mb_σ     = isfinite(_mb_obs) ? std(filter(isfinite, _mb_null); corrected=true) : NaN
-        _mb_Z     = (isfinite(_mb_obs) && _mb_σ > 1e-30) ?
-                        (_mb_obs - _mb_μ) / _mb_σ : NaN
-        _mb_adev  = isfinite(_mb_obs) && isfinite(_mb_μ) ? abs(_mb_obs - _mb_μ) : NaN
-        _mb_pp    = (isfinite(_mb_obs) && isfinite(_mb_μ)) ?
-            (1 + count(x -> isfinite(x) && abs(x - _mb_μ) >= _mb_adev,
-                          _mb_null)) / (n_perm + 1) : NaN
-        for s in 1:n_scopes
-            Dp_mb_obs[s] = _mb_obs
-            Dp_mb_Z[s]   = _mb_Z
-            Dp_mb_p[s]   = _mb_pp
-        end
+        # Dp_mafbin compute pruned (Dp_mafbin_* fields stay NaN).
 
         for s in 1:n_scopes
             is_rho_scope[s] || continue
@@ -2011,19 +1995,7 @@ function oracle_stats(result::SimResult;
             Cap_nsd[s] = cap.null_sd; Cap_Z[s]  = cap.Z
             Cap_p[s]   = cap.perm_p
 
-            # d_cor = cor(|α|, p+) with polarization-flip null.
-            dc = _compute_d_cor_one(α, p_pool, raw_signs, masks[s])
-            Dcor_obs[s] = dc.cor; Dcor_Z[s] = dc.Z; Dcor_p[s] = dc.perm_p
-
-            # dc20 — delta-cross at cutoff=20%.
-            dc20 = _delta_cross_one(R_meta, α, p_pool, raw_signs, masks[s], 20)
-            Dc20_nL[s] = dc20.nL; Dc20_nH[s] = dc20.nH
-            Dc20_delta[s] = dc20.delta; Dc20_Z[s] = dc20.Z; Dc20_p[s] = dc20.perm_p
-
-            # d_match — matched +/- pairwise contrast.
-            dm = _compute_d_match_one(α, p_pool, raw_signs, masks[s])
-            Dmat_n[s] = dm.n_pairs; Dmat_obs[s] = dm.D_obs
-            Dmat_Z[s] = dm.Z; Dmat_p[s] = dm.perm_p
+            # d_cor / dc20 / d_match compute pruned (fields stay NaN).
 
             # d_res — residualized Dp via |α|-decile classes.
             dres = _compute_d_res_one(α, p_pool, raw_signs, masks[s])
@@ -2031,45 +2003,9 @@ function oracle_stats(result::SimResult;
             Dres_Z_sf[s] = dres.Z_sf; Dres_p_sf[s] = dres.p_sf
             Dres_Z_cs[s] = dres.Z_cs; Dres_p_cs[s] = dres.p_cs
 
-            rq05 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.05)
-            Rq05_obs[s] = rq05.rho;     Rq05_nm[s] = rq05.null_mean
-            Rq05_nsd[s] = rq05.null_sd; Rq05_Z[s]  = rq05.Z
-            Rq05_p[s]   = rq05.perm_p
-            rq10 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.10)
-            Rq10_obs[s] = rq10.rho;     Rq10_nm[s] = rq10.null_mean
-            Rq10_nsd[s] = rq10.null_sd; Rq10_Z[s]  = rq10.Z
-            Rq10_p[s]   = rq10.perm_p
-            rq25 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.25)
-            Rq25_obs[s] = rq25.rho;     Rq25_nm[s] = rq25.null_mean
-            Rq25_nsd[s] = rq25.null_sd; Rq25_Z[s]  = rq25.Z
-            Rq25_p[s]   = rq25.perm_p
-
-            # dp80 mask: AND scope mask with |Δp_pol_obs| ≥ 20th percentile
-            # of in-scope |Δp_pol| values. `nothing` return ⇒ scope has
-            # fewer than 5 in-scope pairs.
-            dp80_mask = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
-            rdp80 = nothing; rq05d80_ = nothing; rq10d80_ = nothing; rq25d80_ = nothing
-            if dp80_mask !== nothing
-                rdp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask)
-                Rdp80_obs[s] = rdp80.rho;     Rdp80_nm[s] = rdp80.null_mean
-                Rdp80_nsd[s] = rdp80.null_sd; Rdp80_Z[s]  = rdp80.Z
-                Rdp80_p[s]   = rdp80.perm_p
-                rq05d80_ = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.05)
-                rq05d80  = rq05d80_
-                Q05D80_obs[s] = rq05d80.rho;     Q05D80_nm[s] = rq05d80.null_mean
-                Q05D80_nsd[s] = rq05d80.null_sd; Q05D80_Z[s]  = rq05d80.Z
-                Q05D80_p[s]   = rq05d80.perm_p
-                rq10d80_ = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.10)
-                rq10d80  = rq10d80_
-                Q10D80_obs[s] = rq10d80.rho;     Q10D80_nm[s] = rq10d80.null_mean
-                Q10D80_nsd[s] = rq10d80.null_sd; Q10D80_Z[s]  = rq10d80.Z
-                Q10D80_p[s]   = rq10d80.perm_p
-                rq25d80_ = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask; q=0.25)
-                rq25d80  = rq25d80_
-                Q25D80_obs[s] = rq25d80.rho;     Q25D80_nm[s] = rq25d80.null_mean
-                Q25D80_nsd[s] = rq25d80.null_sd; Q25D80_Z[s]  = rq25d80.Z
-                Q25D80_p[s]   = rq25d80.perm_p
-            end
+            # NOTE: 7 rho_pearson variants (q05, q10, q25, dp80 + 3 q_dp80 combos)
+            # pruned — never showed meaningful power gains over vanilla rho_pearson
+            # in any of the comparison sweeps. Fields stay NaN.
 
             # 3D left-plane Mahalanobis-style gate. The middle axis is the
             # rho-family variant selected by cfg.oracle_mahal_rho_axis (default
@@ -2092,28 +2028,27 @@ function oracle_stats(result::SimResult;
                 if axis_pair !== nothing
                     B_null_within = view(VG_off_null_meta, :, within_idx) ./ VA_meta
                     rho_axis_obs, rho_axis_null = axis_pair
+                    # 3D Mahalanobis: (z_B@within, rho_pearson@scope, Z_Dp@global).
+                    # Replaced cor_alpha_p (z_cor) with Z_Dp — Z_Dp has higher
+                    # power and cleaner H0 calibration (post-RNG-decouple).
                     m3d = _left_plane_3d_test(B[within_idx], B_null_within,
                                                 rho_axis_obs, rho_axis_null,
-                                                cap.rho, cap.null)
+                                                _dp_global_obs, _dp_global_null)
                     M3D_stat[s] = m3d.stat; M3D_p[s]    = m3d.perm_p
                     M3D_rrad[s] = m3d.r_radial
                     M3D_zb[s]   = m3d.z_b
                     M3D_zrho[s] = m3d.z_rho
-                    M3D_zcor[s] = m3d.z_cor
+                    M3D_zcor[s] = m3d.z_cor   # stored as z_Dp in the new design
 
-                    # Stage 2: 2D directional Mahalanobis test on (rho, cor)
-                    # using the same axis selection. Always compute and store;
-                    # the class label below applies the α=0.05 hierarchy.
+                    # Stage 2: 2D directional Mahalanobis test on (rho, Z_Dp).
                     m2d = _2d_dir_test(rho_axis_obs, rho_axis_null,
-                                          cap.rho, cap.null)
+                                          _dp_global_obs, _dp_global_null)
                     M2D_stat[s] = m2d.D2; M2D_p[s] = m2d.perm_p
 
                     # Stage-2 alternative: 1D combined directional projection
-                    # v_dir = (z_rho + z_cor)/√2, two-sided permutation-p.
-                    # Exposed for comparison with the 2D Mahalanobis; not used
-                    # in `selection_class`.
+                    # v_dir = (z_rho + z_Dp)/√2, two-sided permutation-p.
                     d1d = _1d_dir_test(rho_axis_obs, rho_axis_null,
-                                          cap.rho, cap.null)
+                                          _dp_global_obs, _dp_global_null)
                     D1D_v[s] = d1d.v; D1D_p[s] = d1d.perm_p
 
                     # Classifier (α_thr = 0.05): hierarchical decision tree.
@@ -2137,84 +2072,15 @@ function oracle_stats(result::SimResult;
                                             :directional_pos : :directional_neg
                     end
 
-                    # ─── Sign-blind magnitude stage-2 (parallel to 2D Mahal) ───
-                    # M² = z_rho² + z_cor² + Z_Dp²  vs empirical sign-flip null.
-                    # Reuses raw rho_axis + cap.rho + Dp_global from this scope.
-                    if isfinite(_dp_global_obs)
-                        m_mag = _magnitude_stage2_test(
-                            rho_axis_obs, rho_axis_null,
-                            cap.rho, cap.null,
-                            _dp_global_obs, _dp_global_null;
-                            robust=cfg.oracle_mag_robust)
-                        Mmag_M2[s] = m_mag.M2
-                        Mmag_p[s]  = m_mag.perm_p
-                        if isnan(m3d.perm_p) || m3d.perm_p >= α_thr
-                            sel_class_mag[s] = :neutral
-                        elseif isnan(m_mag.perm_p) || m_mag.perm_p >= α_thr
-                            sel_class_mag[s] = :stabilizing
-                        else
-                            sel_class_mag[s] = :directional
-                        end
-                    end
-
-                    # ─── Per-scope demeaned Dp: Σ(α-ā)(p-p̄) over scope ─────
-                    dp_dm = _compute_dp_demean_one(α, p_pool, raw_signs, masks[s])
-                    if isfinite(dp_dm.Dp_obs)
-                        Dp_dm_obs[s] = dp_dm.Dp_obs
-                        μ_dm = mean(filter(isfinite, dp_dm.Dp_null))
-                        σ_dm = std(filter(isfinite, dp_dm.Dp_null); corrected=true)
-                        if σ_dm > 1e-30
-                            Dp_dm_Z[s] = (dp_dm.Dp_obs - μ_dm) / σ_dm
-                            adev = abs(dp_dm.Dp_obs - μ_dm)
-                            Dp_dm_p[s] = (1 + count(x -> isfinite(x) && abs(x - μ_dm) >= adev,
-                                                       dp_dm.Dp_null)) / (n_perm + 1)
-                        end
-                    end
-
-                    # ─── Parallel classifier on (z_B, Z_Dp_GLOBAL, Z_Dld_s) ───
-                    # Dp is computed ONCE globally (above the per-scope loop)
-                    # and reused here. Dld is scope-specific.
-                    dld = _compute_dld_one(α, p_pool, R_meta, raw_signs, masks[s])
-                    if isfinite(_dp_global_obs) && isfinite(dld.Dld_obs)
-                        Dp_obs_v[s]  = _dp_global_obs
-                        Dld_obs_v[s] = dld.Dld_obs
-                        # Standardize Dp (global) and Dld (this scope).
-                        if _σ_dp > 1e-30
-                            Dp_Z_v[s] = (_dp_global_obs - _μ_dp) / _σ_dp
-                            Dp_p_v[s] = _dp_global_perm_p
-                        end
-                        μ_dl = mean(filter(isfinite, dld.Dld_null))
-                        σ_dl = std(filter(isfinite, dld.Dld_null); corrected=true)
-                        if σ_dl > 1e-30
-                            Dld_Z_v[s] = (dld.Dld_obs - μ_dl) / σ_dl
-                            adev_dld = abs(dld.Dld_obs - μ_dl)
-                            Dld_p_v[s] = (1 + count(x -> isfinite(x) && abs(x - μ_dl) >= adev_dld,
-                                                       dld.Dld_null)) / (n_perm + 1)
-                            # 3D, 2D, 1D with (B, Dp_global, Dld_s).
-                            m3d_v2 = _left_plane_3d_test(
-                                B[within_idx], B_null_within,
-                                _dp_global_obs, _dp_global_null,
-                                dld.Dld_obs, dld.Dld_null)
-                            M3D_v2_st[s] = m3d_v2.stat; M3D_v2_p[s] = m3d_v2.perm_p
-                            m2d_v2 = _2d_dir_test(_dp_global_obs, _dp_global_null,
-                                                     dld.Dld_obs, dld.Dld_null)
-                            M2D_v2_p[s] = m2d_v2.perm_p
-                            d1d_v2 = _1d_dir_test(_dp_global_obs, _dp_global_null,
-                                                     dld.Dld_obs, dld.Dld_null)
-                            D1D_v2_v[s] = d1d_v2.v; D1D_v2_p[s] = d1d_v2.perm_p
-                            # D_ld is sign-blind (quadratic form ≥ 0), so v_dir
-                            # = (Z_Dp + Z_Dld)/√2 doesn't reliably carry sign.
-                            # Use sign(Z_Dp) — Z_Dp is signed and infers direction.
-                            sign_v2 = Dp_Z_v[s]
-                            if isnan(m3d_v2.perm_p) || m3d_v2.perm_p >= α_thr
-                                sel_class_v2[s] = :neutral
-                            elseif isnan(m2d_v2.perm_p) || m2d_v2.perm_p >= α_thr
-                                sel_class_v2[s] = :stabilizing
-                            else
-                                sel_class_v2[s] = (isfinite(sign_v2) && sign_v2 >= 0) ?
-                                                    :directional_pos : :directional_neg
-                            end
-                        end
+                    # mag_stage2 / Dp_demean / Dld / v2 Mahalanobis pruned —
+                    # superseded by the updated v1 Mahalanobis on (rho, Z_Dp).
+                    # Fields stay NaN. Also fill Z_Dp into the v2 Dp_obs/Z/p
+                    # storage so the global Z_Dp is broadcast across scopes
+                    # for the analysis scripts that read those fields.
+                    if isfinite(_dp_global_obs) && _σ_dp > 1e-30
+                        Dp_obs_v[s] = _dp_global_obs
+                        Dp_Z_v[s]   = (_dp_global_obs - _μ_dp) / _σ_dp
+                        Dp_p_v[s]   = _dp_global_perm_p
                     end
                 end
             end
