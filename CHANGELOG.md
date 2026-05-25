@@ -9,6 +9,89 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-05-25
+
+Mahalanobis test toggles + absdp80 1D default + dir_ap-only classifier.
+Empirically validated at VS/VP ∈ {65, 100} with sel_grad ∈ {±0.03, ±0.05}
+on 3-seed × 2-sg test grids: the new default (`oracle_mahal_rho_variant
+= :rho_pearson_dp80`, `oracle_mahal_B_scope = :within`, 1D = absdp80)
+gives 0/18 wrong-direction calls and ≥ 67% directional detection at 2·t½.
+
+### Added — `src/config.jl`
+
+- `oracle_mahal_rho_variant::Symbol` selects the rho axis for the MAIN
+  `mahal_3d_*` / `mahal_2d_*` / `dir_1d_*` / `selection_class` fields.
+  Valid values: `:rho_pearson_5pct` (vanilla rho at win_5pct mask),
+  `:rho_pearson_dp80` (default — dp80-filtered mask, rawp+demean=false),
+  `:rho_pearson_q25_dp80` (bottom-25% partners on dp80 mask).
+- `oracle_mahal_B_scope::Symbol` selects the B-axis scope. Valid:
+  `:within` (default; previous hardcoded behavior) or `:win_50pct`.
+
+### Added — `src/oracle.jl`
+
+- `_1d_dir_absrho_test(rho_obs, rho_null, dap_obs, dap_null)` — 1D
+  directional test using `v = sign(z_dap) · (|z_rho| + |z_dap|) / √2`,
+  with a sign-flip null built from the same construction so the perm-p
+  stays calibrated. Robust to wrong-sign rho_pearson cells where the
+  vanilla `(z_rho + z_dap)/√2` suffers cancellation.
+- Restored 7 rho_pearson variant computes (`q05`, `q10`, `q25` and the
+  dp80-masked versions of `vanilla`, `q05`, `q10`) inside the rho
+  per-scope loop. Previously pruned (all-NaN); now populated so the
+  variants can be inspected without an oracle.jl edit.
+- dir_ap-only directional classifier broadcast to every scope:
+  `dir_ap_perm_p < 0.05 → :directional_{pos,neg}` by `sign(Z_dir_ap)`,
+  else `:neutral`. No `:stabilizing` category (single axis can't
+  distinguish stab from neu).
+
+### Changed — `src/oracle.jl`
+
+- Main `dir_1d_v` / `dir_1d_perm_p` / `selection_class` now use the
+  absdp80 1D test (`_1d_dir_absrho_test`) instead of the vanilla
+  `_1d_dir_test`. The 2D / 3D Mahalanobis p-values are sign-symmetric
+  and unchanged, so only the 1D test value, its p-value, and the
+  classifier's direction inference shift.
+- Main Mahalanobis path now routes through the two new toggles:
+  the rho axis is built from the configured `oracle_mahal_rho_variant`
+  (default `:rho_pearson_dp80`) and the B axis from
+  `oracle_mahal_B_scope` (default `:within`). Parallel `mahal_3d_dp80_*`
+  and `mahal_3d_q25d80_*` sets now also use the configured B scope.
+
+### Added — `src/oracle_types.jl`
+
+- `selection_class_dirap::Vector{Symbol}` (dir_ap-only classifier).
+- `dir_1d_absdp80_v::Vector{Float64}` and `dir_1d_absdp80_perm_p` —
+  parallel output kept for comparison; redundant with the main
+  `dir_1d_*` now that absdp80 is the default.
+- `selection_class_absdp80::Vector{Symbol}` — dp80 classifier with
+  direction voted by `sign(z_dap)` (now identical to `selection_class`
+  under the new default; kept for backward inspection).
+
+### Changed — output TSV schema (additive)
+
+- `selection_class_dirap_<scope>`, `dir_1d_absdp80_*_<scope>`, and
+  `selection_class_absdp80_<scope>` are written to
+  `*.oracle.<phase>.tsv`.
+
+### Breaking — `dir_1d_*` / `selection_class` semantics
+
+- The MAIN 1D test value and its perm-p now reflect the
+  `sign(z_dap)·(|z_rho|+|z_dap|)/√2` construction rather than the
+  vanilla `(z_rho + z_dap)/√2`. Downstream consumers reading
+  `dir_1d_v`, `dir_1d_perm_p`, or interpreting the direction encoded
+  in `selection_class` should expect (a) tighter p-values in cells
+  where `z_rho` had spurious wrong sign, and (b) slightly larger
+  p-values where `z_rho` already agreed with `z_dap` (because the
+  absrho construction sums magnitudes instead of cancelling on the
+  diagonal).
+- The MAIN `mahal_3d_*` / `mahal_2d_*` p-values were previously
+  computed against vanilla rho_pearson (rawp, no demean); with the
+  new default (`:rho_pearson_dp80`), they now use the dp80-filtered
+  rho axis. Downstream comparisons against pre-0.16 outputs will
+  see a different rho axis in the main field set. The previous
+  vanilla behavior is no longer the default for the main fields; if
+  needed, it is partially recoverable by setting
+  `oracle_mahal_rho_variant = :rho_pearson_5pct`.
+
 ## [0.15.0] — 2026-05-18
 
 Phase 7 — recap_first + ISM. Coalescent-derived gen-0 (recap_first) is

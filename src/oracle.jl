@@ -937,6 +937,47 @@ function _1d_dir_test(rho_obs::Float64, rho_null::Vector{Float64},
     return (v = v_obs, perm_p = perm_p, sign_obs = sign(v_obs))
 end
 
+# 1D directional test using |z_rho|·sign(z_dap) construction.
+# Motivation: vanilla v_1D = (z_r + z_d)/√2 suffers cancellation when z_rho
+# has spurious wrong-sign vs z_dap (~17% of cells at marginal selection).
+# This variant uses |z_rho| as a magnitude voucher and z_dap as the polarity
+# vote: v = sign(z_d) · (|z_r| + |z_d|) / √2. Under H0 the same construction
+# is applied to perm draws, so the perm-p stays calibrated.
+# Direction inference: sign(z_dap_obs).
+function _1d_dir_absrho_test(rho_obs::Float64, rho_null::Vector{Float64},
+                              cor_obs::Float64, cor_null::Vector{Float64})
+    nan_out = (v = NaN, perm_p = NaN, sign_obs = NaN)
+    isfinite(rho_obs) && isfinite(cor_obs) || return nan_out
+    n_perm = length(rho_null)
+    n_perm == length(cor_null) ||
+        throw(ArgumentError("null vector length mismatch in 1D absrho dir test"))
+    finite_rho = filter(isfinite, rho_null)
+    finite_cor = filter(isfinite, cor_null)
+    length(finite_rho) >= 5 && length(finite_cor) >= 5 || return nan_out
+    μ_r = mean(finite_rho); σ_r = std(finite_rho; corrected=true)
+    μ_c = mean(finite_cor); σ_c = std(finite_cor; corrected=true)
+    (σ_r > 1e-30 && σ_c > 1e-30) || return nan_out
+    z_r_obs = (rho_obs - μ_r) / σ_r
+    z_c_obs = (cor_obs - μ_c) / σ_c
+    s_obs = z_c_obs >= 0 ? 1.0 : -1.0
+    v_obs = s_obs * (abs(z_r_obs) + abs(z_c_obs)) / sqrt(2.0)
+    isfinite(v_obs) || return nan_out
+    abs_v_obs = abs(v_obs)
+    reject = 0; valid = 0
+    @inbounds for b in 1:n_perm
+        r_b = rho_null[b]; c_b = cor_null[b]
+        (isfinite(r_b) && isfinite(c_b)) || continue
+        z_r = (r_b - μ_r) / σ_r
+        z_c = (c_b - μ_c) / σ_c
+        s_b = z_c >= 0 ? 1.0 : -1.0
+        v_b = s_b * (abs(z_r) + abs(z_c)) / sqrt(2.0)
+        valid += 1
+        abs(v_b) >= abs_v_obs && (reject += 1)
+    end
+    valid >= 5 || return nan_out
+    return (v = v_obs, perm_p = (1 + reject) / (valid + 1), sign_obs = s_obs)
+end
+
 # Pick the (rho_obs, rho_null_vector) pair to use as the middle axis of the
 # 3D Mahalanobis-style gate. Returns `nothing` when the selected variant
 # wasn't computed (e.g., :rho_pearson_dp80 selected but the dp80 mask was
@@ -1939,6 +1980,7 @@ function oracle_stats(result::SimResult;
     # Stage-2: 2D directional Mahalanobis on (z_rho, z_cor) plane.
     M2D_stat  = fill(NaN, n_scopes); M2D_p     = fill(NaN, n_scopes)
     sel_class = fill(:neutral, n_scopes)
+    sel_class_dirap = fill(:neutral, n_scopes)
     # Stage-2 alternative: 1D test on v_dir = (z_rho + z_cor)/√2.
     D1D_v     = fill(NaN, n_scopes); D1D_p     = fill(NaN, n_scopes)
     # ─── Alternative directional stats Dp = Σ α·p and Dld = Σ B·p ───
@@ -1950,6 +1992,8 @@ function oracle_stats(result::SimResult;
     M2D_dp80_st = fill(NaN, n_scopes); M2D_dp80_p = fill(NaN, n_scopes)
     D1D_dp80_v  = fill(NaN, n_scopes); D1D_dp80_p = fill(NaN, n_scopes)
     sel_class_dp80 = fill(:neutral, n_scopes)
+    D1D_absdp80_v = fill(NaN, n_scopes); D1D_absdp80_p = fill(NaN, n_scopes)
+    sel_class_absdp80 = fill(:neutral, n_scopes)
     M3D_q25d80_st = fill(NaN, n_scopes); M3D_q25d80_p = fill(NaN, n_scopes)
     M3D_q25d80_rr = fill(NaN, n_scopes)
     M3D_q25d80_zb = fill(NaN, n_scopes); M3D_q25d80_zr = fill(NaN, n_scopes); M3D_q25d80_zd = fill(NaN, n_scopes)
@@ -2001,6 +2045,16 @@ function oracle_stats(result::SimResult;
             (1 + count(x -> isfinite(x) && abs(x - _μ_dap) >= _adev_dap,
                           _dir_ap_null)) / (n_perm + 1) : NaN
 
+        # dir_ap-only directional classifier (global test, broadcast across scopes).
+        # No :stabilizing — one axis can't distinguish stabilizing from neutral.
+        if isfinite(_dir_ap_perm_p) && _σ_dap > 1e-30 && _dir_ap_perm_p < 0.05
+            _z_dap_global = (_dir_ap_obs - _μ_dap) / _σ_dap
+            _cls_dirap = _z_dap_global >= 0 ? :directional_pos : :directional_neg
+            for _s in 1:n_scopes
+                sel_class_dirap[_s] = _cls_dirap
+            end
+        end
+
         # Dp_mafbin compute pruned (Dp_mafbin_* fields stay NaN).
 
         for s in 1:n_scopes
@@ -2024,35 +2078,83 @@ function oracle_stats(result::SimResult;
             Dres_Z_sf[s] = dres.Z_sf; Dres_p_sf[s] = dres.p_sf
             Dres_Z_cs[s] = dres.Z_cs; Dres_p_cs[s] = dres.p_cs
 
-            # NOTE: 7 rho_pearson variants (q05, q10, q25, dp80 + 3 q_dp80 combos)
-            # pruned — never showed meaningful power gains over vanilla rho_pearson
-            # in any of the comparison sweeps. Fields stay NaN.
+            # rho_pearson q-variants (q05/q10/q25, unmasked + dp80-masked) and
+            # dp80-only variant. Restored to test sign-stability in deep MSD
+            # burn-in regimes where vanilla rho_pearson sign-flip rate is ~17%.
+            rq05 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.05)
+            Rq05_obs[s] = rq05.rho;     Rq05_nm[s]  = rq05.null_mean
+            Rq05_nsd[s] = rq05.null_sd; Rq05_Z[s]   = rq05.Z
+            Rq05_p[s]   = rq05.perm_p
+            rq10 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.10)
+            Rq10_obs[s] = rq10.rho;     Rq10_nm[s]  = rq10.null_mean
+            Rq10_nsd[s] = rq10.null_sd; Rq10_Z[s]   = rq10.Z
+            Rq10_p[s]   = rq10.perm_p
+            rq25 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.25)
+            Rq25_obs[s] = rq25.rho;     Rq25_nm[s]  = rq25.null_mean
+            Rq25_nsd[s] = rq25.null_sd; Rq25_Z[s]   = rq25.Z
+            Rq25_p[s]   = rq25.perm_p
+            dp80_mask_s = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
+            if dp80_mask_s !== nothing
+                rd80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_s)
+                Rdp80_obs[s] = rd80.rho;     Rdp80_nm[s]  = rd80.null_mean
+                Rdp80_nsd[s] = rd80.null_sd; Rdp80_Z[s]   = rd80.Z
+                Rdp80_p[s]   = rd80.perm_p
+                r05d = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask_s; q=0.05)
+                Q05D80_obs[s] = r05d.rho;     Q05D80_nm[s]  = r05d.null_mean
+                Q05D80_nsd[s] = r05d.null_sd; Q05D80_Z[s]   = r05d.Z
+                Q05D80_p[s]   = r05d.perm_p
+                r10d = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask_s; q=0.10)
+                Q10D80_obs[s] = r10d.rho;     Q10D80_nm[s]  = r10d.null_mean
+                Q10D80_nsd[s] = r10d.null_sd; Q10D80_Z[s]   = r10d.Z
+                Q10D80_p[s]   = r10d.perm_p
+                r25d = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask_s; q=0.25)
+                Q25D80_obs[s] = r25d.rho;     Q25D80_nm[s]  = r25d.null_mean
+                Q25D80_nsd[s] = r25d.null_sd; Q25D80_Z[s]   = r25d.Z
+                Q25D80_p[s]   = r25d.perm_p
+            end
 
-            # 3D left-plane Mahalanobis-style gate. The middle axis is the
-            # rho-family variant selected by cfg.oracle_mahal_rho_axis (default
-            # :rho_pearson; alternatives include :rho_pearson_dp80 and the
-            # bottom-q variants). B axis is fixed at the "within"-chromosome
-            # scope for ALL rho scopes — B aggregates over more pairs at
-            # within-chr than at narrow windows so this carries the strongest
-            # B signal regardless of the rho window choice.
+            # 3D left-plane Mahalanobis-style gate. Configurable axes:
+            #   - rho axis: cfg.oracle_mahal_rho_variant (one of
+            #     :rho_pearson_5pct, :rho_pearson_dp80, :rho_pearson_q25_dp80)
+            #   - B axis:  cfg.oracle_mahal_B_scope (:within or :win_50pct)
+            #   - 3rd axis: dir_ap (always)
             within_idx = findfirst(==("within"), scope_names)
-            if within_idx !== nothing && is_B_scope[within_idx] &&
-                 !failed && !isnan(B[within_idx])
-                # EXPERIMENT: rho_pearson with raw p (no logit) AND
-                # studentize B by sd only (no demean). User hypothesis: the
-                # demean step adds finite-sample null-mean noise that can
-                # flip sign at marginal selection. Theoretical E[B_j_null]=0
-                # under sign-flip, so demean is only a noise-correction step.
-                r_rawp = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s];
-                                            use_logit=false, demean=false)
-                axis_pair = (r_rawp.rho, r_rawp.null)
-                if axis_pair !== nothing
-                    B_null_within = view(VG_off_null_meta, :, within_idx) ./ VA_meta
-                    rho_axis_obs, rho_axis_null = axis_pair
-                    # 3D Mahalanobis: (z_B@within, rho_pearson@scope, Z_dir_ap@global).
-                    # Replaced cor_alpha_p (z_cor) with Z_dir_ap — Z_dir_ap has higher
-                    # power and cleaner H0 calibration (post-RNG-decouple).
-                    m3d = _left_plane_3d_test(B[within_idx], B_null_within,
+            win50_idx  = findfirst(==("win_50pct"), scope_names)
+            B_axis_idx = cfg.oracle_mahal_B_scope === :within ? within_idx : win50_idx
+            scope_name_here = scope_names[s]
+            # Build the rho axis based on the configured variant.
+            axis_pair = nothing
+            if cfg.oracle_mahal_rho_variant === :rho_pearson_5pct
+                if scope_name_here == "win_5pct"
+                    r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s];
+                                                use_logit=false, demean=false)
+                    axis_pair = (r_main.rho, r_main.null)
+                end
+            elseif cfg.oracle_mahal_rho_variant === :rho_pearson_dp80
+                dp80_mask_cfg = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
+                if dp80_mask_cfg !== nothing
+                    r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_cfg;
+                                                use_logit=false, demean=false)
+                    axis_pair = (r_main.rho, r_main.null)
+                end
+            elseif cfg.oracle_mahal_rho_variant === :rho_pearson_q25_dp80
+                dp80_mask_cfg = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
+                if dp80_mask_cfg !== nothing
+                    r_main = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs,
+                                                    dp80_mask_cfg; q=0.25)
+                    axis_pair = (r_main.rho, r_main.null)
+                end
+            end
+            # Also keep B_null_within around for the parallel dp80/q25d80 sets
+            # which are pinned to "within" by convention.
+            B_null_within = within_idx === nothing ? nothing :
+                              view(VG_off_null_meta, :, within_idx) ./ VA_meta
+            if B_axis_idx !== nothing && is_B_scope[B_axis_idx] &&
+                 !failed && !isnan(B[B_axis_idx]) && axis_pair !== nothing
+                B_null_axis = view(VG_off_null_meta, :, B_axis_idx) ./ VA_meta
+                rho_axis_obs, rho_axis_null = axis_pair
+                begin
+                    m3d = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
                                                 rho_axis_obs, rho_axis_null,
                                                 _dir_ap_obs, _dir_ap_null)
                     M3D_stat[s] = m3d.stat; M3D_p[s]    = m3d.perm_p
@@ -2066,10 +2168,14 @@ function oracle_stats(result::SimResult;
                                           _dir_ap_obs, _dir_ap_null)
                     M2D_stat[s] = m2d.D2; M2D_p[s] = m2d.perm_p
 
-                    # Stage-2 alternative: 1D combined directional projection
-                    # v_dir = (z_rho + z_Dp)/√2, two-sided permutation-p.
-                    d1d = _1d_dir_test(rho_axis_obs, rho_axis_null,
-                                          _dir_ap_obs, _dir_ap_null)
+                    # Stage-2 alternative: 1D combined directional projection,
+                    # now using the absdp80 construction
+                    # v_dir = sign(z_Dp) · (|z_rho| + |z_Dp|) / √2.
+                    # Empirically more robust to wrong-sign rho_pearson cells
+                    # under MSD-equilibrated initial states (validated against
+                    # the vanilla (z_rho + z_Dp)/√2 on VS=65 sg=±0.05).
+                    d1d = _1d_dir_absrho_test(rho_axis_obs, rho_axis_null,
+                                                 _dir_ap_obs, _dir_ap_null)
                     D1D_v[s] = d1d.v; D1D_p[s] = d1d.perm_p
 
                     # Classifier (α_thr = 0.05): hierarchical decision tree.
@@ -2112,7 +2218,7 @@ function oracle_stats(result::SimResult;
                         r_dp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs,
                                                     dp80_mask_local;
                                                     use_logit=false, demean=false)
-                        m3d_dp80 = _left_plane_3d_test(B[within_idx], B_null_within,
+                        m3d_dp80 = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
                                                          r_dp80.rho, r_dp80.null,
                                                          _dir_ap_obs, _dir_ap_null)
                         M3D_dp80_st[s] = m3d_dp80.stat; M3D_dp80_p[s] = m3d_dp80.perm_p
@@ -2135,10 +2241,25 @@ function oracle_stats(result::SimResult;
                             sel_class_dp80[s] = sign_dp80 >= 0 ? :directional_pos : :directional_neg
                         end
 
+                        # absdp80 — same 3D/2D Mahalanobis as dp80 (sign-symmetric),
+                        # new 1D uses |z_rho|·sign(z_dap) construction, direction
+                        # voted by sign(z_dap_obs).
+                        d1d_abs = _1d_dir_absrho_test(r_dp80.rho, r_dp80.null,
+                                                       _dir_ap_obs, _dir_ap_null)
+                        D1D_absdp80_v[s] = d1d_abs.v; D1D_absdp80_p[s] = d1d_abs.perm_p
+                        if isnan(m3d_dp80.perm_p) || m3d_dp80.perm_p >= α_thr
+                            sel_class_absdp80[s] = :neutral
+                        elseif isnan(m2d_dp80.perm_p) || m2d_dp80.perm_p >= α_thr
+                            sel_class_absdp80[s] = :stabilizing
+                        else
+                            sel_class_absdp80[s] = d1d_abs.sign_obs >= 0 ?
+                                                       :directional_pos : :directional_neg
+                        end
+
                         # rho_pearson_q25 on dp80-filtered mask.
                         r_q25d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs,
                                                           dp80_mask_local; q=0.25)
-                        m3d_q25d80 = _left_plane_3d_test(B[within_idx], B_null_within,
+                        m3d_q25d80 = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
                                                            r_q25d80.rho, r_q25d80.null,
                                                            _dir_ap_obs, _dir_ap_null)
                         M3D_q25d80_st[s] = m3d_q25d80.stat; M3D_q25d80_p[s] = m3d_q25d80.perm_p
@@ -2179,13 +2300,14 @@ function oracle_stats(result::SimResult;
                          Q25D80_obs, Q25D80_nm, Q25D80_nsd, Q25D80_Z, Q25D80_p,
                          Cap_obs, Cap_nm, Cap_nsd, Cap_Z, Cap_p,
                          M3D_stat, M3D_p, M3D_rrad, M3D_zb, M3D_zrho, M3D_zcor,
-                         M2D_stat, M2D_p, sel_class,
+                         M2D_stat, M2D_p, sel_class, sel_class_dirap,
                          D1D_v, D1D_p,
                          dir_ap_obs_v, Z_dir_ap_v, dir_ap_p_v,
                          M3D_dp80_st, M3D_dp80_p, M3D_dp80_rr,
                          M3D_dp80_zb, M3D_dp80_zr, M3D_dp80_zd,
                          M2D_dp80_st, M2D_dp80_p, sel_class_dp80,
                          D1D_dp80_v, D1D_dp80_p,
+                         D1D_absdp80_v, D1D_absdp80_p, sel_class_absdp80,
                          M3D_q25d80_st, M3D_q25d80_p, M3D_q25d80_rr,
                          M3D_q25d80_zb, M3D_q25d80_zr, M3D_q25d80_zd,
                          M2D_q25d80_st, M2D_q25d80_p, sel_class_q25d80,
@@ -2311,6 +2433,7 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "mahal_2d_dir_stat_",   name, "\t", oracle.mahal_2d_dir_stat[s])
             println(io, "mahal_2d_dir_perm_p_", name, "\t", oracle.mahal_2d_dir_perm_p[s])
             println(io, "selection_class_",     name, "\t", String(oracle.selection_class[s]))
+            println(io, "selection_class_dirap_", name, "\t", String(oracle.selection_class_dirap[s]))
         end
         # 1D combined directional (alternative stage 2).
         for (s, name) in enumerate(oracle.scope_names)
@@ -2334,6 +2457,9 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "selection_class_dp80_", name, "\t", String(oracle.selection_class_dp80[s]))
             println(io, "dir_1d_dp80_v_",        name, "\t", oracle.dir_1d_dp80_v[s])
             println(io, "dir_1d_dp80_perm_p_",   name, "\t", oracle.dir_1d_dp80_perm_p[s])
+            println(io, "dir_1d_absdp80_v_",      name, "\t", oracle.dir_1d_absdp80_v[s])
+            println(io, "dir_1d_absdp80_perm_p_", name, "\t", oracle.dir_1d_absdp80_perm_p[s])
+            println(io, "selection_class_absdp80_", name, "\t", String(oracle.selection_class_absdp80[s]))
             # New: q25_dp80 Mahalanobis set
             println(io, "mahal_3d_q25d80_stat_",   name, "\t", oracle.mahal_3d_q25d80_stat[s])
             println(io, "mahal_3d_q25d80_perm_p_", name, "\t", oracle.mahal_3d_q25d80_perm_p[s])

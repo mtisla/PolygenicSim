@@ -134,6 +134,10 @@ struct OracleResult
     mahal_2d_dir_stat::Vector{Float64}
     mahal_2d_dir_perm_p::Vector{Float64}
     selection_class::Vector{Symbol}
+    # Directional classifier based on Z_dir_ap only (no rho axis).
+    # dir_ap_perm_p < α_thr → :directional_{pos,neg} by sign(Z_dir_ap);
+    # else → :neutral. No :stabilizing category (one axis can't distinguish).
+    selection_class_dirap::Vector{Symbol}
     # 1D directional test along v_dir = (z_rho + z_cor)/√2. Two-sided
     # permutation-p (positive directional → v_dir > 0, negative → v_dir < 0).
     # Exposed alongside the 2D Mahalanobis test so the analyst can compare
@@ -167,6 +171,12 @@ struct OracleResult
     selection_class_dp80::Vector{Symbol}
     dir_1d_dp80_v::Vector{Float64}
     dir_1d_dp80_perm_p::Vector{Float64}
+    # Direction-from-dap variant: uses |z_rho|·sign(z_dap) + |z_dap| 1D test
+    # on the dp80-masked rho. Same m3d/m2d Mahalanobis p as dp80 (sign-symmetric)
+    # but direction is voted by sign(z_dap), not sign(v_1D).
+    dir_1d_absdp80_v::Vector{Float64}
+    dir_1d_absdp80_perm_p::Vector{Float64}
+    selection_class_absdp80::Vector{Symbol}
     mahal_3d_q25d80_stat::Vector{Float64}
     mahal_3d_q25d80_perm_p::Vector{Float64}
     mahal_3d_q25d80_r_radial::Vector{Float64}

@@ -84,6 +84,8 @@ const _CONFIG_CATEGORIES = (
                        :oracle_precision, :oracle_phases,
                        :oracle_B_scopes, :oracle_rho_scopes,
                        :oracle_mahal_rho_axis,
+                       :oracle_mahal_rho_variant,
+                       :oracle_mahal_B_scope,
                        :oracle_maf_min,
                        :oracle_signflip_block_kb,
                        :oracle_mag_robust,

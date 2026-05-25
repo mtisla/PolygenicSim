@@ -320,6 +320,14 @@ Base.@kwdef mutable struct Config
     # `:rho_pearson_q25`, `:rho_pearson_dp80`, `:rho_pearson_q05_dp80`,
     # `:rho_pearson_q10_dp80`, `:rho_pearson_q25_dp80`.
     oracle_mahal_rho_axis::Symbol = :rho_pearson
+    # Production Mahalanobis toggle: picks the rho axis for the MAIN
+    # `mahal_3d_*` / `mahal_2d_*` / `dir_1d_*` / `selection_class` fields.
+    # Valid: `:rho_pearson_5pct` (vanilla rho at win_5pct mask, per-scope),
+    #        `:rho_pearson_dp80`, `:rho_pearson_q25_dp80`.
+    oracle_mahal_rho_variant::Symbol = :rho_pearson_dp80
+    # B-axis scope for the main Mahalanobis test (must be in `oracle_B_scopes`).
+    # Valid: `:within` (default) or `:win_50pct`.
+    oracle_mahal_B_scope::Symbol = :within
     # Phases at which to record oracle statistics. Effective only when
     # `:oracle ∈ output_formats`. Each entry must be one of:
     #   :init    — gen 0, immediately after init + V_E computation.
@@ -716,6 +724,12 @@ function validate(cfg::Config)
          :rho_pearson_q25_dp80) ||
         throw(ArgumentError("oracle_mahal_rho_axis must be one of the rho_pearson family; " *
                              "got :$(cfg.oracle_mahal_rho_axis)"))
+    cfg.oracle_mahal_rho_variant in
+        (:rho_pearson_5pct, :rho_pearson_dp80, :rho_pearson_q25_dp80) ||
+        throw(ArgumentError("oracle_mahal_rho_variant must be one of :rho_pearson_5pct, " *
+                             ":rho_pearson_dp80, :rho_pearson_q25_dp80; got :$(cfg.oracle_mahal_rho_variant)"))
+    cfg.oracle_mahal_B_scope in (:within, :win_50pct) ||
+        throw(ArgumentError("oracle_mahal_B_scope must be :within or :win_50pct; got :$(cfg.oracle_mahal_B_scope)"))
     isempty(cfg.oracle_phases) &&
         throw(ArgumentError("oracle_phases must contain at least one of :init, :settled, :final"))
     for ph in cfg.oracle_phases
