@@ -109,20 +109,31 @@ function _init_variant_table_recap_ism(rng::Xoshiro, cfg::Config)
         throw(ArgumentError(
             "slot_capacity(cfg)=$L < n_qtl=$(cfg.n_qtl); " *
             "increase ism_capacity or reduce n_qtl"))
-    chr, bp = sample_variant_positions(rng, cfg, L)
+    # When decouple_alpha_rng=true, use SEPARATE Xoshiro instances derived
+    # from cfg.seed for each independent path (bp positions, qtl_slot
+    # selection, α sampling). Each path advances its own RNG state with
+    # no cross-coupling. This removes RNG-coupling bias in cor(α, p) under
+    # H0 that arises when one rng drives all three paths.
+    rng_bp  = cfg.decouple_alpha_rng ?
+                  Xoshiro(cfg.seed + UInt64(0xB99F_4AC0_5054_7104)) : rng
+    rng_slt = cfg.decouple_alpha_rng ?
+                  Xoshiro(cfg.seed + UInt64(0x57AC_F00D_BABE_0001)) : rng
+    rng_α   = cfg.decouple_alpha_rng ?
+                  Xoshiro(cfg.seed + UInt64(0xA1FA_C0DE_BAAD_F00D)) : rng
+
+    chr, bp = sample_variant_positions(rng_bp, cfg, L)
     chr_start, chr_end = _compute_chr_ranges(chr, cfg.n_chr)
     is_qtl = falses(L)
     active = falses(L)
     α = zeros(Float64, L)
     if cfg.n_qtl > 0
-        qtl_slots = sample(rng, 1:L, cfg.n_qtl; replace=false)
+        qtl_slots = sample(rng_slt, 1:L, cfg.n_qtl; replace=false)
         @inbounds for s in qtl_slots
             is_qtl[s] = true
             active[s] = true
         end
-        # Sample α for active QTL slots, in slot order.
         alpha_buf = Vector{Float64}(undef, cfg.n_qtl)
-        sample_effects_into!(alpha_buf, rng, cfg)
+        sample_effects_into!(alpha_buf, rng_α, cfg)
         # Write in ascending-slot order so determinism is independent of the
         # random `qtl_slots` ordering returned by `sample`.
         ai = 1

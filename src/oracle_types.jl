@@ -161,6 +161,60 @@ struct OracleResult
     dir_1d_v2_v::Vector{Float64}
     dir_1d_v2_perm_p::Vector{Float64}
     selection_class_v2::Vector{Symbol}
+    # Sign-blind magnitude stage-2 test for directional-vs-stabilizing
+    # discrimination. M² = z_rho² + z_cor² + Z_Dp² with empirical sign-flip
+    # null. Under stabilizing/neutral, M² ~ χ²₃ (mean 3). Under directional
+    # in either sign, M² is large because the three Z's combine in
+    # complementary ways (z_rho big under −dir, z_cor & Z_Dp big under +dir).
+    # Paired with the standard p3D omnibus to build selection_class_mag:
+    #   p3D ≥ α       → :neutral
+    #   p3D < α, pM ≥ α → :stabilizing
+    #   p3D < α, pM < α → :directional   (no ±sign, sign-blind by design)
+    mag_stage2_M2::Vector{Float64}
+    mag_stage2_perm_p::Vector{Float64}
+    selection_class_mag::Vector{Symbol}
+    # Per-scope demeaned Dp: Σ_{j ∈ scope} (α_j − ā_scope)(p_j − p̄_scope).
+    # Equivalent to Σ_{j ∈ scope} α_j (p_j − p̄_scope) because demeaning p
+    # makes the α-demean term vanish. Uses the same scope masks as
+    # rho_pearson (loci with ≥ 1 in-scope partner). Sign-flip null on α
+    # gives Z_Dp_demean per scope.
+    Dp_demean_obs::Vector{Float64}
+    Dp_demean_Z::Vector{Float64}
+    Dp_demean_perm_p::Vector{Float64}
+    # Global MAF-binned demeaned Dp: Σ α_j · (p_j - p̄_MAFbin(j)) with MAF
+    # bins of 5%-width on [0, 0.5]. Single global value broadcast across
+    # scopes for storage convenience. Sign-flip null with ε ⊙ α.
+    Dp_mafbin_obs::Vector{Float64}
+    Dp_mafbin_Z::Vector{Float64}
+    Dp_mafbin_perm_p::Vector{Float64}
+    # d_cor = cor(|α_j|, p_j+) where p_j+ = polarized + allele freq.
+    # Sign-flip null is on POLARIZATION (per-locus flip p+ ↔ 1-p+),
+    # not on α. Direction-bearing: sign(d_cor) > 0 under +dir, < 0 under -dir.
+    d_cor_obs::Vector{Float64}
+    d_cor_Z::Vector{Float64}
+    d_cor_perm_p::Vector{Float64}
+    # dc20 — restored delta-cross statistic at cutoff=20%.
+    # Polarize p+; partition into L (p+<0.20) and H (p+>0.80);
+    # delta = B_LH − 0.5·(B_LL + B_HH); sign-flip null with L/H fixed.
+    dc20_nL::Vector{Int}
+    dc20_nH::Vector{Int}
+    dc20_delta::Vector{Float64}
+    dc20_Z::Vector{Float64}
+    dc20_perm_p::Vector{Float64}
+    # d_match — matched positive-vs-negative pairwise contrast.
+    # Pair +α with −α loci on (|α|, MAF) percentile rank; test
+    # Σ |α_+|·(p_+ − p_−) against within-pair sign-flip null.
+    d_match_n_pairs::Vector{Int}
+    d_match_obs::Vector{Float64}
+    d_match_Z::Vector{Float64}
+    d_match_perm_p::Vector{Float64}
+    # d_res — residualized Dp: Σ α_j · (p_j − m̂_{X_j(j)}) with X_j = |α|-decile.
+    # Two nulls reported: (sf) sign-flip on α, (cs) within-class r-shuffle.
+    d_res_obs::Vector{Float64}
+    d_res_Z_sf::Vector{Float64}
+    d_res_perm_p_sf::Vector{Float64}
+    d_res_Z_cs::Vector{Float64}
+    d_res_perm_p_cs::Vector{Float64}
 end
 
 export OracleResult

@@ -204,7 +204,17 @@ function _mutate_packed_ism!(pop::PackedPop, cfg::Config, scratch,
     # QTL pool
     if M_qtl > 0
         _ism_sample_hap_indices!(scratch.ism_hap_idx, rng, twoN, M_qtl)
-        sample_effects_into!(view(scratch.ism_alpha_buf, 1:M_qtl), rng, cfg)
+        # Decouple α sampling: derive a fresh child RNG from a single seed
+        # drawn out of the main rng, so α values are uncoupled from the
+        # haplotype-index selection state. Without this, α[i] correlates
+        # with the rng state just after hap_idx[i] was drawn — which is
+        # the bias source we identified in Phase 2.
+        α_rng = if cfg.decouple_alpha_rng
+            Xoshiro(rand(rng, UInt64))
+        else
+            rng
+        end
+        sample_effects_into!(view(scratch.ism_alpha_buf, 1:M_qtl), α_rng, cfg)
         @inbounds for i in 1:M_qtl
             isempty(scratch.ism_free_slots) &&
                 error("ISM capacity exhausted (Uqtl): ism_capacity=$(length(vt)) " *

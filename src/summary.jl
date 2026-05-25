@@ -68,7 +68,7 @@ const _CONFIG_CATEGORIES = (
     "mutation"    => (:Uqtl, :Uneu, :mutation_model, :ism_capacity,
                        :ism_cleanup_interval, :init_distribution,
                        :theta_override, :asym_u, :asym_v, :init_p),
-    "effects"     => (:effect_distribution, :effect_scale, :maf_min),
+    "effects"     => (:effect_distribution, :effect_scale, :maf_min, :decouple_alpha_rng),
     "selection"   => (:selection_mode, :vs_over_vp0, :vs, :h2,
                        :shift_sd, :sel_grad, :t_shift, :directional_start_from),
     "phases"      => (:ngen_eq, :ngen_dir, :ngen),
@@ -84,7 +84,10 @@ const _CONFIG_CATEGORIES = (
                        :oracle_precision, :oracle_phases,
                        :oracle_B_scopes, :oracle_rho_scopes,
                        :oracle_mahal_rho_axis,
-                       :oracle_maf_min),
+                       :oracle_maf_min,
+                       :oracle_signflip_block_kb,
+                       :oracle_mag_robust,
+                       :oracle_R_meta_use_cov),
 )
 
 # Compile-time sanity check: every Config field appears in some category.

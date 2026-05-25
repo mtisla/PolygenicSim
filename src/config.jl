@@ -101,6 +101,13 @@ Base.@kwdef mutable struct Config
     # effects
     effect_distribution::Symbol = :signed_exponential
     effect_scale::Float64 = 0.03
+    # Decouple α sampling from coalescent/mutation-placement RNG state at
+    # gen-0 init (recap path). When `true` (default), α is drawn from a
+    # SEPARATE Xoshiro derived from cfg.seed (deterministic offset), so the
+    # α values are uncorrelated with site properties driven by mutation
+    # placement. When `false`, uses the shared RNG (legacy behavior, has a
+    # known H0 bias in cor(α, p) — see Phase 2 decoupling test).
+    decouple_alpha_rng::Bool = true
 
     # heritability
     h2::Float64 = 0.5
@@ -268,6 +275,26 @@ Base.@kwdef mutable struct Config
     # variants whose per-locus test statistics are unstable). Applied in
     # `_extract_qtl_genotypes` *before* any window/q-quantile/dp filter.
     oracle_maf_min::Float64 = 0.0
+    # Sign-flip permutation block size in kb. Default 0.0 = locus-level
+    # sign-flip (independent ε per locus). When > 0, all loci in the same
+    # bp window of size `oracle_signflip_block_kb` (per chromosome) share the
+    # same ε per permutation. Block-level sign-flip preserves local LD across
+    # permutations and gives a thinner-tailed empirical null when the
+    # per-locus null has heavy tails due to LD-driven correlation between
+    # neighboring α-loci. Use ~10–100 kb for human-scale LD blocks, larger
+    # (250 kb–1 Mb) for low-recombination regimes.
+    oracle_signflip_block_kb::Float64 = 0.0
+    # Use robust (median + MAD·1.4826) standardization in the magnitude
+    # stage-2 test instead of (mean, sd). MAD is unaffected by heavy tails
+    # in the empirical sign-flip null, giving sharper p-values when a few
+    # outlier perms inflate the empirical sd. Default false = back-compat.
+    oracle_mag_robust::Bool = false
+    # If true, build R_meta as the genotype COVARIANCE matrix (cov(g_j, g_k)
+    # = D_buf[j,k] directly, no sd normalization). Default false uses the
+    # correlation matrix (cor(g_j, g_k) = D_buf[j,k] / (sd_j · sd_k)).
+    # Covariance weights pair contributions by genetic variance, giving more
+    # weight to common variants in the rho_pearson family and Z_Dld test.
+    oracle_R_meta_use_cov::Bool = false
     # Per-stat scope subset config (v0.13.0).
     # Each entry is one of: `:all` (compute every scope) or an explicit scope
     # symbol like `:win_5pct`, `:win_10pct`, `:win_25pct`, `:win_50pct`,
@@ -652,6 +679,8 @@ function validate(cfg::Config)
         throw(ArgumentError("oracle_precision must be :Float64 or :Float32, got $(cfg.oracle_precision)"))
     (0.0 <= cfg.oracle_maf_min < 0.5) ||
         throw(ArgumentError("oracle_maf_min must be in [0, 0.5), got $(cfg.oracle_maf_min)"))
+    cfg.oracle_signflip_block_kb >= 0.0 ||
+        throw(ArgumentError("oracle_signflip_block_kb must be >= 0, got $(cfg.oracle_signflip_block_kb)"))
     cfg.ancestry_simplify_interval >= 1 ||
         throw(ArgumentError("ancestry_simplify_interval must be >= 1, got $(cfg.ancestry_simplify_interval)"))
     # Validate scope-list FORMAT only (each entry must be `:all`, `:within`,

@@ -237,6 +237,44 @@ function _sample_sign_flips(::Type{T}, p::Int, n_perm::Int, seed::UInt64) where 
     return s
 end
 
+# Block-level sign-flip: all loci in the same block share ε per permutation.
+# Reduces the effective n in the empirical null from n_loci to n_blocks,
+# producing thinner-tailed null distributions when blocks capture local LD.
+function _sample_sign_flips_block(::Type{T}, p::Int, n_perm::Int, seed::UInt64,
+                                    block_of::Vector{Int}) where {T<:AbstractFloat}
+    rng = Xoshiro(seed)
+    n_blocks = maximum(block_of)
+    s = Matrix{T}(undef, p, n_perm)
+    one_t = one(T); mone_t = -one_t
+    block_signs = Vector{T}(undef, n_blocks)
+    @inbounds for k in 1:n_perm
+        for b in 1:n_blocks
+            block_signs[b] = rand(rng, Bool) ? one_t : mone_t
+        end
+        for j in 1:p
+            s[j, k] = block_signs[block_of[j]]
+        end
+    end
+    return s
+end
+
+# Build block assignment from (chr, bp) using fixed-size bp windows.
+#   block_of[j] ∈ 1..n_blocks_total, contiguous bp blocks within each chromosome.
+function _build_block_assignment(chr::Vector{Int}, bp::Vector{Int},
+                                    block_bp::Int, chr_len_bp::Int)
+    block_bp > 0 || throw(ArgumentError("block_bp must be > 0"))
+    n_blocks_per_chr = max(1, cld(chr_len_bp, block_bp))
+    p = length(chr)
+    block_of = Vector{Int}(undef, p)
+    @inbounds for j in 1:p
+        chr_idx = chr[j]
+        bp_in_chr = bp[j]
+        block_in_chr = min(div(max(bp_in_chr, 1) - 1, block_bp), n_blocks_per_chr - 1)
+        block_of[j] = (chr_idx - 1) * n_blocks_per_chr + block_in_chr + 1
+    end
+    return block_of
+end
+
 # Fast path: full p×p D_k per deme, all scopes via BitMatrix masking. The
 # heavy buffers (X, D_buf, Dm_buf, R_meta, a_perm, DM_aperm, raw_signs)
 # carry element type T (Float32 or Float64); cross-deme accumulators stay
@@ -246,12 +284,19 @@ function _oracle_fast_path(::Type{T}, X::Matrix{T}, α::Vector{T},
                               chr::Vector{Int}, bp::Vector{Int},
                               chr_len_bp::Int, deme_labels::Vector{Int},
                               windows_pct::Vector{Float64},
-                              n_perm::Int, seed::UInt64) where {T<:AbstractFloat}
+                              n_perm::Int, seed::UInt64;
+                              signflip_block_bp::Int=0,
+                              R_meta_use_cov::Bool=false) where {T<:AbstractFloat}
     N_total, p = size(X)
     n_scopes = length(windows_pct) + 2
     masks = _build_scope_masks(windows_pct, chr, bp, chr_len_bp)
 
-    raw_signs = _sample_sign_flips(T, p, n_perm, seed)   # p × n_perm (T)
+    raw_signs = if signflip_block_bp > 0
+        block_of = _build_block_assignment(chr, bp, signflip_block_bp, chr_len_bp)
+        _sample_sign_flips_block(T, p, n_perm, seed, block_of)
+    else
+        _sample_sign_flips(T, p, n_perm, seed)   # p × n_perm (T)
+    end
     a_perm    = raw_signs .* α                            # p × n_perm (T)
 
     VA_acc          = 0.0
@@ -315,11 +360,19 @@ function _oracle_fast_path(::Type{T}, X::Matrix{T}, α::Vector{T},
             D_buf[j, j] = zero(T)
         end
 
-        # R_meta accumulator (per-deme correlation matrix, deme-weighted avg).
+        # R_meta accumulator. Default: per-deme CORRELATION matrix
+        # (D_buf normalized by sd_j · sd_k), deme-weighted avg.
+        # `R_meta_use_cov=true`: per-deme COVARIANCE (D_buf raw), so
+        # partner contributions are variance-weighted (common variants
+        # get more weight).
         w_k_T = T(w_k)
         @inbounds for k_ in 1:p, j in 1:p
-            sdj = sd_safe[j]; sdk = sd_safe[k_]
-            r = (sdj > 0 && sdk > 0) ? Float64(D_buf[j, k_]) / (sdj * sdk) : 0.0
+            r = if R_meta_use_cov
+                Float64(D_buf[j, k_])
+            else
+                sdj = sd_safe[j]; sdk = sd_safe[k_]
+                (sdj > 0 && sdk > 0) ? Float64(D_buf[j, k_]) / (sdj * sdk) : 0.0
+            end
             R_meta[j, k_] += T(w_k * r)
         end
 
@@ -545,6 +598,65 @@ function _2d_dir_test(z_rho_obs::Float64, z_rho_null::Vector{Float64},
     return (D2 = D2_obs, perm_p = perm_p, v_dir_signed = z_rho_obs + z_cor_obs)
 end
 
+# Sign-blind magnitude stage-2 test for directional-vs-stabilizing.
+# Combines three direction-bearing axes by SUMMING SQUARED standardized Z's:
+#   M² = z_rho² + z_cor² + Z_Dp²
+# Each axis is standardized using its own sign-flip null (raw_obs and raw_null
+# inputs). Under stabilizing/neutral H0, each z ~ N(0,1) approximately, so
+# M² ~ χ²₃ with mean 3. Under directional in either sign, the three Z's
+# combine to large M² because z_rho, z_cor, Z_Dp are coherently
+# direction-sensitive but in *complementary* ways (z_rho big under −dir,
+# z_cor & Z_Dp big under +dir, etc.).
+# Returns M2_obs and empirical perm_p.
+function _magnitude_stage2_test(rho_obs::Float64, rho_null::Vector{Float64},
+                                  cor_obs::Float64, cor_null::Vector{Float64},
+                                  dp_obs::Float64,  dp_null::Vector{Float64};
+                                  robust::Bool=false)
+    nan_out = (M2 = NaN, perm_p = NaN)
+    isfinite(rho_obs) && isfinite(cor_obs) && isfinite(dp_obs) || return nan_out
+    n_perm = length(rho_null)
+    (n_perm == length(cor_null) == length(dp_null)) ||
+        throw(ArgumentError("null length mismatch in magnitude stage-2 test"))
+
+    # Standardize each axis from its own null. `robust=true` uses
+    # (median, MAD·1.4826) instead of (mean, sd) — less sensitive to
+    # heavy-tailed null perms that can inflate empirical sd.
+    function _z(o, ν)
+        ν_fin = filter(isfinite, ν)
+        length(ν_fin) >= 5 || return (NaN, Float64[])
+        μ, σ = if robust
+            m = median(ν_fin)
+            mad_val = median(abs.(ν_fin .- m))
+            (m, 1.4826 * mad_val)
+        else
+            (mean(ν_fin), std(ν_fin; corrected=true))
+        end
+        σ > 1e-30 || return (NaN, Float64[])
+        z_o = (o - μ) / σ
+        z_n = Float64[(x - μ) / σ for x in ν]
+        return (z_o, z_n)
+    end
+    zr_o, zr_n = _z(rho_obs, rho_null)
+    zc_o, zc_n = _z(cor_obs, cor_null)
+    zp_o, zp_n = _z(dp_obs,  dp_null)
+    (isfinite(zr_o) && isfinite(zc_o) && isfinite(zp_o)) || return nan_out
+
+    M2_obs = zr_o^2 + zc_o^2 + zp_o^2
+    reject = 0
+    n_v = 0
+    @inbounds for b in 1:n_perm
+        if isfinite(zr_n[b]) && isfinite(zc_n[b]) && isfinite(zp_n[b])
+            n_v += 1
+            m2 = zr_n[b]^2 + zc_n[b]^2 + zp_n[b]^2
+            if m2 >= M2_obs
+                reject += 1
+            end
+        end
+    end
+    n_v >= 5 || return nan_out
+    return (M2 = M2_obs, perm_p = (1 + reject) / (n_v + 1))
+end
+
 # =============================================================================
 # Alternative directional summaries: Dp (signed, global) + D_ld (quadratic).
 # -----------------------------------------------------------------------------
@@ -553,7 +665,7 @@ end
 #        = Σ_{j ≠ k, mask[j,k]} α_j α_k R_jk (p_j−0.5)(p_k−0.5)
 #
 # Sign-flip null α_perm = ε ⊙ α  ⇒  u_perm = ε ⊙ u_obs:
-#   Dp_null[b]   = Σ ε_j · α_j · p_j          ; E[·] = 0
+#   Dp_null[b]   = Σ ε_j · α_j · p_j           ; E[·] = 0
 #   D_ld_null[b] = Σ_{j,k} ε_j ε_k · α_j α_k R_jk · (p_j-0.5)(p_k-0.5)
 #                                              ; E[·] = 0 (diag masked)
 #
@@ -568,6 +680,9 @@ end
 # polarization). Sign of Z_Dp infers direction (positive → +directional,
 # negative → −directional). Sign-flip null:
 #   Dp_perm[b] = Σ (ε_j·α_j) · p_j     ;     E[Dp_null] = 0 by symmetry.
+# Tried Σα·(p−0.5), Σα·(p−p̄), and Σ|α|·(p_pol−p̄_bin) [5% bin-demeaned] —
+# all worse than raw Σα·p. ISM rare-allele tail IS direction-informative;
+# demeaning it away destroys signal.
 function _compute_dp_global(α::Vector{T}, p_pool::Vector{Float64},
                               raw_signs::Matrix{T}) where {T<:AbstractFloat}
     p = length(α)
@@ -585,6 +700,116 @@ function _compute_dp_global(α::Vector{T}, p_pool::Vector{Float64},
         s = 0.0
         for j in 1:p
             s += Float64(raw_signs[j, b]) * Float64(α[j]) * p_pool[j]
+        end
+        Dp_null[b] = s
+    end
+
+    return (Dp_obs = Dp_obs, Dp_null = Dp_null)
+end
+
+# Global MAF-binned demeaned Dp.
+#   Dp_mafbin = Σ_j α_j · (p_j − p̄_MAFbin(j))
+# where MAF_j = min(p_j, 1-p_j), bins are 5%-width on [0, 0.5], and
+# p̄_MAFbin(j) is the mean p_j over loci sharing j's MAF bin.
+# Sign-flip null: ε ⊙ α ⇒ Dp_null[b] = Σ ε_j · α_j · c_j where c_j is
+# the fixed per-locus residual (bin assignment and bin mean don't depend
+# on α). E[·] = 0.
+function _compute_dp_mafbin_global(α::Vector{T}, p_pool::Vector{Float64},
+                                     raw_signs::Matrix{T};
+                                     bin_width::Float64=0.05) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    n_bins = max(1, round(Int, ceil(0.5 / bin_width)))   # MAF ∈ [0, 0.5]
+
+    bin_of = Vector{Int}(undef, p)
+    @inbounds for j in 1:p
+        maf = min(p_pool[j], 1.0 - p_pool[j])
+        b = clamp(floor(Int, maf / bin_width), 0, n_bins - 1) + 1
+        bin_of[j] = b
+    end
+
+    bin_sum   = zeros(Float64, n_bins)
+    bin_count = zeros(Int,     n_bins)
+    @inbounds for j in 1:p
+        bin_sum[bin_of[j]]   += p_pool[j]
+        bin_count[bin_of[j]] += 1
+    end
+    bin_mean = Float64[bin_count[b] > 0 ? bin_sum[b]/bin_count[b] : 0.0
+                          for b in 1:n_bins]
+
+    # Fixed per-locus residual c_j = p_j − bin_mean[bin_of(j)].
+    c = Vector{Float64}(undef, p)
+    @inbounds for j in 1:p
+        c[j] = p_pool[j] - bin_mean[bin_of[j]]
+    end
+
+    Dp_obs = 0.0
+    @inbounds for j in 1:p
+        Dp_obs += Float64(α[j]) * c[j]
+    end
+
+    Dp_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        s = 0.0
+        for j in 1:p
+            s += Float64(raw_signs[j, b]) * Float64(α[j]) * c[j]
+        end
+        Dp_null[b] = s
+    end
+
+    return (Dp_obs = Dp_obs, Dp_null = Dp_null)
+end
+
+# Per-scope α-demeaned Dp.
+#   Dp_scope = Σ_{j ∈ scope} (α_j − ā_scope) · p_j           (raw p, no demean)
+# where scope = loci with ≥ 1 in-scope partner under the same window mask
+# used by rho_pearson. ā_scope = empirical mean α over those loci.
+# Sign-flip null: ε ⊙ α  ⇒  per-perm ā_perm = mean(ε⊙α over scope),
+#   Dp_null[b] = Σ_{j ∈ scope} (ε_j·α_j − ā_perm) · p_j   ;   E[·] = 0.
+function _compute_dp_demean_one(α::Vector{T}, p_pool::Vector{Float64},
+                                  raw_signs::Matrix{T},
+                                  mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (Dp_obs = NaN, Dp_null = fill(NaN, n_perm))
+
+    in_scope = falses(p)
+    @inbounds for j in 1:p
+        for k in 1:p
+            if k != j && mask[j, k]; in_scope[j] = true; break; end
+        end
+    end
+    n_v = count(in_scope)
+    n_v >= 5 || return nan_out
+
+    a_bar = 0.0
+    @inbounds for j in 1:p
+        in_scope[j] || continue
+        a_bar += Float64(α[j])
+    end
+    a_bar /= n_v
+
+    Dp_obs = 0.0
+    @inbounds for j in 1:p
+        in_scope[j] || continue
+        Dp_obs += (Float64(α[j]) - a_bar) * p_pool[j]
+    end
+
+    Dp_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        # Per-perm ā_perm = (1/n_v) Σ ε α over scope.
+        a_bar_perm = 0.0
+        for j in 1:p
+            in_scope[j] || continue
+            a_bar_perm += Float64(raw_signs[j, b]) * Float64(α[j])
+        end
+        a_bar_perm /= n_v
+        # Dp_null[b] = Σ (ε α − ā_perm) p over scope.
+        s = 0.0
+        for j in 1:p
+            in_scope[j] || continue
+            ea = Float64(raw_signs[j, b]) * Float64(α[j])
+            s += (ea - a_bar_perm) * p_pool[j]
         end
         Dp_null[b] = s
     end
@@ -806,6 +1031,358 @@ function _per_locus_corr_one(α::Vector{T}, p_pool::Vector{Float64},
                           rho_null)) / (n_perm + 1)
     return (rho = cor_obs, null_mean = null_mean, null_sd = null_sd,
             Z = Z, perm_p = perm_p, null = rho_null)
+end
+
+# d_res — residualized Dp: Σ α_j · (p_j − m̂_{X_j}) where X_j is |α|-decile.
+# Two null variants computed in one pass:
+#   (A) sign-flip on α (same raw_signs as other tests): D_null[b] = Σ ε·α·r
+#   (B) within-class r-shuffle: per perm permute r within each |α| bin.
+# Both share the same observed statistic.
+function _compute_d_res_one(α::Vector{T}, p_pool::Vector{Float64},
+                              raw_signs::Matrix{T},
+                              mask::BitMatrix;
+                              n_bins::Int=10) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (D_obs = NaN, Z_sf = NaN, p_sf = NaN, Z_cs = NaN, p_cs = NaN)
+
+    in_scope = falses(p)
+    @inbounds for j in 1:p
+        for k in 1:p
+            if k != j && mask[j, k]; in_scope[j] = true; break; end
+        end
+    end
+    valid = findall(in_scope)
+    n_v = length(valid); n_v >= 5 || return nan_out
+
+    α_v = Float64[Float64(α[j]) for j in valid]
+    p_v = Float64[p_pool[j]     for j in valid]
+    abs_α = abs.(α_v)
+
+    # |α|-decile bin per locus.
+    ranks_α = invperm(sortperm(abs_α))   # 1..n_v
+    bin_of  = Int[min(div((r - 1) * n_bins, n_v) + 1, n_bins) for r in ranks_α]
+
+    # Per-bin mean p.
+    bin_sum   = zeros(Float64, n_bins); bin_count = zeros(Int, n_bins)
+    @inbounds for i in 1:n_v
+        bin_sum[bin_of[i]]   += p_v[i]
+        bin_count[bin_of[i]] += 1
+    end
+    m_bin = Float64[bin_count[b] > 0 ? bin_sum[b]/bin_count[b] : 0.0
+                       for b in 1:n_bins]
+
+    # Residuals (sum to 0 within each bin by construction).
+    r_v = Float64[p_v[i] - m_bin[bin_of[i]] for i in 1:n_v]
+
+    # Observed.
+    D_obs = 0.0
+    @inbounds for i in 1:n_v
+        D_obs += α_v[i] * r_v[i]
+    end
+
+    # Null (A): sign-flip on α using existing raw_signs.
+    D_null_sf = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        s = 0.0
+        for i in 1:n_v
+            j = valid[i]
+            s += Float64(raw_signs[j, b]) * α_v[i] * r_v[i]
+        end
+        D_null_sf[b] = s
+    end
+    μ_sf = mean(D_null_sf); σ_sf = std(D_null_sf; corrected=true)
+    Z_sf = σ_sf > 1e-30 ? (D_obs - μ_sf) / σ_sf : NaN
+    adev_sf = abs(D_obs - μ_sf)
+    p_sf = (1 + count(d -> abs(d - μ_sf) >= adev_sf, D_null_sf)) / (n_perm + 1)
+
+    # Null (B): within-class r-shuffle.
+    bin_indices = [Int[] for _ in 1:n_bins]
+    @inbounds for i in 1:n_v
+        push!(bin_indices[bin_of[i]], i)
+    end
+    rng = Xoshiro(UInt64(0xC0FFEE))
+    D_null_cs = Vector{Float64}(undef, n_perm)
+    r_perm = Vector{Float64}(undef, n_v)
+    @inbounds for b in 1:n_perm
+        copyto!(r_perm, r_v)
+        for bb in 1:n_bins
+            idxs = bin_indices[bb]
+            length(idxs) > 1 || continue
+            # In-place Fisher-Yates shuffle on r_perm[idxs].
+            for k in length(idxs):-1:2
+                j2 = rand(rng, 1:k)
+                i1 = idxs[k]; i2 = idxs[j2]
+                r_perm[i1], r_perm[i2] = r_perm[i2], r_perm[i1]
+            end
+        end
+        s = 0.0
+        for i in 1:n_v
+            s += α_v[i] * r_perm[i]
+        end
+        D_null_cs[b] = s
+    end
+    μ_cs = mean(D_null_cs); σ_cs = std(D_null_cs; corrected=true)
+    Z_cs = σ_cs > 1e-30 ? (D_obs - μ_cs) / σ_cs : NaN
+    adev_cs = abs(D_obs - μ_cs)
+    p_cs = (1 + count(d -> abs(d - μ_cs) >= adev_cs, D_null_cs)) / (n_perm + 1)
+
+    return (D_obs = D_obs, Z_sf = Z_sf, p_sf = p_sf, Z_cs = Z_cs, p_cs = p_cs)
+end
+
+# d_match — matched positive-vs-negative pairwise frequency contrast.
+#   Pair each +α locus with a −α locus of similar (|α|, MAF), then test
+#     D_match = Σ_i |α_{+,i}| · (p_{+,i} − p_{−,i})
+#   Within-pair sign-flip null: D_null[b] = Σ_i ε_i · c_i where
+#   c_i = |α_+| · (p_+ − p_−) and ε_i ∈ {−1, +1} per perm.
+#
+# Matching: sort both +α and −α groups by combined percentile rank of
+# (|α|, MAF), pair k-th-by-rank in each group. O((n_++n_-) log n).
+# Null: vectorized matmul over (n_pairs × n_perm) sign matrix.
+function _compute_d_match_one(α::Vector{T}, p_pool::Vector{Float64},
+                                 raw_signs::Matrix{T},
+                                 mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (n_pairs = 0, D_obs = NaN, Z = NaN, perm_p = NaN)
+
+    in_scope = falses(p)
+    @inbounds for j in 1:p
+        for k in 1:p
+            if k != j && mask[j, k]; in_scope[j] = true; break; end
+        end
+    end
+
+    pos_idx = Int[]; neg_idx = Int[]
+    @inbounds for j in 1:p
+        in_scope[j] || continue
+        if α[j] > 0
+            push!(pos_idx, j)
+        elseif α[j] < 0
+            push!(neg_idx, j)
+        end
+    end
+    np = length(pos_idx); nn = length(neg_idx)
+    n_pairs = min(np, nn)
+    n_pairs >= 5 || return nan_out
+
+    # Match by |α| ALONE (stable pre-selection feature). MAF was tried but
+    # causes pairing across the MAF fold (p=0.05 with p=0.95), inflating
+    # D_obs spuriously. With |α|-only matching, pairs share effect-size
+    # magnitude; the p_+ − p_− difference reflects selection-driven movement
+    # only (since α was assigned IID before any selection).
+    key_p = Float64[abs(Float64(α[j])) for j in pos_idx]
+    key_n = Float64[abs(Float64(α[j])) for j in neg_idx]
+
+    # Sort by key and take first n_pairs from each (trims the larger group).
+    sp = sortperm(key_p); sn = sortperm(key_n)
+    pair_pos = pos_idx[sp[1:n_pairs]]
+    pair_neg = neg_idx[sn[1:n_pairs]]
+
+    # c_i = |α_{+,i}| · (p_{+,i} − p_{−,i})
+    c = Vector{Float64}(undef, n_pairs)
+    @inbounds for i in 1:n_pairs
+        c[i] = abs(Float64(α[pair_pos[i]])) *
+                 (p_pool[pair_pos[i]] - p_pool[pair_neg[i]])
+    end
+
+    D_obs = sum(c)
+
+    # Null: D_null[b] = Σ_i ε_i · c_i where ε_i = raw_signs[pair_pos[i], b].
+    # Done as scalar loop — n_pairs × n_perm ≈ 1.5M ops per scope, ~1 ms.
+    D_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        s = 0.0
+        for i in 1:n_pairs
+            s += Float64(raw_signs[pair_pos[i], b]) * c[i]
+        end
+        D_null[b] = s
+    end
+
+    null_mean = mean(D_null)
+    null_sd   = std(D_null; corrected=true)
+    Z = null_sd > 1e-30 ? (D_obs - null_mean) / null_sd : NaN
+    abs_dev = abs(D_obs - null_mean)
+    perm_p = (1 + count(d -> abs(d - null_mean) >= abs_dev, D_null)) / (n_perm + 1)
+
+    return (n_pairs = n_pairs, D_obs = D_obs, Z = Z, perm_p = perm_p)
+end
+
+# dc<cutoff> — delta-cross statistic. Restored from v0.12.0 removal
+# (commit 4a972d0^) for re-test under the current recap+ISM setup.
+#
+# Polarize p → p+ = p if α≥0 else 1−p. Partition loci by polarized freq:
+#   L = {j : 0.005 ≤ p+_j < cutoff/100}      (Low p+ tail)
+#   H = {j : 1 − cutoff/100 < p+_j ≤ 0.995}  (High p+ tail)
+# Compute α-weighted LD block averages:
+#   B_LH = mean(α_j R_jk α_k) over (j∈L, k∈H)
+#   B_LL = mean(α_j R_jk α_k) over (j<k, both in L)
+#   B_HH = mean(α_j R_jk α_k) over (j<k, both in H)
+#   delta = B_LH − 0.5·(B_LL + B_HH)
+# Sign-flip null permutes α; L/H sets FIXED (no repolarization). Two-sided
+# perm-p (|null − null_mean| ≥ |obs − null_mean|).
+function _delta_cross_one(R_meta::Matrix{T}, α::Vector{T},
+                            p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                            mask::BitMatrix, cutoff::Int
+                            ) where {T<:AbstractFloat}
+    p = length(α)
+    c = cutoff / 100.0
+    p_pol = similar(p_pool)
+    @inbounds for j in 1:p
+        p_pol[j] = α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
+    end
+    L_idx = Int[]; H_idx = Int[]
+    @inbounds for j in 1:p
+        if 0.005 <= p_pol[j] < c
+            push!(L_idx, j)
+        elseif (1.0 - c) < p_pol[j] <= 0.995
+            push!(H_idx, j)
+        end
+    end
+    nL = length(L_idx); nH = length(H_idx)
+    nan_out = (nL = nL, nH = nH, BLH = NaN, BLL = NaN, BHH = NaN,
+               delta = NaN, null_mean = NaN, null_sd = NaN,
+               Z = NaN, perm_p = NaN)
+    (nL < 2 || nH < 2) && return nan_out
+
+    n_perm = size(raw_signs, 2)
+    sum_LH = 0.0; sum_LL = 0.0; sum_HH = 0.0
+    nPLH = nL * nH
+    nPLL = nL * (nL - 1) ÷ 2
+    nPHH = nH * (nH - 1) ÷ 2
+
+    B_LH = Matrix{T}(undef, nL, nH)
+    @inbounds for k in 1:nH
+        gk = H_idx[k]; ak = α[gk]
+        for j in 1:nL
+            gj = L_idx[j]; aj = α[gj]
+            v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : zero(T))
+            B_LH[j, k] = v
+            sum_LH += Float64(v)
+        end
+    end
+    B_LL = Matrix{T}(undef, nL, nL)
+    @inbounds for k in 1:nL, j in 1:nL
+        gk = L_idx[k]; ak = α[gk]
+        gj = L_idx[j]; aj = α[gj]
+        v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : zero(T))
+        B_LL[j, k] = v
+        if j > k; sum_LL += Float64(v); end
+    end
+    B_HH = Matrix{T}(undef, nH, nH)
+    @inbounds for k in 1:nH, j in 1:nH
+        gk = H_idx[k]; ak = α[gk]
+        gj = H_idx[j]; aj = α[gj]
+        v = (mask[gj, gk] ? aj * R_meta[gj, gk] * ak : zero(T))
+        B_HH[j, k] = v
+        if j > k; sum_HH += Float64(v); end
+    end
+
+    BLH_obs   = sum_LH / nPLH
+    BLL_obs   = nPLL > 0 ? sum_LL / nPLL : 0.0
+    BHH_obs   = nPHH > 0 ? sum_HH / nPHH : 0.0
+    delta_obs = BLH_obs - 0.5 * (BLL_obs + BHH_obs)
+
+    s_L = raw_signs[L_idx, :]
+    s_H = raw_signs[H_idx, :]
+    BLH_null = Vector{Float64}(undef, n_perm)
+    tmp = Matrix{T}(undef, nL, n_perm)
+    mul!(tmp, B_LH, s_H)
+    @inbounds for b in 1:n_perm
+        acc = zero(T)
+        @simd for j in 1:nL
+            acc += s_L[j, b] * tmp[j, b]
+        end
+        BLH_null[b] = Float64(acc) / nPLH
+    end
+    BLL_null = if nPLL > 0
+        tmpL = Matrix{T}(undef, nL, n_perm); mul!(tmpL, B_LL, s_L)
+        v = Vector{Float64}(undef, n_perm)
+        @inbounds for b in 1:n_perm
+            acc = zero(T)
+            @simd for j in 1:nL; acc += s_L[j, b] * tmpL[j, b]; end
+            v[b] = 0.5 * Float64(acc) / nPLL
+        end
+        v
+    else
+        zeros(Float64, n_perm)
+    end
+    BHH_null = if nPHH > 0
+        tmpH = Matrix{T}(undef, nH, n_perm); mul!(tmpH, B_HH, s_H)
+        v = Vector{Float64}(undef, n_perm)
+        @inbounds for b in 1:n_perm
+            acc = zero(T)
+            @simd for j in 1:nH; acc += s_H[j, b] * tmpH[j, b]; end
+            v[b] = 0.5 * Float64(acc) / nPHH
+        end
+        v
+    else
+        zeros(Float64, n_perm)
+    end
+    delta_null = BLH_null .- 0.5 .* (BLL_null .+ BHH_null)
+    nm  = mean(delta_null)
+    nsd = std(delta_null; corrected=true)
+    Z   = nsd > 1e-30 ? (delta_obs - nm) / nsd : NaN
+    abs_dev = abs(delta_obs - nm)
+    p_perm = (1 + count(d -> abs(d - nm) >= abs_dev, delta_null)) / (n_perm + 1)
+
+    return (nL = nL, nH = nH, BLH = BLH_obs, BLL = BLL_obs, BHH = BHH_obs,
+            delta = delta_obs, null_mean = nm, null_sd = nsd,
+            Z = Z, perm_p = p_perm)
+end
+
+# d_cor = cor(|α_j|, p_j+) where p_j+ = polarized + allele freq
+#   = p_j if α_j ≥ 0 else 1 − p_j
+# Under +dir, all p+ shift up (more for large |α|) ⇒ cor > 0.
+# Under −dir, all p+ shift down (more for large |α|) ⇒ cor < 0.
+# Null: per-locus random polarization flip p+ ↔ 1−p+ (using raw_signs as
+# the flip indicator). Under H0 with α symmetric, observed and null share
+# the same distribution. |α| is invariant under sign-flip.
+function _compute_d_cor_one(α::Vector{T}, p_pool::Vector{Float64},
+                              raw_signs::Matrix{T},
+                              mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (cor = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
+               null = fill(NaN, n_perm))
+
+    in_scope = falses(p)
+    @inbounds for j in 1:p
+        for k in 1:p
+            if k != j && mask[j, k]; in_scope[j] = true; break; end
+        end
+    end
+    valid = findall(in_scope)
+    n_v = length(valid)
+    n_v < 5 && return nan_out
+
+    abs_α  = Float64[abs(Float64(α[j]))                              for j in valid]
+    p_plus = Float64[α[j] >= zero(T) ? p_pool[j] : 1.0 - p_pool[j]   for j in valid]
+
+    cor_obs = _fast_cor(abs_α, p_plus)
+    isnan(cor_obs) && return nan_out
+
+    # Per-perm: randomly flip p+ ↔ 1−p+ per locus, using raw_signs as the flip.
+    cor_null = Vector{Float64}(undef, n_perm)
+    p_perm_buf = Vector{Float64}(undef, n_v)
+    @inbounds for b in 1:n_perm
+        for vi in 1:n_v
+            j = valid[vi]
+            p_perm_buf[vi] = raw_signs[j, b] >= 0 ? p_plus[vi] : 1.0 - p_plus[vi]
+        end
+        cor_null[b] = _fast_cor(abs_α, p_perm_buf)
+    end
+
+    valid_null = filter(!isnan, cor_null)
+    isempty(valid_null) && return nan_out
+    null_mean = mean(valid_null)
+    null_sd   = length(valid_null) > 1 ? std(valid_null; corrected=true) : 0.0
+    Z = null_sd > 1e-30 ? (cor_obs - null_mean) / null_sd : NaN
+    abs_dev = abs(cor_obs - null_mean)
+    perm_p = (1 + count(r -> !isnan(r) && abs(r - null_mean) >= abs_dev,
+                          cor_null)) / (n_perm + 1)
+    return (cor = cor_obs, null_mean = null_mean, null_sd = null_sd,
+            Z = Z, perm_p = perm_p, null = cor_null)
 end
 
 # Two-pass Pearson correlation of two equal-length Float64 vectors.
@@ -1276,7 +1853,17 @@ function oracle_stats(result::SimResult;
             nv(), nv(),                                 # mahal_3d_v2 stat+p (2)
             nv(),                                       # mahal_2d_v2 p (1)
             nv(), nv(),                                 # dir_1d_v2 v+p (2)
-            fill(:neutral, n_scopes))                   # selection_class_v2
+            fill(:neutral, n_scopes),                   # selection_class_v2
+            nv(), nv(),                                 # mag_stage2 M2+p (2)
+            fill(:neutral, n_scopes),                   # selection_class_mag
+            nv(), nv(), nv(),                           # Dp_demean obs/Z/p (3)
+            nv(), nv(), nv(),                           # Dp_mafbin obs/Z/p (3)
+            nv(), nv(), nv(),                           # d_cor obs/Z/p (3)
+            zeros(Int, n_scopes), zeros(Int, n_scopes), # dc20 nL/nH (2)
+            nv(), nv(), nv(),                           # dc20 delta/Z/p (3)
+            zeros(Int, n_scopes),                       # d_match n_pairs (1)
+            nv(), nv(), nv(),                           # d_match obs/Z/p (3)
+            nv(), nv(), nv(), nv(), nv())               # d_res obs/Z_sf/p_sf/Z_cs/p_cs (5)
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -1289,10 +1876,14 @@ function oracle_stats(result::SimResult;
         @info "oracle_stats: p_qtl=$(p) > memory_path_threshold=$(memory_path_threshold); the per-chromosome memory path is currently a stub — the fast path will still run but peak memory may be ~3·p² T-words (≈$(round(3 * p^2 * sizeof(T) / 1e9, digits=2)) GB at T=$(T))."
     end
 
-    # Compute B accumulators + R_meta via the fast path.
+    # Compute B accumulators + R_meta via the fast path. Forwards the sign-flip
+    # block size (cfg.oracle_signflip_block_kb in kb); 0 ⇒ locus-level (default).
+    signflip_block_bp = round(Int, cfg.oracle_signflip_block_kb * 1000)
     VA_meta, VG_off_meta, VG_off_null_meta, R_meta, raw_signs, failed =
         _oracle_fast_path(T, X, α, p_pool, chr, bp, chr_len_bp, deme_labels,
-                            windows_pct, n_perm, seed)
+                            windows_pct, n_perm, seed;
+                            signflip_block_bp=signflip_block_bp,
+                            R_meta_use_cov=cfg.oracle_R_meta_use_cov)
 
     B = Vector{Float64}(undef, n_scopes)
     B_perm_p = Vector{Float64}(undef, n_scopes)
@@ -1349,6 +1940,29 @@ function oracle_stats(result::SimResult;
     M2D_v2_p   = fill(NaN, n_scopes)
     D1D_v2_v   = fill(NaN, n_scopes); D1D_v2_p = fill(NaN, n_scopes)
     sel_class_v2 = fill(:neutral, n_scopes)
+    # Sign-blind magnitude stage-2 test.
+    Mmag_M2    = fill(NaN, n_scopes); Mmag_p   = fill(NaN, n_scopes)
+    sel_class_mag = fill(:neutral, n_scopes)
+    # Per-scope demeaned Dp.
+    Dp_dm_obs  = fill(NaN, n_scopes); Dp_dm_Z  = fill(NaN, n_scopes)
+    Dp_dm_p    = fill(NaN, n_scopes)
+    # Global MAF-binned demeaned Dp (broadcast across scopes).
+    Dp_mb_obs  = fill(NaN, n_scopes); Dp_mb_Z  = fill(NaN, n_scopes)
+    Dp_mb_p    = fill(NaN, n_scopes)
+    # d_cor = cor(|α|, p+) with polarization-flip null (per-scope).
+    Dcor_obs   = fill(NaN, n_scopes); Dcor_Z   = fill(NaN, n_scopes)
+    Dcor_p     = fill(NaN, n_scopes)
+    # dc20 — restored delta-cross statistic (cutoff=20).
+    Dc20_nL    = zeros(Int, n_scopes); Dc20_nH = zeros(Int, n_scopes)
+    Dc20_delta = fill(NaN, n_scopes); Dc20_Z   = fill(NaN, n_scopes)
+    Dc20_p     = fill(NaN, n_scopes)
+    # d_match — matched positive-vs-negative contrast.
+    Dmat_n     = zeros(Int, n_scopes); Dmat_obs = fill(NaN, n_scopes)
+    Dmat_Z     = fill(NaN, n_scopes); Dmat_p   = fill(NaN, n_scopes)
+    # d_res — residualized Dp (|α|-decile classes), two nulls.
+    Dres_obs   = fill(NaN, n_scopes)
+    Dres_Z_sf  = fill(NaN, n_scopes); Dres_p_sf = fill(NaN, n_scopes)
+    Dres_Z_cs  = fill(NaN, n_scopes); Dres_p_cs = fill(NaN, n_scopes)
 
     if !failed
         # Polarized freqs reused for the dp80 mask construction.
@@ -1365,6 +1979,25 @@ function oracle_stats(result::SimResult;
         _dp_global_perm_p = isfinite(_dp_global_obs) && isfinite(_μ_dp) ?
             (1 + count(x -> isfinite(x) && abs(x - _μ_dp) >= _adev_dp,
                           _dp_global_null)) / (n_perm + 1) : NaN
+
+        # ─── Global MAF-binned demeaned Dp (computed ONCE, broadcast) ───
+        _dp_mb = _compute_dp_mafbin_global(α, p_pool, raw_signs; bin_width=0.05)
+        _mb_obs   = _dp_mb.Dp_obs
+        _mb_null  = _dp_mb.Dp_null
+        _mb_μ     = isfinite(_mb_obs) ? mean(filter(isfinite, _mb_null)) : NaN
+        _mb_σ     = isfinite(_mb_obs) ? std(filter(isfinite, _mb_null); corrected=true) : NaN
+        _mb_Z     = (isfinite(_mb_obs) && _mb_σ > 1e-30) ?
+                        (_mb_obs - _mb_μ) / _mb_σ : NaN
+        _mb_adev  = isfinite(_mb_obs) && isfinite(_mb_μ) ? abs(_mb_obs - _mb_μ) : NaN
+        _mb_pp    = (isfinite(_mb_obs) && isfinite(_mb_μ)) ?
+            (1 + count(x -> isfinite(x) && abs(x - _mb_μ) >= _mb_adev,
+                          _mb_null)) / (n_perm + 1) : NaN
+        for s in 1:n_scopes
+            Dp_mb_obs[s] = _mb_obs
+            Dp_mb_Z[s]   = _mb_Z
+            Dp_mb_p[s]   = _mb_pp
+        end
+
         for s in 1:n_scopes
             is_rho_scope[s] || continue
             r = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s])
@@ -1377,6 +2010,26 @@ function oracle_stats(result::SimResult;
             Cap_obs[s] = cap.rho;     Cap_nm[s] = cap.null_mean
             Cap_nsd[s] = cap.null_sd; Cap_Z[s]  = cap.Z
             Cap_p[s]   = cap.perm_p
+
+            # d_cor = cor(|α|, p+) with polarization-flip null.
+            dc = _compute_d_cor_one(α, p_pool, raw_signs, masks[s])
+            Dcor_obs[s] = dc.cor; Dcor_Z[s] = dc.Z; Dcor_p[s] = dc.perm_p
+
+            # dc20 — delta-cross at cutoff=20%.
+            dc20 = _delta_cross_one(R_meta, α, p_pool, raw_signs, masks[s], 20)
+            Dc20_nL[s] = dc20.nL; Dc20_nH[s] = dc20.nH
+            Dc20_delta[s] = dc20.delta; Dc20_Z[s] = dc20.Z; Dc20_p[s] = dc20.perm_p
+
+            # d_match — matched +/- pairwise contrast.
+            dm = _compute_d_match_one(α, p_pool, raw_signs, masks[s])
+            Dmat_n[s] = dm.n_pairs; Dmat_obs[s] = dm.D_obs
+            Dmat_Z[s] = dm.Z; Dmat_p[s] = dm.perm_p
+
+            # d_res — residualized Dp via |α|-decile classes.
+            dres = _compute_d_res_one(α, p_pool, raw_signs, masks[s])
+            Dres_obs[s] = dres.D_obs
+            Dres_Z_sf[s] = dres.Z_sf; Dres_p_sf[s] = dres.p_sf
+            Dres_Z_cs[s] = dres.Z_cs; Dres_p_cs[s] = dres.p_cs
 
             rq05 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.05)
             Rq05_obs[s] = rq05.rho;     Rq05_nm[s] = rq05.null_mean
@@ -1484,6 +2137,40 @@ function oracle_stats(result::SimResult;
                                             :directional_pos : :directional_neg
                     end
 
+                    # ─── Sign-blind magnitude stage-2 (parallel to 2D Mahal) ───
+                    # M² = z_rho² + z_cor² + Z_Dp²  vs empirical sign-flip null.
+                    # Reuses raw rho_axis + cap.rho + Dp_global from this scope.
+                    if isfinite(_dp_global_obs)
+                        m_mag = _magnitude_stage2_test(
+                            rho_axis_obs, rho_axis_null,
+                            cap.rho, cap.null,
+                            _dp_global_obs, _dp_global_null;
+                            robust=cfg.oracle_mag_robust)
+                        Mmag_M2[s] = m_mag.M2
+                        Mmag_p[s]  = m_mag.perm_p
+                        if isnan(m3d.perm_p) || m3d.perm_p >= α_thr
+                            sel_class_mag[s] = :neutral
+                        elseif isnan(m_mag.perm_p) || m_mag.perm_p >= α_thr
+                            sel_class_mag[s] = :stabilizing
+                        else
+                            sel_class_mag[s] = :directional
+                        end
+                    end
+
+                    # ─── Per-scope demeaned Dp: Σ(α-ā)(p-p̄) over scope ─────
+                    dp_dm = _compute_dp_demean_one(α, p_pool, raw_signs, masks[s])
+                    if isfinite(dp_dm.Dp_obs)
+                        Dp_dm_obs[s] = dp_dm.Dp_obs
+                        μ_dm = mean(filter(isfinite, dp_dm.Dp_null))
+                        σ_dm = std(filter(isfinite, dp_dm.Dp_null); corrected=true)
+                        if σ_dm > 1e-30
+                            Dp_dm_Z[s] = (dp_dm.Dp_obs - μ_dm) / σ_dm
+                            adev = abs(dp_dm.Dp_obs - μ_dm)
+                            Dp_dm_p[s] = (1 + count(x -> isfinite(x) && abs(x - μ_dm) >= adev,
+                                                       dp_dm.Dp_null)) / (n_perm + 1)
+                        end
+                    end
+
                     # ─── Parallel classifier on (z_B, Z_Dp_GLOBAL, Z_Dld_s) ───
                     # Dp is computed ONCE globally (above the per-scope loop)
                     # and reused here. Dld is scope-specific.
@@ -1554,7 +2241,14 @@ function oracle_stats(result::SimResult;
                          M3D_v2_st, M3D_v2_p,
                          M2D_v2_p,
                          D1D_v2_v, D1D_v2_p,
-                         sel_class_v2)
+                         sel_class_v2,
+                         Mmag_M2, Mmag_p, sel_class_mag,
+                         Dp_dm_obs, Dp_dm_Z, Dp_dm_p,
+                         Dp_mb_obs, Dp_mb_Z, Dp_mb_p,
+                         Dcor_obs, Dcor_Z, Dcor_p,
+                         Dc20_nL, Dc20_nH, Dc20_delta, Dc20_Z, Dc20_p,
+                         Dmat_n, Dmat_obs, Dmat_Z, Dmat_p,
+                         Dres_obs, Dres_Z_sf, Dres_p_sf, Dres_Z_cs, Dres_p_cs)
 end
 
 """
@@ -1684,6 +2378,32 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "dir_1d_v2_v_",       name, "\t", oracle.dir_1d_v2_v[s])
             println(io, "dir_1d_v2_perm_p_",  name, "\t", oracle.dir_1d_v2_perm_p[s])
             println(io, "selection_class_v2_",name, "\t", String(oracle.selection_class_v2[s]))
+            println(io, "mag_stage2_M2_",     name, "\t", oracle.mag_stage2_M2[s])
+            println(io, "mag_stage2_perm_p_", name, "\t", oracle.mag_stage2_perm_p[s])
+            println(io, "selection_class_mag_",name,"\t", String(oracle.selection_class_mag[s]))
+            println(io, "Dp_demean_obs_",     name, "\t", oracle.Dp_demean_obs[s])
+            println(io, "Dp_demean_Z_",       name, "\t", oracle.Dp_demean_Z[s])
+            println(io, "Dp_demean_perm_p_",  name, "\t", oracle.Dp_demean_perm_p[s])
+            println(io, "Dp_mafbin_obs_",     name, "\t", oracle.Dp_mafbin_obs[s])
+            println(io, "Dp_mafbin_Z_",       name, "\t", oracle.Dp_mafbin_Z[s])
+            println(io, "Dp_mafbin_perm_p_",  name, "\t", oracle.Dp_mafbin_perm_p[s])
+            println(io, "d_cor_obs_",         name, "\t", oracle.d_cor_obs[s])
+            println(io, "d_cor_Z_",           name, "\t", oracle.d_cor_Z[s])
+            println(io, "d_cor_perm_p_",      name, "\t", oracle.d_cor_perm_p[s])
+            println(io, "dc20_nL_",           name, "\t", oracle.dc20_nL[s])
+            println(io, "dc20_nH_",           name, "\t", oracle.dc20_nH[s])
+            println(io, "dc20_delta_",        name, "\t", oracle.dc20_delta[s])
+            println(io, "dc20_Z_",            name, "\t", oracle.dc20_Z[s])
+            println(io, "dc20_perm_p_",       name, "\t", oracle.dc20_perm_p[s])
+            println(io, "d_match_n_pairs_",   name, "\t", oracle.d_match_n_pairs[s])
+            println(io, "d_match_obs_",       name, "\t", oracle.d_match_obs[s])
+            println(io, "d_match_Z_",         name, "\t", oracle.d_match_Z[s])
+            println(io, "d_match_perm_p_",    name, "\t", oracle.d_match_perm_p[s])
+            println(io, "d_res_obs_",         name, "\t", oracle.d_res_obs[s])
+            println(io, "d_res_Z_sf_",        name, "\t", oracle.d_res_Z_sf[s])
+            println(io, "d_res_perm_p_sf_",   name, "\t", oracle.d_res_perm_p_sf[s])
+            println(io, "d_res_Z_cs_",        name, "\t", oracle.d_res_Z_cs[s])
+            println(io, "d_res_perm_p_cs_",   name, "\t", oracle.d_res_perm_p_cs[s])
         end
     end
     return path
