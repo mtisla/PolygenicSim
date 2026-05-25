@@ -1863,7 +1863,15 @@ function oracle_stats(result::SimResult;
             nv(), nv(), nv(),                           # dc20 delta/Z/p (3)
             zeros(Int, n_scopes),                       # d_match n_pairs (1)
             nv(), nv(), nv(),                           # d_match obs/Z/p (3)
-            nv(), nv(), nv(), nv(), nv())               # d_res obs/Z_sf/p_sf/Z_cs/p_cs (5)
+            nv(), nv(), nv(), nv(), nv(),               # d_res obs/Z_sf/p_sf/Z_cs/p_cs (5)
+            # New: 11 fields for dp80 Mahalanobis set
+            nv(), nv(), nv(), nv(), nv(), nv(),         # m3d_dp80: stat/p/rr/zb/zr/zd
+            nv(), nv(), fill(:neutral, n_scopes),       # m2d_dp80: stat/p + sel_class
+            nv(), nv(),                                 # d1d_dp80: v/p
+            # New: 11 fields for q25_dp80 Mahalanobis set
+            nv(), nv(), nv(), nv(), nv(), nv(),         # m3d_q25d80: stat/p/rr/zb/zr/zd
+            nv(), nv(), fill(:neutral, n_scopes),       # m2d_q25d80: stat/p + sel_class
+            nv(), nv())                                 # d1d_q25d80: v/p
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -1935,6 +1943,19 @@ function oracle_stats(result::SimResult;
     D1D_v     = fill(NaN, n_scopes); D1D_p     = fill(NaN, n_scopes)
     # ─── Alternative directional stats Dp = Σ α·p and Dld = Σ B·p ───
     dir_ap_obs_v = fill(NaN, n_scopes); Z_dir_ap_v = fill(NaN, n_scopes); dir_ap_p_v = fill(NaN, n_scopes)
+    # Buffers for the two new Mahalanobis test sets (dp80, q25_dp80).
+    M3D_dp80_st = fill(NaN, n_scopes); M3D_dp80_p = fill(NaN, n_scopes)
+    M3D_dp80_rr = fill(NaN, n_scopes)
+    M3D_dp80_zb = fill(NaN, n_scopes); M3D_dp80_zr = fill(NaN, n_scopes); M3D_dp80_zd = fill(NaN, n_scopes)
+    M2D_dp80_st = fill(NaN, n_scopes); M2D_dp80_p = fill(NaN, n_scopes)
+    D1D_dp80_v  = fill(NaN, n_scopes); D1D_dp80_p = fill(NaN, n_scopes)
+    sel_class_dp80 = fill(:neutral, n_scopes)
+    M3D_q25d80_st = fill(NaN, n_scopes); M3D_q25d80_p = fill(NaN, n_scopes)
+    M3D_q25d80_rr = fill(NaN, n_scopes)
+    M3D_q25d80_zb = fill(NaN, n_scopes); M3D_q25d80_zr = fill(NaN, n_scopes); M3D_q25d80_zd = fill(NaN, n_scopes)
+    M2D_q25d80_st = fill(NaN, n_scopes); M2D_q25d80_p = fill(NaN, n_scopes)
+    D1D_q25d80_v  = fill(NaN, n_scopes); D1D_q25d80_p = fill(NaN, n_scopes)
+    sel_class_q25d80 = fill(:neutral, n_scopes)
     Dld_obs_v  = fill(NaN, n_scopes); Dld_Z_v  = fill(NaN, n_scopes); Dld_p_v  = fill(NaN, n_scopes)
     M3D_v2_st  = fill(NaN, n_scopes); M3D_v2_p = fill(NaN, n_scopes)
     M2D_v2_p   = fill(NaN, n_scopes)
@@ -2082,6 +2103,64 @@ function oracle_stats(result::SimResult;
                         Z_dir_ap_v[s]   = (_dir_ap_obs - _μ_dap) / _σ_dap
                         dir_ap_p_v[s]   = _dir_ap_perm_p
                     end
+
+                    # ─── Two additional Mahalanobis test sets ───────────
+                    # Build dp80 mask once per scope (intersect with pair |Δp_pol|).
+                    dp80_mask_local = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
+                    if dp80_mask_local !== nothing
+                        # rho_pearson on dp80-filtered mask, rawp variant.
+                        r_dp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs,
+                                                    dp80_mask_local;
+                                                    use_logit=false, demean=false)
+                        m3d_dp80 = _left_plane_3d_test(B[within_idx], B_null_within,
+                                                         r_dp80.rho, r_dp80.null,
+                                                         _dir_ap_obs, _dir_ap_null)
+                        M3D_dp80_st[s] = m3d_dp80.stat; M3D_dp80_p[s] = m3d_dp80.perm_p
+                        M3D_dp80_rr[s] = m3d_dp80.r_radial
+                        M3D_dp80_zb[s] = m3d_dp80.z_b
+                        M3D_dp80_zr[s] = m3d_dp80.z_rho
+                        M3D_dp80_zd[s] = m3d_dp80.z_cor   # stored as z_dir_ap
+                        m2d_dp80 = _2d_dir_test(r_dp80.rho, r_dp80.null,
+                                                  _dir_ap_obs, _dir_ap_null)
+                        M2D_dp80_st[s] = m2d_dp80.D2; M2D_dp80_p[s] = m2d_dp80.perm_p
+                        d1d_dp80 = _1d_dir_test(r_dp80.rho, r_dp80.null,
+                                                  _dir_ap_obs, _dir_ap_null)
+                        D1D_dp80_v[s] = d1d_dp80.v; D1D_dp80_p[s] = d1d_dp80.perm_p
+                        sign_dp80 = isfinite(d1d_dp80.v) ? d1d_dp80.v : m2d_dp80.v_dir_signed
+                        if isnan(m3d_dp80.perm_p) || m3d_dp80.perm_p >= α_thr
+                            sel_class_dp80[s] = :neutral
+                        elseif isnan(m2d_dp80.perm_p) || m2d_dp80.perm_p >= α_thr
+                            sel_class_dp80[s] = :stabilizing
+                        else
+                            sel_class_dp80[s] = sign_dp80 >= 0 ? :directional_pos : :directional_neg
+                        end
+
+                        # rho_pearson_q25 on dp80-filtered mask.
+                        r_q25d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs,
+                                                          dp80_mask_local; q=0.25)
+                        m3d_q25d80 = _left_plane_3d_test(B[within_idx], B_null_within,
+                                                           r_q25d80.rho, r_q25d80.null,
+                                                           _dir_ap_obs, _dir_ap_null)
+                        M3D_q25d80_st[s] = m3d_q25d80.stat; M3D_q25d80_p[s] = m3d_q25d80.perm_p
+                        M3D_q25d80_rr[s] = m3d_q25d80.r_radial
+                        M3D_q25d80_zb[s] = m3d_q25d80.z_b
+                        M3D_q25d80_zr[s] = m3d_q25d80.z_rho
+                        M3D_q25d80_zd[s] = m3d_q25d80.z_cor
+                        m2d_q25d80 = _2d_dir_test(r_q25d80.rho, r_q25d80.null,
+                                                    _dir_ap_obs, _dir_ap_null)
+                        M2D_q25d80_st[s] = m2d_q25d80.D2; M2D_q25d80_p[s] = m2d_q25d80.perm_p
+                        d1d_q25d80 = _1d_dir_test(r_q25d80.rho, r_q25d80.null,
+                                                    _dir_ap_obs, _dir_ap_null)
+                        D1D_q25d80_v[s] = d1d_q25d80.v; D1D_q25d80_p[s] = d1d_q25d80.perm_p
+                        sign_q25d80 = isfinite(d1d_q25d80.v) ? d1d_q25d80.v : m2d_q25d80.v_dir_signed
+                        if isnan(m3d_q25d80.perm_p) || m3d_q25d80.perm_p >= α_thr
+                            sel_class_q25d80[s] = :neutral
+                        elseif isnan(m2d_q25d80.perm_p) || m2d_q25d80.perm_p >= α_thr
+                            sel_class_q25d80[s] = :stabilizing
+                        else
+                            sel_class_q25d80[s] = sign_q25d80 >= 0 ? :directional_pos : :directional_neg
+                        end
+                    end
                 end
             end
         end
@@ -2103,6 +2182,14 @@ function oracle_stats(result::SimResult;
                          M2D_stat, M2D_p, sel_class,
                          D1D_v, D1D_p,
                          dir_ap_obs_v, Z_dir_ap_v, dir_ap_p_v,
+                         M3D_dp80_st, M3D_dp80_p, M3D_dp80_rr,
+                         M3D_dp80_zb, M3D_dp80_zr, M3D_dp80_zd,
+                         M2D_dp80_st, M2D_dp80_p, sel_class_dp80,
+                         D1D_dp80_v, D1D_dp80_p,
+                         M3D_q25d80_st, M3D_q25d80_p, M3D_q25d80_rr,
+                         M3D_q25d80_zb, M3D_q25d80_zr, M3D_q25d80_zd,
+                         M2D_q25d80_st, M2D_q25d80_p, sel_class_q25d80,
+                         D1D_q25d80_v, D1D_q25d80_p,
                          Dld_obs_v, Dld_Z_v, Dld_p_v,
                          M3D_v2_st, M3D_v2_p,
                          M2D_v2_p,
@@ -2235,6 +2322,30 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "dir_ap_obs_",        name, "\t", oracle.dir_ap_obs[s])
             println(io, "Z_dir_ap_",          name, "\t", oracle.Z_dir_ap[s])
             println(io, "dir_ap_perm_p_",     name, "\t", oracle.dir_ap_perm_p[s])
+            # New: dp80 Mahalanobis set
+            println(io, "mahal_3d_dp80_stat_",   name, "\t", oracle.mahal_3d_dp80_stat[s])
+            println(io, "mahal_3d_dp80_perm_p_", name, "\t", oracle.mahal_3d_dp80_perm_p[s])
+            println(io, "mahal_3d_dp80_r_radial_",name,"\t", oracle.mahal_3d_dp80_r_radial[s])
+            println(io, "mahal_3d_dp80_z_b_",    name, "\t", oracle.mahal_3d_dp80_z_b[s])
+            println(io, "mahal_3d_dp80_z_rho_",  name, "\t", oracle.mahal_3d_dp80_z_rho[s])
+            println(io, "mahal_3d_dp80_z_dir_ap_",name,"\t", oracle.mahal_3d_dp80_z_dir_ap[s])
+            println(io, "mahal_2d_dp80_stat_",   name, "\t", oracle.mahal_2d_dp80_stat[s])
+            println(io, "mahal_2d_dp80_perm_p_", name, "\t", oracle.mahal_2d_dp80_perm_p[s])
+            println(io, "selection_class_dp80_", name, "\t", String(oracle.selection_class_dp80[s]))
+            println(io, "dir_1d_dp80_v_",        name, "\t", oracle.dir_1d_dp80_v[s])
+            println(io, "dir_1d_dp80_perm_p_",   name, "\t", oracle.dir_1d_dp80_perm_p[s])
+            # New: q25_dp80 Mahalanobis set
+            println(io, "mahal_3d_q25d80_stat_",   name, "\t", oracle.mahal_3d_q25d80_stat[s])
+            println(io, "mahal_3d_q25d80_perm_p_", name, "\t", oracle.mahal_3d_q25d80_perm_p[s])
+            println(io, "mahal_3d_q25d80_r_radial_",name,"\t", oracle.mahal_3d_q25d80_r_radial[s])
+            println(io, "mahal_3d_q25d80_z_b_",    name, "\t", oracle.mahal_3d_q25d80_z_b[s])
+            println(io, "mahal_3d_q25d80_z_rho_",  name, "\t", oracle.mahal_3d_q25d80_z_rho[s])
+            println(io, "mahal_3d_q25d80_z_dir_ap_",name,"\t", oracle.mahal_3d_q25d80_z_dir_ap[s])
+            println(io, "mahal_2d_q25d80_stat_",   name, "\t", oracle.mahal_2d_q25d80_stat[s])
+            println(io, "mahal_2d_q25d80_perm_p_", name, "\t", oracle.mahal_2d_q25d80_perm_p[s])
+            println(io, "selection_class_q25d80_", name, "\t", String(oracle.selection_class_q25d80[s]))
+            println(io, "dir_1d_q25d80_v_",        name, "\t", oracle.dir_1d_q25d80_v[s])
+            println(io, "dir_1d_q25d80_perm_p_",   name, "\t", oracle.dir_1d_q25d80_perm_p[s])
             println(io, "Dld_obs_",           name, "\t", oracle.Dld_obs[s])
             println(io, "Dld_Z_",             name, "\t", oracle.Dld_Z[s])
             println(io, "Dld_perm_p_",        name, "\t", oracle.Dld_perm_p[s])

@@ -152,6 +152,32 @@ struct OracleResult
     dir_ap_obs::Vector{Float64}
     Z_dir_ap::Vector{Float64}
     dir_ap_perm_p::Vector{Float64}
+    # Two additional Mahalanobis test sets using alternative rho axes:
+    #   _dp80    — rho_pearson on dp80-filtered mask (top 80% of pairs by |Δp_pol|)
+    #   _q25d80  — rho_pearson_q25 on dp80-filtered mask
+    # Each set has 11 fields (3D + 2D + 1D + class) mirroring the vanilla.
+    mahal_3d_dp80_stat::Vector{Float64}
+    mahal_3d_dp80_perm_p::Vector{Float64}
+    mahal_3d_dp80_r_radial::Vector{Float64}
+    mahal_3d_dp80_z_b::Vector{Float64}
+    mahal_3d_dp80_z_rho::Vector{Float64}
+    mahal_3d_dp80_z_dir_ap::Vector{Float64}
+    mahal_2d_dp80_stat::Vector{Float64}
+    mahal_2d_dp80_perm_p::Vector{Float64}
+    selection_class_dp80::Vector{Symbol}
+    dir_1d_dp80_v::Vector{Float64}
+    dir_1d_dp80_perm_p::Vector{Float64}
+    mahal_3d_q25d80_stat::Vector{Float64}
+    mahal_3d_q25d80_perm_p::Vector{Float64}
+    mahal_3d_q25d80_r_radial::Vector{Float64}
+    mahal_3d_q25d80_z_b::Vector{Float64}
+    mahal_3d_q25d80_z_rho::Vector{Float64}
+    mahal_3d_q25d80_z_dir_ap::Vector{Float64}
+    mahal_2d_q25d80_stat::Vector{Float64}
+    mahal_2d_q25d80_perm_p::Vector{Float64}
+    selection_class_q25d80::Vector{Symbol}
+    dir_1d_q25d80_v::Vector{Float64}
+    dir_1d_q25d80_perm_p::Vector{Float64}
     Dld_obs::Vector{Float64}
     Dld_Z::Vector{Float64}
     Dld_perm_p::Vector{Float64}
