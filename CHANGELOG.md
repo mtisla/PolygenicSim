@@ -9,6 +9,47 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-05-26
+
+Float-typed (t½-multiple) checkpoints now work with `ngen_eq=0` —
+purely additive (previously raised `ArgumentError`).
+
+### Added — `src/simulate.jl`
+
+- When `ngen_eq == 0` AND `cfg.checkpoints` is `Vector{<:AbstractFloat}`,
+  resolve checkpoints upfront using `t_half_gen0 = log(2)·(V_P_0 + V_S)
+  / (h² · V_P_0)` computed from the gen-0 V_P (already available from
+  recap/init state — same V_P_0 used elsewhere in setup). Directional
+  selection then runs from gen 0 with the checkpoints already known.
+- When `cfg.ngen_dir = 0`, `ngen_dir` auto-infers from
+  `maximum(checkpoint_gens)`, matching the end-of-Phase-A behavior.
+- Checkpoint labels match the Phase A path (`"$(c)_thalf"`), so output
+  TSV/snapshot filenames are consistent between `ngen_eq=0` and
+  `ngen_eq>0` runs.
+
+### Changed — `src/config.jl`
+
+- Removed the `ngen_eq > 0` requirement for float checkpoints. The
+  validator now only requires `selection_mode=:directional` and
+  positive checkpoint values.
+
+### Rationale
+
+The recap_first init already provides gen-0 V_P from coalescent-derived
+allele frequencies and α. There's no need to run a settling phase just
+to obtain V_P — it's available immediately. Previously the user had to
+either (a) set `ngen_eq=1` as a token Phase A, or (b) compute t_half
+analytically and supply integer checkpoints. Both worked but were
+confusing. Now `ngen_eq=0` + `checkpoints=[1.0, 2.0]` means exactly
+what it reads: "directional from gen 0, oracle stats at 1·t½ and 2·t½".
+
+### Validated
+
+- Smoke at VS=30, ngen_eq=0, checkpoints=[1.0, 2.0] → resolves to gens
+  [43, 86], total_gens=86 auto-inferred, both checkpoints labeled
+  `1.0_thalf` / `2.0_thalf` in the oracle records.
+- Test suite: 953/953 pass.
+
 ## [0.19.0] — 2026-05-26
 
 Default `oracle_mahal_rho_variant` flipped from `:rho_pearson_dp80` to

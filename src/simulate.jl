@@ -158,14 +158,43 @@ function simulate(cfg::Config)
     end
 
     # ---- checkpoint resolution ------------------------------------------
-    # Int checkpoints resolve to absolute gens upfront (existing behavior).
-    # Float checkpoints (t½ multiples in Phase B) defer resolution to the end
-    # of Phase A, where we have realized V_A/V_P to compute t_half_settled.
+    # Int checkpoints: resolve to absolute gens upfront.
+    # Float checkpoints (t½ multiples):
+    #   - ngen_eq == 0: resolve from gen-0 V_P (recap/init state, available
+    #     now). Directional starts immediately from gen-0 diversity.
+    #   - ngen_eq > 0: defer resolution to end of Phase A where we have
+    #     realized V_P_settled (different t_half from gen-0 in general).
     float_checkpoints_pending = cfg.checkpoints !== nothing &&
                                  eltype(cfg.checkpoints) <: AbstractFloat
-    checkpoint_gens = float_checkpoints_pending ?
-                        Int[] :
-                        _resolve_checkpoints(cfg, total_gens, V_A0, V_P0, Vs)
+    if float_checkpoints_pending && ngen_eq_eff == 0
+        # Compute t_half at gen 0 from V_P_0 (already in scope).
+        if V_P0 > 0
+            t_half_gen0 = log(2.0) * (V_P0 + Vs) / (cfg.h2 * V_P0)
+            checkpoint_gens = Int[]
+            for c in cfg.checkpoints
+                push!(checkpoint_gens, max(1, round(Int, c * t_half_gen0)))
+            end
+            sort!(unique!(checkpoint_gens))
+            # Auto-infer ngen_dir from the largest checkpoint when caller
+            # left it at 0.
+            if cfg.ngen_dir == 0
+                ngen_dir_eff = maximum(checkpoint_gens)
+                total_gens   = ngen_dir_eff
+            else
+                # Caller specified ngen_dir; clamp checkpoints to it.
+                checkpoint_gens = Int[clamp(g, 1, total_gens) for g in checkpoint_gens]
+                sort!(unique!(checkpoint_gens))
+            end
+            float_checkpoints_pending = false   # resolved upfront
+        else
+            @warn "V_P_0 <= 0; cannot compute gen-0 t_half — float checkpoints unresolved"
+            checkpoint_gens = Int[]
+        end
+    else
+        checkpoint_gens = float_checkpoints_pending ?
+                            Int[] :
+                            _resolve_checkpoints(cfg, total_gens, V_A0, V_P0, Vs)
+    end
     checkpoint_set = Set(checkpoint_gens)
     # checkpoint_labels: gen -> filename-suffix label, e.g. "gen500" or "0.5_thalf"
     checkpoint_labels = Dict{Int,String}()
@@ -176,6 +205,18 @@ function simulate(cfg::Config)
     # emission at these gens is gated on `cfg.save_at_checkpoints`. Int
     # checkpoints (legacy) always emit a snapshot.
     float_checkpoint_gens = Set{Int}()
+    # If float checkpoints were resolved upfront (ngen_eq=0 path above), label
+    # them as `c_thalf` for the TSV / save_settled phase name and mark them as
+    # float-checkpoint gens for the snapshot-emission gate.
+    if cfg.checkpoints !== nothing && eltype(cfg.checkpoints) <: AbstractFloat &&
+         ngen_eq_eff == 0 && !isempty(checkpoint_gens)
+        for (i, c) in enumerate(cfg.checkpoints)
+            g_abs = max(1, round(Int, c * (log(2.0) * (V_P0 + Vs) / (cfg.h2 * V_P0))))
+            g_abs = max(1, min(g_abs, total_gens))
+            checkpoint_labels[g_abs] = "$(c)_thalf"
+            push!(float_checkpoint_gens, g_abs)
+        end
+    end
     paths = String[]
 
     # ---- summary trajectory buffer --------------------------------------

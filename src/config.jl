@@ -761,13 +761,12 @@ function validate(cfg::Config)
     if cfg.ngen > 0 && (cfg.ngen_eq > 0 || cfg.ngen_dir > 0)
         throw(ArgumentError("set either `ngen` (single-knob mode) OR `ngen_eq`/`ngen_dir` (two-phase mode), not both"))
     end
-    # Float (t½-multiple) checkpoints require directional mode (a settling phase
-    # to anchor t_half_settled to). They may also infer `ngen_dir` if it is 0.
+    # Float (t½-multiple) checkpoints require directional mode. t_half is
+    # computed from realized V_P at gen-0 (when ngen_eq=0) or end of Phase A
+    # (when ngen_eq>0). May also infer `ngen_dir` if left at 0.
     if cfg.checkpoints !== nothing && eltype(cfg.checkpoints) <: AbstractFloat
         cfg.selection_mode === :directional ||
             throw(ArgumentError("Float-typed checkpoints (t½ multiples) require selection_mode=:directional; got $(cfg.selection_mode)"))
-        cfg.ngen_eq > 0 ||
-            throw(ArgumentError("Float-typed checkpoints (t½ multiples) require ngen_eq > 0 (settling phase needed to compute t_half_settled)"))
         all(c -> c > 0, cfg.checkpoints) ||
             throw(ArgumentError("Float-typed checkpoints must all be > 0; got $(cfg.checkpoints)"))
     end
