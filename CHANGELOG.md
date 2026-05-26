@@ -9,6 +9,66 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-05-26
+
+Calibration helpers to keep V_A(0) fixed across architecture sweeps —
+purely additive (default behavior unchanged).
+
+### Background
+
+Under `:infinite_sites + :from_recap`, each of `cfg.n_qtl` QTL slots
+gets an independent α and a Watterson-distributed AF from coalescent
+placement. So V_A(0) ≈ 2·n_qtl·E[p(1-p)]·E[α²] is **linear in n_qtl** at
+fixed `effect_scale` — varying n_qtl confounds polygenicity with V_A(0).
+Empirically: with σ=0.03, V_A_0 ≈ 0.65 at n_qtl=4000 vs ≈ 1.72 at
+n_qtl=10000 (≈ 2.65× ratio).
+
+### Added — `src/calibration.jl` (new)
+
+Three exported helpers — none are called by `simulate`, so default
+behavior is unchanged. Users opt in by computing `effect_scale` from
+these and passing it to `Config(...)`.
+
+- `effect_scale_for_polygenicity(n_qtl; ref_n_qtl, ref_effect_scale)` —
+  exact 1/√n_qtl scaling from a calibrated reference. Use this for
+  polygenicity sweeps where you want matched V_A(0).
+- `effect_scale_for_va_0(cfg, target_va_0)` — closed-form inversion of
+  the analytic V_A(0) prediction. Subject to ~10–20% analytic/realized
+  gap; prefer `effect_scale_for_polygenicity` with a pilot anchor.
+- `expected_va_0(cfg)` — analytic V_A(0) prediction, useful for sanity
+  checks (covers `:from_recap` / `:ism_watterson` / `:beta_mutation_drift`
+  / `:uniform` / `:fixed_p` / `:beta_asymmetric`; returns NaN otherwise).
+
+Distribution mapping (E[α²] = k·effect_scale²):
+- `:signed_exponential` — k=2
+- `:normal` — k=1
+- `:fixed` — k=1
+
+### Tests — `test/runtests.jl`
+
+13 new assertions covering the 1/√n_qtl scaling invariant
+(σ²·n_qtl constant), expected_va_0 ↔ effect_scale_for_va_0
+inversion, the signed_exp vs normal 2× ratio in E[α²], and arg
+validation. 952 → 965 tests.
+
+### Recommended usage
+
+```julia
+# Polygenicity sweep at matched V_A(0):
+σ_ref = 0.03                  # what you used at n_qtl_ref=4000
+for n_qtl in (1000, 4000, 10_000)
+    σ = effect_scale_for_polygenicity(n_qtl;
+            ref_n_qtl=4000, ref_effect_scale=σ_ref)
+    cfg = Config(; n_qtl, effect_scale=σ, ...)
+    simulate(cfg)
+end
+```
+
+To keep the old "fixed effect_scale, V_A(0) scales with n_qtl"
+behavior (e.g., for power studies that vary V_A(0) as the
+experimental knob), just pass `effect_scale` directly — none of the
+new helpers run unless you call them.
+
 ## [0.20.0] — 2026-05-26
 
 Breaking cleanup of the rho axis. The main Mahalanobis 1D test reverts to

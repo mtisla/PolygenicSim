@@ -2893,4 +2893,66 @@ end
     @test vt_a.alpha == vt_b.alpha
 end
 
+@testset "calibration — effect_scale helpers" begin
+    # 1. effect_scale_for_polygenicity: σ ∝ 1/√n_qtl scaling (exact)
+    σ_4k = 0.03
+    σ_10k = PS.effect_scale_for_polygenicity(10_000;
+                ref_n_qtl=4000, ref_effect_scale=σ_4k)
+    @test σ_10k ≈ σ_4k * sqrt(4000 / 10_000)
+    # ref returns itself
+    @test PS.effect_scale_for_polygenicity(4000;
+                ref_n_qtl=4000, ref_effect_scale=σ_4k) ≈ σ_4k
+    # Cross-check: σ²·n_qtl is constant (the V_A_0 invariant)
+    σ_1k = PS.effect_scale_for_polygenicity(1000;
+                ref_n_qtl=4000, ref_effect_scale=σ_4k)
+    @test σ_1k^2 * 1000 ≈ σ_4k^2 * 4000
+    @test σ_10k^2 * 10_000 ≈ σ_4k^2 * 4000
+    # Argument validation
+    @test_throws ArgumentError PS.effect_scale_for_polygenicity(0;
+                ref_n_qtl=4000, ref_effect_scale=σ_4k)
+    @test_throws ArgumentError PS.effect_scale_for_polygenicity(10_000;
+                ref_n_qtl=0, ref_effect_scale=σ_4k)
+    @test_throws ArgumentError PS.effect_scale_for_polygenicity(10_000;
+                ref_n_qtl=4000, ref_effect_scale=-0.01)
+
+    # 2. expected_va_0 + effect_scale_for_va_0 inversion
+    cfg = PS.Config(; N=5000, Ne=5000, n_qtl=4000, n_neutral=0, Uqtl=0.02,
+        mutation_model=:infinite_sites, recap_first=true,
+        init_distribution=:from_recap,
+        effect_distribution=:signed_exponential, effect_scale=0.03,
+        h2=0.5, vs_over_vp0=170.0, selection_mode=:neutral,
+        ngen_eq=10, seed=UInt64(1), output_formats=Symbol[], n_int=0)
+    va_pred = PS.expected_va_0(cfg)
+    @test va_pred > 0
+    # Inversion: solving for target=va_pred should recover effect_scale=0.03
+    @test PS.effect_scale_for_va_0(cfg, va_pred) ≈ 0.03
+    # Scaling: V_A_0 ∝ effect_scale²
+    cfg2 = PS.Config(; N=5000, Ne=5000, n_qtl=4000, n_neutral=0, Uqtl=0.02,
+        mutation_model=:infinite_sites, recap_first=true,
+        init_distribution=:from_recap,
+        effect_distribution=:signed_exponential, effect_scale=0.06,
+        h2=0.5, vs_over_vp0=170.0, selection_mode=:neutral,
+        ngen_eq=10, seed=UInt64(1), output_formats=Symbol[], n_int=0)
+    @test PS.expected_va_0(cfg2) ≈ 4.0 * va_pred  rtol=1e-12
+
+    # 3. Distribution mapping: signed_exp has 2× the E[α²] of normal/fixed
+    cfg_se = PS.Config(; N=200, Ne=200, n_qtl=100, n_neutral=0, Uqtl=0.01,
+        mutation_model=:infinite_sites, recap_first=true,
+        init_distribution=:from_recap,
+        effect_distribution=:signed_exponential, effect_scale=0.05,
+        selection_mode=:neutral, ngen_eq=5, seed=UInt64(1),
+        output_formats=Symbol[], n_int=0)
+    cfg_n = PS.Config(; N=200, Ne=200, n_qtl=100, n_neutral=0, Uqtl=0.01,
+        mutation_model=:infinite_sites, recap_first=true,
+        init_distribution=:from_recap,
+        effect_distribution=:normal, effect_scale=0.05,
+        selection_mode=:neutral, ngen_eq=5, seed=UInt64(1),
+        output_formats=Symbol[], n_int=0)
+    @test PS.expected_va_0(cfg_se) ≈ 2.0 * PS.expected_va_0(cfg_n)  rtol=1e-12
+
+    # 4. Argument validation for effect_scale_for_va_0
+    @test_throws ArgumentError PS.effect_scale_for_va_0(cfg, -1.0)
+    @test_throws ArgumentError PS.effect_scale_for_va_0(cfg, 0.0)
+end
+
 end # @testset top-level

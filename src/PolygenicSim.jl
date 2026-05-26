@@ -5,6 +5,7 @@ using Distributions
 using StatsBase
 
 include("config.jl")
+include("calibration.jl")
 include("rng.jl")
 include("variants.jl")
 include("population_packed.jl")
