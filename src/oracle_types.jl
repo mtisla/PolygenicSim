@@ -131,6 +131,40 @@ struct OracleResult
     # Pair +α with −α loci on (|α|, MAF) percentile rank; test
     # Σ |α_+|·(p_+ − p_−) against within-pair sign-flip null.
     d_match_n_pairs::Vector{Int}
+    # ─────────────────────────────────────────────────────────────────────
+    # Per-phase response summary (enabled when cfg.oracle_record_response).
+    # Standing polymorphic variation only (loci 0<p<1 + is_qtl + α≠0 at init).
+    # Tracked by (bp, chr) identity so ISM cleanup doesn't break tracking.
+    # Frequencies are POLARIZED by sign(α): p_pol = p if α>0 else 1-p.
+    # Under +sg, p_pol should rise (Δp_pol > 0); under -sg, fall (Δp_pol < 0).
+    # All scalars default NaN / 0 when the flag is off.
+    mean_A::Float64                  # population mean breeding value = 2·Σ p·α (current QTLs)
+    delta_mean_A::Float64            # mean_A − mean_A_init  (0 at init)
+    avg_p_pol::Float64               # mean polarized + freq over standing-alive loci
+    delta_avg_p_pol::Float64         # avg_p_pol − avg_p_pol_init  (0 at init)
+    pct_change_avg_p_pol::Float64    # 100 · delta_avg_p_pol / avg_p_pol_init
+    delta_p_pol_mean_abs::Float64    # mean |Δp_pol| over standing-alive (magnitude)
+    n_standing::Int                  # standing polymorphic QTLs at init
+    n_standing_alive::Int            # still trackable in current vt at this phase
+end
+
+"""
+    ResponseSnapshot
+
+Internal snapshot taken at the init oracle call when
+`oracle_record_response=true`. Stores the standing polymorphic-QTL identities
+(bp, chr) and polarized + allele frequencies. ISM cleanup is tolerated:
+sites lost from the variant table become "uncounted" and contribute to
+`n_standing − n_standing_alive`.
+"""
+struct ResponseSnapshot
+    bp_std::Vector{Int32}            # bp position per standing locus
+    chr_std::Vector{Int32}           # chr index per standing locus
+    init_idx_std::Vector{Int}        # original vt index (fast path on no-cleanup)
+    alpha_sign_std::Vector{Float64}  # sign(α) per standing locus
+    p_pol_init::Vector{Float64}      # polarized + allele freq at init
+    avg_p_pol_init::Float64
+    mean_A_init::Float64
 end
 
 export OracleResult

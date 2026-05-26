@@ -86,6 +86,7 @@ const _CONFIG_CATEGORIES = (
                        :oracle_mahal_rho_axis,
                        :oracle_mahal_rho_variant,
                        :oracle_mahal_B_scope,
+                       :oracle_record_response,
                        :oracle_maf_min,
                        :oracle_signflip_block_kb,
                        :oracle_mag_robust,

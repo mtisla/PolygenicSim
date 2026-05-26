@@ -154,6 +154,170 @@ function _extract_qtl_genotypes(::Type{T}, pop::DensePop, vt::VariantTable;
     return (X, qtl_keep)
 end
 
+# =============================================================================
+# Response-summary helpers (enabled via cfg.oracle_record_response).
+# Snapshot the STANDING POLYMORPHIC QTLs at init (0<p<1 + is_qtl + α≠0).
+# Tracked by (bp, chr) identity so ism_cleanup is tolerated. Frequencies
+# are polarized by sign(α): p_pol = p if α>0 else 1-p. Under +sg, p_pol rises;
+# under -sg, falls. mean(A) = 2·dot(p, α) over current QTL set via BLAS.
+# Vectorized throughout: `findall` builds dense index vectors, `dot` from
+# LinearAlgebra computes the masked sum-product in SIMD/BLAS, broadcasts
+# (`ifelse.`, `.*`, `.-`, `mean(abs.(.))`) handle the per-locus arithmetic.
+# Scalar @inbounds loops only on (a) lazy (bp,chr) Dict build (rare cleanup
+# path) and (b) a vectorized identity-check broadcast.
+# =============================================================================
+
+"""
+    _take_response_snapshot(pop, vt) -> ResponseSnapshot
+
+Snapshot the gen-0 (or init-phase) state. Only POLYMORPHIC (0<p<1) QTLs
+are kept as "standing variation"; fixed/lost sites and non-QTLs are dropped.
+Stores (bp, chr) per locus so later checkpoints can re-find them under
+ISM cleanup. Polarized + allele freqs cached for fast Δ compute.
+
+Vectorized: mean_A_init via `2 · dot(p_q, α_q)`; standing-variation vectors
+built via `findall` + indexed gather; `p_pol_init = ifelse.(sign≥0, p, 1-p)`
+broadcast; `avg_p_pol_init = mean(p_pol_init)`.
+"""
+function _take_response_snapshot(pop, vt)
+    L = length(vt)
+    p_buf = zeros(Float64, L)
+    allele_freqs!(p_buf, pop, vt)
+
+    # Current-QTL mask: is_qtl AND α ≠ 0. BitVector broadcast.
+    qtl_mask = vt.is_qtl .& (vt.alpha .!= 0.0)
+    qtl_idx  = findall(qtl_mask)                   # Vector{Int}
+    α_q      = vt.alpha[qtl_idx]                   # contiguous Float64 vector
+    p_q      = p_buf[qtl_idx]                      # contiguous Float64 vector
+
+    # mean(A) = 2 · Σ p·α via BLAS dot (SIMD).
+    mean_A_init = isempty(qtl_idx) ? 0.0 : 2.0 * dot(p_q, α_q)
+
+    # Standing polymorphic subset: 0 < p < 1 (vectorized mask on p_q).
+    poly_mask_in_q = (p_q .> 0.0) .& (p_q .< 1.0)
+    std_in_q       = findall(poly_mask_in_q)       # indices into qtl_idx
+    init_idx_std   = qtl_idx[std_in_q]             # init-phase vt indices
+
+    bp_std         = Int32.(vt.bp[init_idx_std])
+    chr_std        = Int32.(vt.chr[init_idx_std])
+    α_std          = α_q[std_in_q]
+    p_std          = p_q[std_in_q]
+
+    # sign(α) ∈ {±1.0}. α==0 already filtered out, but be defensive: map 0→+1.
+    alpha_sign_std = sign.(α_std)
+    @inbounds for k in eachindex(alpha_sign_std)
+        if alpha_sign_std[k] == 0.0
+            alpha_sign_std[k] = 1.0
+        end
+    end
+
+    # p_pol = p if α≥0 else 1-p, broadcast.
+    p_pol_init     = ifelse.(alpha_sign_std .>= 0, p_std, 1.0 .- p_std)
+    avg_p_pol_init = isempty(p_pol_init) ? 0.0 : mean(p_pol_init)
+
+    return ResponseSnapshot(bp_std, chr_std, init_idx_std, alpha_sign_std,
+                              p_pol_init, avg_p_pol_init, mean_A_init)
+end
+
+"""
+    _compute_response_summary(pop, vt, snap) -> NamedTuple
+
+Compute 8 per-phase response stats vs the init snapshot.
+
+Vectorized: mean_A via `2 · dot(p, α)` over the current-QTL set; identity-
+matched standing-variation positions detected by a single vectorized
+broadcast `(bp .== snap.bp) .& (chr .== snap.chr) .& is_qtl`; only if any
+mismatch is a (bp, chr) Dict built. `p_pol_now`, `Δp_pol`, magnitude, and
+mean computed via broadcasts on contiguous Float64 vectors.
+
+Standing loci no longer matchable in the variant table (cleaned by ISM)
+are counted as `n_standing − n_standing_alive`.
+"""
+function _compute_response_summary(pop, vt, snap::ResponseSnapshot)
+    L_now = length(vt)
+    p_now_buf = zeros(Float64, L_now)
+    allele_freqs!(p_now_buf, pop, vt)
+
+    # mean_A over current QTLs via vectorized gather + BLAS dot.
+    qtl_mask_now = vt.is_qtl .& (vt.alpha .!= 0.0)
+    qtl_idx_now  = findall(qtl_mask_now)
+    mean_A = isempty(qtl_idx_now) ? 0.0 :
+             2.0 * dot(p_now_buf[qtl_idx_now], vt.alpha[qtl_idx_now])
+
+    n_std = length(snap.bp_std)
+    if n_std == 0
+        return (mean_A=mean_A, delta_mean_A=mean_A - snap.mean_A_init,
+                avg_p_pol=0.0, delta_avg_p_pol=0.0, pct_change_avg_p_pol=NaN,
+                delta_p_pol_mean_abs=0.0, n_standing=0, n_standing_alive=0)
+    end
+
+    # Fast path: gather from init indices (clamped to L_now), check identity
+    # in one vectorized pass. (bp, chr) MUST match AND is_qtl[j] MUST be true.
+    init_idx = snap.init_idx_std
+    clamped  = clamp.(init_idx, 1, L_now)                   # avoid OOB
+    bp_at    = view(vt.bp,  clamped)                        # no-copy view
+    chr_at   = view(vt.chr, clamped)
+    isqtl_at = view(vt.is_qtl, clamped)
+    in_range = init_idx .<= L_now
+    matches  = in_range .& isqtl_at .&
+                 (Int32.(bp_at) .== snap.bp_std) .&
+                 (Int32.(chr_at) .== snap.chr_std)
+
+    # Gather p_now at the (possibly mismatched) init indices.
+    p_now_at = p_now_buf[clamped]                           # length n_std
+
+    # If any mismatches, build (bp, chr) → idx lookup lazily and patch.
+    if !all(matches)
+        miss_inds = findall(.!matches)
+        lookup = Dict{Tuple{Int32,Int32}, Int}()
+        sizehint!(lookup, length(qtl_idx_now))
+        @inbounds for j in qtl_idx_now
+            lookup[(Int32(vt.bp[j]), Int32(vt.chr[j]))] = j
+        end
+        @inbounds for i in miss_inds
+            j_new = get(lookup, (snap.bp_std[i], snap.chr_std[i]), 0)
+            if j_new > 0
+                p_now_at[i] = p_now_buf[j_new]
+                matches[i] = true
+            end
+        end
+    end
+
+    # alive_idx points to positions in the n_std vectors where matches is true.
+    alive_idx = findall(matches)
+    n_alive   = length(alive_idx)
+    if n_alive == 0
+        return (mean_A=mean_A, delta_mean_A=mean_A - snap.mean_A_init,
+                avg_p_pol=0.0, delta_avg_p_pol=-snap.avg_p_pol_init,
+                pct_change_avg_p_pol=NaN, delta_p_pol_mean_abs=0.0,
+                n_standing=n_std, n_standing_alive=0)
+    end
+
+    # Vectorized per-locus arithmetic on alive subset.
+    p_alive       = p_now_at[alive_idx]
+    sign_alive    = snap.alpha_sign_std[alive_idx]
+    p_pol_init_a  = snap.p_pol_init[alive_idx]
+    p_pol_now     = ifelse.(sign_alive .>= 0, p_alive, 1.0 .- p_alive)
+    delta_p_pol   = p_pol_now .- p_pol_init_a
+
+    avg_p_pol            = mean(p_pol_now)
+    delta_avg_p_pol      = avg_p_pol - snap.avg_p_pol_init
+    pct_change_avg_p_pol = abs(snap.avg_p_pol_init) > 1e-12 ?
+                              100.0 * delta_avg_p_pol / snap.avg_p_pol_init : NaN
+    delta_p_pol_mean_abs = mean(abs.(delta_p_pol))
+
+    return (
+        mean_A               = mean_A,
+        delta_mean_A         = mean_A - snap.mean_A_init,
+        avg_p_pol            = avg_p_pol,
+        delta_avg_p_pol      = delta_avg_p_pol,
+        pct_change_avg_p_pol = pct_change_avg_p_pol,
+        delta_p_pol_mean_abs = delta_p_pol_mean_abs,
+        n_standing           = n_std,
+        n_standing_alive     = n_alive,
+    )
+end
+
 # Build BitMatrix masks of size (p × p) for each scope:
 #   - window: |bp_j − bp_k| ≤ W/2 AND same_chr
 #   - within: same_chr (diag → false)
@@ -947,7 +1111,8 @@ function oracle_stats(result::SimResult;
                        memory_path_threshold::Int   = result.cfg.oracle_memory_path_threshold,
                        seed::UInt64                 = result.cfg.seed,
                        precision::Symbol            = result.cfg.oracle_precision,
-                       maf_min::Float64             = result.cfg.oracle_maf_min)
+                       maf_min::Float64             = result.cfg.oracle_maf_min,
+                       response_snapshot::Union{Nothing,ResponseSnapshot} = nothing)
     cfg = result.cfg
     pop = result.pop
     vt  = result.vt
@@ -969,6 +1134,13 @@ function oracle_stats(result::SimResult;
     is_B_scope   = _resolve_scope_mask(scope_names, cfg.oracle_B_scopes)
     is_rho_scope = _resolve_scope_mask(scope_names, cfg.oracle_rho_scopes)
 
+    # Optional per-phase response summary (config-gated).
+    rs = response_snapshot === nothing ?
+            (mean_A=NaN, delta_mean_A=NaN, avg_p_pol=NaN, delta_avg_p_pol=NaN,
+             pct_change_avg_p_pol=NaN, delta_p_pol_mean_abs=NaN,
+             n_standing=0, n_standing_alive=0) :
+            _compute_response_summary(pop, vt, response_snapshot)
+
     if p < 3
         @info "oracle_stats: <3 polymorphic QTLs ($(p)); returning NA result."
         nv() = fill(NaN, n_scopes)
@@ -989,7 +1161,11 @@ function oracle_stats(result::SimResult;
             nv(), nv(),                                 # d1d_dp80: v/p
             zeros(Int, n_scopes), zeros(Int, n_scopes), # dc20 nL/nH (2)
             nv(), nv(), nv(),                           # dc20 delta/Z/p (3)
-            zeros(Int, n_scopes))                       # d_match_n_pairs (1)
+            zeros(Int, n_scopes),                       # d_match_n_pairs (1)
+            rs.mean_A, rs.delta_mean_A,
+            rs.avg_p_pol, rs.delta_avg_p_pol, rs.pct_change_avg_p_pol,
+            rs.delta_p_pol_mean_abs,
+            rs.n_standing, rs.n_standing_alive)
     end
 
     α    = T.(vt.alpha[qtl_keep])
@@ -1239,7 +1415,11 @@ function oracle_stats(result::SimResult;
                          M2D_dp80_st, M2D_dp80_p, sel_class_dp80,
                          D1D_dp80_v, D1D_dp80_p,
                          Dc20_nL, Dc20_nH, Dc20_delta, Dc20_Z, Dc20_p,
-                         Dmat_n)
+                         Dmat_n,
+                         rs.mean_A, rs.delta_mean_A,
+                         rs.avg_p_pol, rs.delta_avg_p_pol, rs.pct_change_avg_p_pol,
+                         rs.delta_p_pol_mean_abs,
+                         rs.n_standing, rs.n_standing_alive)
 end
 
 """
@@ -1344,6 +1524,15 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "dc20_perm_p_",       name, "\t", oracle.dc20_perm_p[s])
             println(io, "d_match_n_pairs_",   name, "\t", oracle.d_match_n_pairs[s])
         end
+        # Per-phase response summary scalars (global; not per-scope).
+        println(io, "mean_A\t",               oracle.mean_A)
+        println(io, "delta_mean_A\t",         oracle.delta_mean_A)
+        println(io, "avg_p_pol\t",            oracle.avg_p_pol)
+        println(io, "delta_avg_p_pol\t",      oracle.delta_avg_p_pol)
+        println(io, "pct_change_avg_p_pol\t", oracle.pct_change_avg_p_pol)
+        println(io, "delta_p_pol_mean_abs\t", oracle.delta_p_pol_mean_abs)
+        println(io, "n_standing\t",           oracle.n_standing)
+        println(io, "n_standing_alive\t",     oracle.n_standing_alive)
     end
     return path
 end

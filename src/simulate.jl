@@ -222,9 +222,15 @@ function simulate(cfg::Config)
     # `:init` — gen 0 snapshot, before any selection acts. Captures the
     # neutral mutation-drift baseline (Watterson SFS under :ism_watterson,
     # Beta(θ,θ) under FSM default).
+    # When cfg.oracle_record_response, also take a ResponseSnapshot at init
+    # so later phases can compute Δmean_A, Δavg_p, etc. vs gen-0 equilibrium.
+    response_snap = nothing
+    if cfg.oracle_record_response
+        response_snap = _take_response_snapshot(pop, vt)
+    end
     if record_init
         tmp = SimResult(pop, vt, deme_id, cfg, 0, nothing, String[], nothing)
-        oracle_records[:init] = oracle_stats(tmp)
+        oracle_records[:init] = oracle_stats(tmp; response_snapshot=response_snap)
         write_oracle_tsv(cfg.output_prefix, oracle_records[:init]; phase=:init, gen=0, maf_min=cfg.oracle_maf_min)
     end
 
@@ -319,7 +325,7 @@ function simulate(cfg::Config)
         # pure-stabilizing run of length ngen_eq.
         if record_settled && gen == ngen_eq_eff
             tmp = SimResult(pop, vt, deme_id, cfg, gen, nothing, paths, nothing)
-            oracle_records[:settled] = oracle_stats(tmp)
+            oracle_records[:settled] = oracle_stats(tmp; response_snapshot=response_snap)
             write_oracle_tsv(cfg.output_prefix, oracle_records[:settled]; phase=:settled, gen=gen, maf_min=cfg.oracle_maf_min)
         end
         # Float (t½-multiple) checkpoint resolution at end of Phase A.
@@ -364,7 +370,7 @@ function simulate(cfg::Config)
             label = get(checkpoint_labels, gen, "gen$(gen)")
             if :oracle in cfg.output_formats
                 tmp = SimResult(pop, vt, deme_id, cfg, gen, nothing, paths, nothing)
-                cp_oracle = oracle_stats(tmp)
+                cp_oracle = oracle_stats(tmp; response_snapshot=response_snap)
                 oracle_records[Symbol(label)] = cp_oracle
                 write_oracle_tsv(cfg.output_prefix, cp_oracle;
                                   phase=Symbol(label), gen=gen, maf_min=cfg.oracle_maf_min)
@@ -494,7 +500,7 @@ function simulate(cfg::Config)
     if record_final
         tmp_result = SimResult(pop, vt, deme_id, cfg, total_gens, summary,
                                  paths, nothing)
-        oracle_res = oracle_stats(tmp_result)
+        oracle_res = oracle_stats(tmp_result; response_snapshot=response_snap)
         oracle_records[:final] = oracle_res
         if length(cfg.oracle_phases) == 1 && cfg.oracle_phases[1] === :final
             # Legacy path: only one phase recorded → emit unsuffixed TSV.

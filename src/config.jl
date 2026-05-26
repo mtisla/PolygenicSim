@@ -330,6 +330,14 @@ Base.@kwdef mutable struct Config
     # B-axis scope for the main Mahalanobis test (must be in `oracle_B_scopes`).
     # Valid: `:within` (default) or `:win_50pct`.
     oracle_mahal_B_scope::Symbol = :within
+    # When true (default false), oracle_stats also records a per-phase
+    # response summary: population mean breeding value, Δmean_A vs the init
+    # phase, mean allele freq across standing QTLs, Δavg_p, percent change
+    # in avg_p, magnitude/signed summaries of per-locus Δp over standing
+    # variation, and counts of standing vs de novo QTLs. Light overhead
+    # (~n_qtl float ops + ~25 KB snapshot per sim). Set true when you want
+    # to verify ±sg actually shifts breeding values and allele frequencies.
+    oracle_record_response::Bool = false
     # Phases at which to record oracle statistics. Effective only when
     # `:oracle ∈ output_formats`. Each entry must be one of:
     #   :init    — gen 0, immediately after init + V_E computation.

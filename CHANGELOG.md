@@ -9,6 +9,75 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-05-26
+
+Per-phase response summary (Δmean_A, polarized Δp+ over standing variation).
+Purely additive — new opt-in Config flag, new internal type, new OracleResult
+fields. Default `false` so production sims pay zero cost.
+
+### Added — `src/config.jl`
+
+- `oracle_record_response::Bool = false` — enable per-phase response summary
+  recording. When `true`, the init oracle call snapshots the standing
+  polymorphic QTLs (0 < p < 1, `is_qtl`, α ≠ 0) and each subsequent oracle
+  call computes Δ vs that snapshot. Storage ≈ 25 KB per sim
+  (4 vectors of length `n_standing`). Compute overhead is bounded by one
+  BLAS `dot` (mean_A) + one vectorized broadcast (Δp_pol) per phase.
+
+### Added — `src/oracle_types.jl`
+
+- `ResponseSnapshot` internal type carrying `(bp, chr, init_idx, sign(α),
+  p_pol_init)` vectors plus scalar `avg_p_pol_init` and `mean_A_init`.
+  Tracked-by-(bp, chr) identity tolerates ISM slot cleanup.
+- 8 new `OracleResult` scalars per phase:
+  - `mean_A`, `delta_mean_A` — population mean breeding value and Δ vs init.
+  - `avg_p_pol`, `delta_avg_p_pol`, `pct_change_avg_p_pol` — average
+    polarized + allele frequency over standing-alive loci and its change.
+    `p_pol = p if α ≥ 0 else 1 − p` so Δ_pol > 0 expected under +sg and < 0
+    under −sg.
+  - `delta_p_pol_mean_abs` — magnitude of per-locus polarized Δp.
+  - `n_standing`, `n_standing_alive` — initial standing QTL count and how
+    many are still trackable in the current variant table (drops as ISM
+    cleanup removes fixed/lost sites).
+
+### Added — `src/oracle.jl` (BLAS-vectorized helpers)
+
+- `_take_response_snapshot(pop, vt)` — snapshots the init state.
+  Vectorized: `qtl_mask = vt.is_qtl .& (vt.alpha .!= 0.0)`,
+  `mean_A_init = 2 · dot(p_q, α_q)` via BLAS, `p_pol_init = ifelse.(sign(α)≥0,
+  p, 1 − p)` broadcast.
+- `_compute_response_summary(pop, vt, snap)` — per-phase deltas.
+  Identity check on standing loci done in a single vectorized broadcast
+  (`bp .== snap.bp .& chr .== snap.chr .& is_qtl`); the (bp, chr) Dict
+  fallback is built **lazily**, only if any standing locus has migrated
+  index (rare). Per-locus arithmetic on the alive subset via broadcasts:
+  `p_pol_now = ifelse.(sign≥0, p_alive, 1 − p_alive)`,
+  `delta_p_pol = p_pol_now .- p_pol_init_alive`, then `mean` /
+  `mean(abs.(.))` reductions.
+
+### Added — `src/simulate.jl`
+
+- Snapshot taken right before the init oracle call when the flag is set;
+  passed through `response_snapshot=` kwarg to all 4 `oracle_stats` call
+  sites (init / settled / per-checkpoint / final).
+
+### Added — `src/oracle.jl` (TSV writer)
+
+- 8 new key/value rows in `write_oracle_tsv` for the response summary
+  scalars (one row each, global — not per-scope).
+
+### Validated
+
+- Bit-identical outputs vs the scalar prototype (smoke at VS=20, sg=−0.10:
+  matches to 4 decimals on Δmean_A and avg_p_pol across all 3 phases).
+- Test suite: 953/953 pass at `JULIA_NUM_THREADS=4`.
+- VS=20 long sweep (12 sims, 200 gens, default ism_cleanup): Δmean_A
+  reliably negative under −sg with linear scaling in |sg|; Δavg_p_pol is
+  small/noisy at VS=20 due to drift dominance over weak per-locus
+  directional and cleanup-induced selection bias on the tracked set
+  (~1250/3000 standing loci cleaned by gen 200) — both documented as
+  expected behavior of the polarized summary at this stabilizing strength.
+
 ## [0.17.1] — 2026-05-26
 
 Structural cleanup follow-up to 0.17.0 + R_meta covariance default flip.
