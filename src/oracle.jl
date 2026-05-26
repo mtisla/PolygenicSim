@@ -168,18 +168,19 @@ end
 # =============================================================================
 
 """
-    _take_response_snapshot(pop, vt) -> ResponseSnapshot
+    _take_response_snapshot(pop, vt; maf_min=0.0) -> ResponseSnapshot
 
-Snapshot the gen-0 (or init-phase) state. Only POLYMORPHIC (0<p<1) QTLs
-are kept as "standing variation"; fixed/lost sites and non-QTLs are dropped.
-Stores (bp, chr) per locus so later checkpoints can re-find them under
-ISM cleanup. Polarized + allele freqs cached for fast Δ compute.
+Snapshot the gen-0 (or init-phase) state. Only QTL loci passing the MAF
+filter (`min(p, 1-p) >= maf_min` AND `0 < p < 1`) are kept as standing
+variation; the rest are dropped. Stores (bp, chr) per locus so later
+checkpoints can re-find them under ISM cleanup.
 
-Vectorized: mean_A_init via `2 · dot(p_q, α_q)`; standing-variation vectors
+Vectorized: mean_A_init via `2 · dot(p_q, α_q)` (computed over ALL active
+QTLs regardless of MAF, so it reflects the full BV); standing vectors
 built via `findall` + indexed gather; `p_pol_init = ifelse.(sign≥0, p, 1-p)`
 broadcast; `avg_p_pol_init = mean(p_pol_init)`.
 """
-function _take_response_snapshot(pop, vt)
+function _take_response_snapshot(pop, vt; maf_min::Float64=0.0)
     L = length(vt)
     p_buf = zeros(Float64, L)
     allele_freqs!(p_buf, pop, vt)
@@ -190,13 +191,15 @@ function _take_response_snapshot(pop, vt)
     α_q      = vt.alpha[qtl_idx]                   # contiguous Float64 vector
     p_q      = p_buf[qtl_idx]                      # contiguous Float64 vector
 
-    # mean(A) = 2 · Σ p·α via BLAS dot (SIMD).
+    # mean(A) = 2 · Σ p·α via BLAS dot (SIMD). All active QTLs, no MAF filter
+    # — we want the true population BV here.
     mean_A_init = isempty(qtl_idx) ? 0.0 : 2.0 * dot(p_q, α_q)
 
-    # Standing polymorphic subset: 0 < p < 1 (vectorized mask on p_q).
-    poly_mask_in_q = (p_q .> 0.0) .& (p_q .< 1.0)
-    std_in_q       = findall(poly_mask_in_q)       # indices into qtl_idx
-    init_idx_std   = qtl_idx[std_in_q]             # init-phase vt indices
+    # Standing variation: polymorphic AND MAF ≥ maf_min (vectorized mask).
+    maf_q = min.(p_q, 1.0 .- p_q)
+    standing_mask_in_q = (p_q .> 0.0) .& (p_q .< 1.0) .& (maf_q .>= maf_min)
+    std_in_q     = findall(standing_mask_in_q)     # indices into qtl_idx
+    init_idx_std = qtl_idx[std_in_q]               # init-phase vt indices
 
     bp_std         = Int32.(vt.bp[init_idx_std])
     chr_std        = Int32.(vt.chr[init_idx_std])

@@ -226,7 +226,7 @@ function simulate(cfg::Config)
     # so later phases can compute Δmean_A, Δavg_p, etc. vs gen-0 equilibrium.
     response_snap = nothing
     if cfg.oracle_record_response
-        response_snap = _take_response_snapshot(pop, vt)
+        response_snap = _take_response_snapshot(pop, vt; maf_min=cfg.oracle_maf_min)
     end
     if record_init
         tmp = SimResult(pop, vt, deme_id, cfg, 0, nothing, String[], nothing)

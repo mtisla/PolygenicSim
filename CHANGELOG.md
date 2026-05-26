@@ -9,6 +9,47 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-05-26
+
+Default `oracle_maf_min` flipped from `0.0` → `0.01`. The oracle test now
+restricts analysis to loci with MAF ≥ 1% by default, matching standard
+GWAS / fine-mapping practice. Empirical sweeps showed this turns the
+polarized Δavg_p_pol direction signal from noisy (~50% sign-correct) into
+reliable (~92% sign-correct) at VS=20 Lande, while leaving Δmean_A
+unchanged and yielding a 40% sim-speedup as a side-benefit.
+
+### Breaking — `src/config.jl`
+
+- `oracle_maf_min::Float64 = 0.01` (was 0.0). All oracle per-site
+  statistics — `rho_pearson` family, `dir_ap`, B per-locus, Mahalanobis
+  axes, response_summary standing variation — now filter to
+  `min(p, 1−p) ≥ 0.01`. Existing configs that did not set
+  `oracle_maf_min` will see different output values (different loci pass
+  through to the tests). Set `oracle_maf_min = 0.0` to recover the
+  previous behavior.
+
+### Changed — `src/oracle.jl`
+
+- `_take_response_snapshot(pop, vt; maf_min=0.0)` — now accepts the MAF
+  cutoff and filters standing-variation loci by it. Loci passing
+  `is_qtl && α ≠ 0 && 0 < p < 1 && min(p, 1−p) ≥ maf_min` are stored as
+  standing variation. `mean_A_init` is still computed over ALL active
+  QTLs regardless of MAF (it should reflect the full population BV).
+- `simulate.jl` now passes `cfg.oracle_maf_min` to
+  `_take_response_snapshot`.
+
+### Empirical impact (VS=20 Lande sweep, n_qtl=3000, sg ∈ {−0.04..−0.10})
+
+- **n_standing** drops 3000 → ~1375 (singletons + near-monomorphic
+  filtered).
+- **n_alive @ gen200** retention: 58% → **95%** (singletons were the
+  bulk of drift-driven cleanup loss).
+- **Δavg_p_pol sign-correct rate** (12 cells): ~50% → **92%**.
+- **Δmean_A**: unchanged (computed over all active QTLs).
+- **Classifier dneg-correct @ sg = −0.08 gen200**: 1/3 → **2/3** for
+  vanilla / dp80, dir_ap unchanged. dir_ap @ sg = −0.10 gen200: 2/3 → 3/3.
+- **Per-sim wall**: ~75s → ~46s (40% faster — fewer per-scope test inputs).
+
 ### Added — `examples/validate_response_summary.jl`
 
 - Validation script comparing the response_summary scalars (added in 0.17.2)

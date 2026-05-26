@@ -269,12 +269,13 @@ Base.@kwdef mutable struct Config
     oracle_memory_path_threshold::Int = 10000
     # MAF cutoff applied to all oracle per-site statistics. A site `j` is
     # kept iff its in-population allele frequency `p_j` satisfies
-    # `min(p_j, 1 - p_j) >= oracle_maf_min`. Default 0.0 = no MAF filter
-    # (back-compat). Set to e.g. 0.01 to match common GWAS / fine-mapping
-    # filtering on empirical data (drops singletons / near-monomorphic
-    # variants whose per-locus test statistics are unstable). Applied in
-    # `_extract_qtl_genotypes` *before* any window/q-quantile/dp filter.
-    oracle_maf_min::Float64 = 0.0
+    # `min(p_j, 1 - p_j) >= oracle_maf_min`. Default 0.01 matches common
+    # GWAS / fine-mapping filtering on empirical data (drops singletons /
+    # near-monomorphic variants whose per-locus test statistics are
+    # unstable). Applied in `_extract_qtl_genotypes` *before* any window /
+    # q-quantile / dp filter, and inside `_take_response_snapshot` so
+    # standing-variation tracking is consistent. Set to 0.0 for no filter.
+    oracle_maf_min::Float64 = 0.01
     # Sign-flip permutation block size in kb. Default 0.0 = locus-level
     # sign-flip (independent ε per locus). When > 0, all loci in the same
     # bp window of size `oracle_signflip_block_kb` (per chromosome) share the
