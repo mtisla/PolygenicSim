@@ -325,9 +325,15 @@ Base.@kwdef mutable struct Config
     oracle_mahal_rho_axis::Symbol = :rho_pearson
     # Production Mahalanobis toggle: picks the rho axis for the MAIN
     # `mahal_3d_*` / `mahal_2d_*` / `dir_1d_*` / `selection_class` fields.
-    # Valid: `:rho_pearson_5pct` (vanilla rho at win_5pct mask, per-scope),
-    #        `:rho_pearson_dp80`, `:rho_pearson_q25_dp80`.
-    oracle_mahal_rho_variant::Symbol = :rho_pearson_dp80
+    # Valid: `:rho_pearson` (vanilla rho_pearson on the per-scope mask) or
+    # `:rho_pearson_dp80` (rho on dp80-filtered pair mask). Default is
+    # `:rho_pearson` since the `oracle_maf_min=0.01` default (0.18.0) already
+    # filters out the singletons / near-monomorphic pairs that dp80 was
+    # designed to handle, making the dp80 pair-mask redundant and slightly
+    # less sign-stable than the simpler vanilla mask.
+    # Rho axis always uses RAW polarized allele frequency (no logit): see
+    # `_rho_pearson_one` kwarg defaults `use_logit=false, demean=false`.
+    oracle_mahal_rho_variant::Symbol = :rho_pearson
     # B-axis scope for the main Mahalanobis test (must be in `oracle_B_scopes`).
     # Valid: `:within` (default) or `:win_50pct`.
     oracle_mahal_B_scope::Symbol = :within

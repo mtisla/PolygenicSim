@@ -9,6 +9,36 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-05-26
+
+Default `oracle_mahal_rho_variant` flipped from `:rho_pearson_dp80` to
+`:rho_pearson`. With `oracle_maf_min=0.01` already default (0.18.0), the
+dp80 pair-mask is redundant — the singletons / near-monomorphic loci it
+was designed to handle are already filtered upstream — and the data-
+dependent dp80 mask is slightly less sign-stable than the simpler vanilla
+LD-window mask. The dp80 parallel Mahalanobis set is still computed for
+inspection.
+
+### Breaking — `src/config.jl`
+
+- `oracle_mahal_rho_variant::Symbol = :rho_pearson` (was
+  `:rho_pearson_dp80`). The main `mahal_3d_*` / `mahal_2d_*` / `dir_1d_*`
+  / `selection_class` fields now use vanilla `rho_pearson` on the per-
+  scope LD-window mask (no dp80 secondary mask). Empirically tied with
+  dp80 on classification accuracy across the VS=20 Lande sweep (4 sgs ×
+  3 seeds = 12 cells: identical dneg counts at gen100 and gen200), but
+  more sign-stable under the MAF=0.01 filter.
+
+- The rho axis is computed with `use_logit=false, demean=false` (already
+  the `_rho_pearson_one` defaults since 0.17.0), so the predictor is the
+  raw polarized allele frequency `p_pol_j`, not `logit(p_pol_j)`.
+
+### Validated
+
+- Test suite: 953/953 pass at JULIA_NUM_THREADS=4.
+- Smoke verifies `main mahal_3d_z_rho` matches `rho_pearson_Z` exactly
+  (confirming the main test now reads the vanilla rho variant).
+
 ## [0.18.0] — 2026-05-26
 
 Default `oracle_maf_min` flipped from `0.0` → `0.01`. The oracle test now
