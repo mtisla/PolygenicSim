@@ -9,6 +9,26 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+### Added — `examples/validate_response_summary.jl`
+
+- Validation script comparing the response_summary scalars (added in 0.17.2)
+  across Lande vs non-Lande genetic architectures at fixed VS/V_P=20 and
+  sg=−0.10, 200 gens panmictic. Confirms that the per-locus selection
+  machinery scales correctly with both effect-size magnitude and total V_A:
+  - **Δmean_A**: non-Lande (n_qtl=500, α=0.15) gives ~3.7× the magnitude
+    of Lande (n_qtl=3000, α=0.03) — matches the V_A ratio.
+  - **|Δp_pol| per-locus**: ~1.8× larger in non-Lande — matches scaling
+    with α under stabilizing brake.
+  - **n_alive / n_standing**: drops faster in non-Lande (53% vs 56% at
+    gen 200) — more fixations from larger per-locus selection get cleaned
+    out of the tracked set.
+  - **Δavg_p_pol signed direction**: ≥ 80% sign-correct across all 12
+    cells in either architecture; remaining mis-signs traceable to gen-0
+    polarized-mean starting drift in specific seeds.
+
+  Runtime ~40 sec on JULIA_NUM_THREADS=2. Run with
+  `julia --project=. examples/validate_response_summary.jl`.
+
 ## [0.17.2] — 2026-05-26
 
 Per-phase response summary (Δmean_A, polarized Δp+ over standing variation).
