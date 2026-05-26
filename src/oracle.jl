@@ -1474,8 +1474,8 @@ end
 function _rho_pearson_one(R_meta::Matrix{T}, α::Vector{T},
                             p_pool::Vector{Float64}, raw_signs::Matrix{T},
                             mask::BitMatrix;
-                            use_logit::Bool=true,
-                            demean::Bool=true) where {T<:AbstractFloat}
+                            use_logit::Bool=false,
+                            demean::Bool=false) where {T<:AbstractFloat}
     p = length(α)
     n_perm = size(raw_signs, 2)
     nan_out = (rho = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
@@ -1751,10 +1751,10 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
         Bj_sd[j] = sqrt(ss * inv_nm1)
     end
 
+    # Raw polarized p (no logit) by new default convention (post-0.16).
     logit_p = Vector{Float64}(undef, p)
     @inbounds for j in 1:p
-        pj = clamp(p_pol[j], 0.005, 0.995)
-        logit_p[j] = log(pj / (1.0 - pj))
+        logit_p[j] = clamp(p_pol[j], 0.005, 0.995)
     end
 
     valid = Int[]
@@ -1819,6 +1819,671 @@ function _rho_pearson_q25_one(R_meta::Matrix{T}, α::Vector{T},
                  (length(rho_null) + 1)
     return (rho = rho_obs, null_mean = nm, null_sd = nsd, Z = Z,
             perm_p = perm_p, null = rho_null)
+end
+
+# =============================================================================
+# A1 — Eρ enrichment test (Bulmer-mediated displacement concentration)
+#
+# Asks whether the directional displacement signal (Dp) is concentrated in
+# loci where the LD-mediated marginal Bulmer effect |B_j| is strong.
+#
+# Per perm b (incl. observed):
+#   a_perm = ε_b ⊙ α
+#   B_j^(b) = a_perm[j] · (R_masked · a_perm)[j]
+#   p_pol_perm[j] = p[j] if a_perm[j] >= 0 else 1 - p[j]  (per-perm polarization)
+#   H^(b) = {j : |B_j^(b)| ≥ q-th quantile within perm b}
+#   L^(b) = complement (bottom 1-q fraction)
+#   D_H^(b) = Σ_{j ∈ H^(b)} a_perm[j] · p_pol_perm[j]
+#   D_L^(b) similar over L^(b)
+# Then standardize using null moments:
+#   Z(D_H) = (D_H_obs − mean(D_H_null)) / sd(D_H_null), same for D_L
+#   E_ρ = Z(D_H) − Z(D_L)
+# Perm null: recompute E_ρ^(b) per perm using the same studentization. Two-sided p.
+# =============================================================================
+function _enrichment_eρ_one(R_meta::Matrix{T}, α::Vector{T},
+                              p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                              mask::BitMatrix; q::Float64 = 0.25) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (eρ = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
+               null = fill(NaN, n_perm))
+    (0.0 < q < 1.0) || return nan_out
+
+    # Build R_masked with diag zero and off-diagonals masked.
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    # a_perm matrix incl. obs at column n_perm+1.
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_all[j, b] = raw_signs[j, b] * α[j]
+    end
+    @inbounds for j in 1:p
+        a_all[j, n_perm + 1] = α[j]
+    end
+
+    # R_a_all (p × n_perm+1) via BLAS gemm.
+    R_a_all = R_masked * a_all
+
+    # Per-perm: B_j = a · R_a, |B|-quantile partition, D_H and D_L.
+    DH_all = Vector{Float64}(undef, n_perm + 1)
+    DL_all = Vector{Float64}(undef, n_perm + 1)
+    abs_B  = Vector{Float64}(undef, p)
+    @inbounds for b in 1:(n_perm + 1)
+        for j in 1:p
+            abs_B[j] = abs(Float64(a_all[j, b]) * Float64(R_a_all[j, b]))
+        end
+        # q-th percentile threshold (top-q fraction in H).
+        thresh = quantile(abs_B, 1.0 - q)
+        DH = 0.0; DL = 0.0
+        for j in 1:p
+            ab = a_all[j, b]
+            ab == 0 && continue
+            ppol = ab >= 0 ? p_pool[j] : 1.0 - p_pool[j]
+            contrib = Float64(ab) * ppol
+            if abs_B[j] >= thresh
+                DH += contrib
+            else
+                DL += contrib
+            end
+        end
+        DH_all[b] = DH
+        DL_all[b] = DL
+    end
+
+    DH_obs = DH_all[n_perm + 1]
+    DL_obs = DL_all[n_perm + 1]
+    DH_null = view(DH_all, 1:n_perm)
+    DL_null = view(DL_all, 1:n_perm)
+
+    μ_H = mean(DH_null); σ_H = std(DH_null; corrected=true)
+    μ_L = mean(DL_null); σ_L = std(DL_null; corrected=true)
+    (σ_H > 1e-30 && σ_L > 1e-30) || return nan_out
+
+    Z_DH_obs = (DH_obs - μ_H) / σ_H
+    Z_DL_obs = (DL_obs - μ_L) / σ_L
+    eρ_obs = Z_DH_obs - Z_DL_obs
+
+    eρ_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        eρ_null[b] = (DH_null[b] - μ_H) / σ_H - (DL_null[b] - μ_L) / σ_L
+    end
+    nm  = mean(eρ_null); nsd = std(eρ_null; corrected=true)
+    nsd > 1e-30 || return nan_out
+    Z = (eρ_obs - nm) / nsd
+    abs_dev = abs(eρ_obs - nm)
+    perm_p = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, eρ_null)) /
+                 (n_perm + 1)
+    return (eρ = eρ_obs, null_mean = nm, null_sd = nsd, Z = Z,
+            perm_p = perm_p, null = eρ_null)
+end
+
+# =============================================================================
+# B1 — ++ vs −− pair-class Bulmer asymmetry
+#
+# For each pair (j,k) in scope, classify by (sign(a_perm_j), sign(a_perm_k)).
+# Pair-class sum (centred joint freq):
+#   S_C^(b) = Σ_{(j,k) ∈ C^(b)} R_jk · (p_j + p_k − 1)
+# By symmetry of R, S_++^(b) = 2 · Σ_{j: pos[j]} (p_j − 0.5) · (R_masked · pos)[j].
+#
+# Under H0 sign-flip, S_++ and S_−− have symmetric distributions (the
+# "positive" class is a random subset of loci). Under directional +sg, the
+# true a_perm = α; ++ pairs have BOTH alleles favored → joint freq elevated
+# → S_++ > S_−−. We standardize each, take A = Z(S_++) − Z(S_−−).
+# =============================================================================
+function _pair_asymmetry_one(R_meta::Matrix{T}, α::Vector{T},
+                              p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                              mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (a_pair = NaN, null_mean = NaN, null_sd = NaN, Z = NaN,
+               perm_p = NaN, null = fill(NaN, n_perm))
+
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+    p_centred = p_pool .- 0.5   # length p, Float64
+
+    # Per perm: pos = (a_perm > 0), neg = (a_perm < 0).
+    # S_++^(b) = 2 · dot(pos .* p_centred, R_masked · pos)
+    # S_−−^(b) = 2 · dot(neg .* p_centred, R_masked · neg)
+    # Compute obs + all perms in one batch.
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_all[j, b] = raw_signs[j, b] * α[j]
+    end
+    @inbounds for j in 1:p
+        a_all[j, n_perm + 1] = α[j]
+    end
+
+    Spp_all = Vector{Float64}(undef, n_perm + 1)
+    Smm_all = Vector{Float64}(undef, n_perm + 1)
+    pos_f = Vector{Float64}(undef, p)
+    neg_f = Vector{Float64}(undef, p)
+    @inbounds for b in 1:(n_perm + 1)
+        for j in 1:p
+            ab = a_all[j, b]
+            pos_f[j] = ab > 0 ? 1.0 : 0.0
+            neg_f[j] = ab < 0 ? 1.0 : 0.0
+        end
+        R_pos = R_masked * pos_f
+        R_neg = R_masked * neg_f
+        s_pp = 0.0; s_mm = 0.0
+        for j in 1:p
+            s_pp += pos_f[j] * p_centred[j] * R_pos[j]
+            s_mm += neg_f[j] * p_centred[j] * R_neg[j]
+        end
+        Spp_all[b] = 2.0 * s_pp
+        Smm_all[b] = 2.0 * s_mm
+    end
+
+    Spp_obs = Spp_all[n_perm + 1]
+    Smm_obs = Smm_all[n_perm + 1]
+    Spp_null = view(Spp_all, 1:n_perm)
+    Smm_null = view(Smm_all, 1:n_perm)
+
+    μ_pp = mean(Spp_null); σ_pp = std(Spp_null; corrected=true)
+    μ_mm = mean(Smm_null); σ_mm = std(Smm_null; corrected=true)
+    (σ_pp > 1e-30 && σ_mm > 1e-30) || return nan_out
+
+    A_obs = (Spp_obs - μ_pp) / σ_pp - (Smm_obs - μ_mm) / σ_mm
+    A_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        A_null[b] = (Spp_null[b] - μ_pp) / σ_pp - (Smm_null[b] - μ_mm) / σ_mm
+    end
+    nm = mean(A_null); nsd = std(A_null; corrected=true)
+    nsd > 1e-30 || return nan_out
+    Z = (A_obs - nm) / nsd
+    abs_dev = abs(A_obs - nm)
+    perm_p = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, A_null)) /
+                 (n_perm + 1)
+    return (a_pair = A_obs, null_mean = nm, null_sd = nsd, Z = Z,
+            perm_p = perm_p, null = A_null)
+end
+
+# =============================================================================
+# A3 — sign-quadrant decomposition of Dp by (sign(α), sign(B))
+#
+# Per locus j: category from (sign(a_perm[j]), sign(B_j^(b))), contributing
+# a_perm[j] · p[j] (raw freq) to one of 4 sums:
+#   D_pp = Σ_{α>0, B>0} a·p, D_pm = Σ_{α>0, B<0} a·p,
+#   D_mp = Σ_{α<0, B>0} a·p, D_mm = Σ_{α<0, B<0} a·p
+# Contrasts:
+#   D_amp = D_pp + D_mm  (Bulmer reinforces sign(α))
+#   D_cancel = D_pm + D_mp  (Bulmer opposes sign(α))
+# Test: Z(D_amp) − Z(D_cancel) — does the response concentrate in the
+# Bulmer-reinforcing quadrants?
+# =============================================================================
+function _sign_quadrant_one(R_meta::Matrix{T}, α::Vector{T},
+                              p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                              mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (D_amp = NaN, D_cancel = NaN, contrast = NaN, Z = NaN,
+               perm_p = NaN, null = fill(NaN, n_perm))
+
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_all[j, b] = raw_signs[j, b] * α[j]
+    end
+    @inbounds for j in 1:p
+        a_all[j, n_perm + 1] = α[j]
+    end
+    R_a_all = R_masked * a_all   # p × (n_perm+1)
+
+    Damp_all = Vector{Float64}(undef, n_perm + 1)
+    Dcan_all = Vector{Float64}(undef, n_perm + 1)
+    @inbounds for b in 1:(n_perm + 1)
+        D_pp = 0.0; D_pm = 0.0; D_mp = 0.0; D_mm = 0.0
+        for j in 1:p
+            ab = a_all[j, b]
+            ab == 0 && continue
+            Bj = Float64(ab) * Float64(R_a_all[j, b])
+            contrib = Float64(ab) * p_pool[j]
+            if ab > 0
+                if Bj > 0; D_pp += contrib
+                else;       D_pm += contrib
+                end
+            else
+                if Bj > 0; D_mp += contrib
+                else;       D_mm += contrib
+                end
+            end
+        end
+        Damp_all[b] = D_pp + D_mm
+        Dcan_all[b] = D_pm + D_mp
+    end
+
+    Damp_obs = Damp_all[n_perm + 1]
+    Dcan_obs = Dcan_all[n_perm + 1]
+    Damp_null = view(Damp_all, 1:n_perm)
+    Dcan_null = view(Dcan_all, 1:n_perm)
+
+    μ_a = mean(Damp_null); σ_a = std(Damp_null; corrected=true)
+    μ_c = mean(Dcan_null); σ_c = std(Dcan_null; corrected=true)
+    (σ_a > 1e-30 && σ_c > 1e-30) || return nan_out
+
+    contrast_obs = (Damp_obs - μ_a) / σ_a - (Dcan_obs - μ_c) / σ_c
+    contrast_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        contrast_null[b] = (Damp_null[b] - μ_a) / σ_a - (Dcan_null[b] - μ_c) / σ_c
+    end
+    nm = mean(contrast_null); nsd = std(contrast_null; corrected=true)
+    nsd > 1e-30 || return nan_out
+    Z = (contrast_obs - nm) / nsd
+    abs_dev = abs(contrast_obs - nm)
+    perm_p = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, contrast_null)) /
+                 (n_perm + 1)
+    return (D_amp = Damp_obs, D_cancel = Dcan_obs, contrast = contrast_obs,
+            Z = Z, perm_p = perm_p, null = contrast_null)
+end
+
+# =============================================================================
+# A2 — Dres analog using |B_j|-deciles (per-perm rebinning)
+#
+# Like the existing _compute_d_res_one (which residualizes Dp within |α|-decile
+# classes), but bins by |B_j^(b)| recomputed per perm. Captures whether the
+# directional response is concentrated in loci with strong LD-mediated effect
+# rather than strong raw effect.
+# =============================================================================
+function _b_decile_dres_one(R_meta::Matrix{T}, α::Vector{T},
+                              p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                              mask::BitMatrix; n_deciles::Int = 10) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (D_res = NaN, null_mean = NaN, null_sd = NaN, Z = NaN, perm_p = NaN,
+               null = fill(NaN, n_perm))
+
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_all[j, b] = raw_signs[j, b] * α[j]
+    end
+    @inbounds for j in 1:p; a_all[j, n_perm + 1] = α[j]; end
+    R_a_all = R_masked * a_all
+
+    Dres_all = Vector{Float64}(undef, n_perm + 1)
+    abs_B = Vector{Float64}(undef, p)
+    contrib = Vector{Float64}(undef, p)
+    @inbounds for b in 1:(n_perm + 1)
+        for j in 1:p
+            abs_B[j] = abs(Float64(a_all[j, b]) * Float64(R_a_all[j, b]))
+            ppol = a_all[j, b] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
+            contrib[j] = Float64(a_all[j, b]) * ppol
+        end
+        # Decile bins by quantile(abs_B).
+        qs = quantile(abs_B, range(0, 1; length = n_deciles + 1))
+        decile_of = Vector{Int}(undef, p)
+        for j in 1:p
+            d = 1
+            for k in 2:n_deciles
+                if abs_B[j] >= qs[k]
+                    d = k
+                else
+                    break
+                end
+            end
+            decile_of[j] = d
+        end
+        # Per-decile mean contrib.
+        sum_per_dec = zeros(Float64, n_deciles)
+        cnt_per_dec = zeros(Int, n_deciles)
+        for j in 1:p
+            d = decile_of[j]
+            sum_per_dec[d] += contrib[j]; cnt_per_dec[d] += 1
+        end
+        mean_per_dec = [cnt_per_dec[d] > 0 ? sum_per_dec[d] / cnt_per_dec[d] : 0.0
+                         for d in 1:n_deciles]
+        # Residual sum = sum of (contrib - decile_mean) = 0 by construction.
+        # Use sum of |residual| or sum of residual·sign(α_data) as the stat.
+        # Standard d_res convention: residualize then sum, keeping a directional
+        # signal via the bin-mean subtraction's interaction with α's sign pattern.
+        # Here we use: D_res = Σ_j (contrib_j - mean_per_dec[decile_j])^2 · sign(α_j_data)
+        # but a simpler stat that's directional: contrast within-decile dispersion of
+        # contributions weighted by α-sign. Use:
+        #   D_res = Σ_j sign(a_all[j,b]) · (contrib[j] - mean_per_dec[decile_of[j]])
+        # which residualizes the within-decile mean (removes |B|-confounded signal)
+        # and keeps directional information via the sign.
+        Dres = 0.0
+        for j in 1:p
+            d = decile_of[j]
+            r = contrib[j] - mean_per_dec[d]
+            ssign = a_all[j, b] >= 0 ? 1.0 : -1.0
+            Dres += ssign * r
+        end
+        Dres_all[b] = Dres
+    end
+
+    Dres_obs = Dres_all[n_perm + 1]
+    Dres_null = view(Dres_all, 1:n_perm)
+    nm = mean(Dres_null); nsd = std(Dres_null; corrected=true)
+    nsd > 1e-30 || return nan_out
+    Z = (Dres_obs - nm) / nsd
+    abs_dev = abs(Dres_obs - nm)
+    perm_p = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, Dres_null)) /
+                 (n_perm + 1)
+    return (D_res = Dres_obs, null_mean = nm, null_sd = nsd, Z = Z,
+            perm_p = perm_p, null = collect(Dres_null))
+end
+
+# =============================================================================
+# B2 — Pair-level Eρ analog
+#
+# Order all in-scope pairs (j,k) by |α_j · α_k · R_jk| (the per-pair contribution
+# to the Bulmer scalar). Top-q% are H_pair, rest are L_pair. Pair ranking is
+# sign-flip invariant (|c_jk| = |α_j α_k R_jk| doesn't change under sign-flip),
+# so H_pair / L_pair sets are computed ONCE.
+# Per-perm pair-displacement statistic:
+#   T_jk^(b) = a_perm[j,b] · a_perm[k,b] · (p_j + p_k − 1)
+# Aggregate T over H_pair and L_pair (one matvec via masked matrices).
+# E_ρ^pair = Z(T_H) − Z(T_L), standardized via sign-flip null.
+# =============================================================================
+function _pair_enrichment_one(R_meta::Matrix{T}, α::Vector{T},
+                                p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                                mask::BitMatrix; q::Float64 = 0.25) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (eρ_pair = NaN, null_mean = NaN, null_sd = NaN, Z = NaN,
+               perm_p = NaN, null = fill(NaN, n_perm))
+    (0.0 < q < 1.0) || return nan_out
+
+    # Build |c_jk| = |α_j α_k| · |R_jk| with diag/mask zeroing. This is invariant
+    # under sign-flip (only sign(c) flips), so H_pair / L_pair are stable.
+    abs_α = abs.(α)
+    α_outer_abs = abs_α * abs_α'   # p × p, |α_j α_k|
+    abs_R = abs.(R_meta)
+    abs_c = α_outer_abs .* abs_R
+    @inbounds for j in 1:p; abs_c[j, j] = 0.0; end
+    @inbounds for k in 1:p, j in 1:p
+        if !mask[j, k]; abs_c[j, k] = 0.0; end
+    end
+
+    # Top-q% threshold over off-diagonal in-mask entries.
+    # Flatten only the in-mask entries to avoid skew from zeros.
+    in_mask_vals = Float64[]
+    @inbounds for k in 1:p, j in 1:p
+        if j != k && mask[j, k]
+            push!(in_mask_vals, Float64(abs_c[j, k]))
+        end
+    end
+    isempty(in_mask_vals) && return nan_out
+    thresh = quantile(in_mask_vals, 1.0 - q)
+
+    # M_H[j,k] = (p_j + p_k - 1) if (j,k) in H_pair, 0 otherwise. Same for M_L.
+    M_H = Matrix{Float64}(undef, p, p); fill!(M_H, 0.0)
+    M_L = Matrix{Float64}(undef, p, p); fill!(M_L, 0.0)
+    @inbounds for k in 1:p, j in 1:p
+        (j != k && mask[j, k]) || continue
+        weight = p_pool[j] + p_pool[k] - 1.0
+        if Float64(abs_c[j, k]) >= thresh
+            M_H[j, k] = weight
+        else
+            M_L[j, k] = weight
+        end
+    end
+
+    # T_H^(b) = a_perm' · M_H · a_perm. Batched via gemm.
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_all[j, b] = raw_signs[j, b] * α[j]
+    end
+    @inbounds for j in 1:p; a_all[j, n_perm + 1] = α[j]; end
+
+    MH_a = M_H * a_all   # p × (n_perm+1)
+    ML_a = M_L * a_all
+    TH = Vector{Float64}(undef, n_perm + 1)
+    TL = Vector{Float64}(undef, n_perm + 1)
+    @inbounds for b in 1:(n_perm + 1)
+        sh = 0.0; sl = 0.0
+        for j in 1:p
+            sh += Float64(a_all[j, b]) * MH_a[j, b]
+            sl += Float64(a_all[j, b]) * ML_a[j, b]
+        end
+        TH[b] = sh; TL[b] = sl
+    end
+
+    TH_obs = TH[n_perm + 1]; TL_obs = TL[n_perm + 1]
+    TH_null = view(TH, 1:n_perm); TL_null = view(TL, 1:n_perm)
+    μ_H = mean(TH_null); σ_H = std(TH_null; corrected=true)
+    μ_L = mean(TL_null); σ_L = std(TL_null; corrected=true)
+    (σ_H > 1e-30 && σ_L > 1e-30) || return nan_out
+
+    eρ_obs = (TH_obs - μ_H) / σ_H - (TL_obs - μ_L) / σ_L
+    eρ_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        eρ_null[b] = (TH_null[b] - μ_H) / σ_H - (TL_null[b] - μ_L) / σ_L
+    end
+    nm = mean(eρ_null); nsd = std(eρ_null; corrected=true)
+    nsd > 1e-30 || return nan_out
+    Z = (eρ_obs - nm) / nsd
+    abs_dev = abs(eρ_obs - nm)
+    perm_p = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, eρ_null)) /
+                 (n_perm + 1)
+    return (eρ_pair = eρ_obs, null_mean = nm, null_sd = nsd, Z = Z,
+            perm_p = perm_p, null = eρ_null)
+end
+
+# =============================================================================
+# B3 — Within-category Bulmer surplus (++ vs −− pair-class LD contribution)
+#
+# Same pair-class partitioning as B1 but the per-class stat is just the
+# Bulmer-LD sum (no freq weighting):
+#   U_C^(b) = Σ_{(j,k) ∈ C^(b)} a_perm[j] · a_perm[k] · R_jk
+# Contrast A_LD = Z(U_++) − Z(U_−−).
+# =============================================================================
+function _pair_bulmer_surplus_one(R_meta::Matrix{T}, α::Vector{T},
+                                    raw_signs::Matrix{T},
+                                    mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (A_LD = NaN, null_mean = NaN, null_sd = NaN, Z = NaN,
+               perm_p = NaN, null = fill(NaN, n_perm))
+
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p
+        a_all[j, b] = raw_signs[j, b] * α[j]
+    end
+    @inbounds for j in 1:p; a_all[j, n_perm + 1] = α[j]; end
+
+    Upp_all = Vector{Float64}(undef, n_perm + 1)
+    Umm_all = Vector{Float64}(undef, n_perm + 1)
+    pos_f = Vector{Float64}(undef, p); neg_f = Vector{Float64}(undef, p)
+    @inbounds for b in 1:(n_perm + 1)
+        for j in 1:p
+            ab = a_all[j, b]
+            pos_f[j] = ab > 0 ? Float64(ab) : 0.0
+            neg_f[j] = ab < 0 ? Float64(ab) : 0.0
+        end
+        # U_++ = Σ_{j,k: a>0} a_j·a_k·R_jk = pos_f' · R_masked · pos_f
+        # U_−− = neg_f' · R_masked · neg_f (sign-product of two negatives is positive)
+        R_pos = R_masked * pos_f; R_neg = R_masked * neg_f
+        u_pp = 0.0; u_mm = 0.0
+        for j in 1:p
+            u_pp += pos_f[j] * R_pos[j]
+            u_mm += neg_f[j] * R_neg[j]
+        end
+        Upp_all[b] = u_pp; Umm_all[b] = u_mm
+    end
+
+    Upp_obs = Upp_all[n_perm + 1]; Umm_obs = Umm_all[n_perm + 1]
+    Upp_null = view(Upp_all, 1:n_perm); Umm_null = view(Umm_all, 1:n_perm)
+    μ_pp = mean(Upp_null); σ_pp = std(Upp_null; corrected=true)
+    μ_mm = mean(Umm_null); σ_mm = std(Umm_null; corrected=true)
+    (σ_pp > 1e-30 && σ_mm > 1e-30) || return nan_out
+
+    A_obs = (Upp_obs - μ_pp) / σ_pp - (Umm_obs - μ_mm) / σ_mm
+    A_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        A_null[b] = (Upp_null[b] - μ_pp) / σ_pp - (Umm_null[b] - μ_mm) / σ_mm
+    end
+    nm = mean(A_null); nsd = std(A_null; corrected=true)
+    nsd > 1e-30 || return nan_out
+    Z = (A_obs - nm) / nsd
+    abs_dev = abs(A_obs - nm)
+    perm_p = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, A_null)) /
+                 (n_perm + 1)
+    return (A_LD = A_obs, null_mean = nm, null_sd = nsd, Z = Z,
+            perm_p = perm_p, null = A_null)
+end
+
+# =============================================================================
+# C1 — MAF-stratified Dp (3 bins: rare [0.01, 0.10), common [0.10, 0.30),
+#                              mid [0.30, 0.50])
+#
+# Per perm + bin: D_bin^(b) = Σ_{j ∈ bin} a_perm[j] · p_pol_perm[j].
+# Per-bin Z and perm-p reported separately.
+# =============================================================================
+function _maf_stratified_dp_one(α::Vector{T}, p_pool::Vector{Float64},
+                                  raw_signs::Matrix{T}) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (Z_rare = NaN, p_rare = NaN, Z_common = NaN, p_common = NaN,
+               Z_mid = NaN, p_mid = NaN, n_rare = 0, n_common = 0, n_mid = 0)
+
+    # MAF = min(p, 1-p), bins fixed by data (not perm-dependent).
+    maf = [min(p_pool[j], 1.0 - p_pool[j]) for j in 1:p]
+    bin = zeros(Int, p)
+    @inbounds for j in 1:p
+        m = maf[j]
+        if 0.01 <= m < 0.10; bin[j] = 1
+        elseif 0.10 <= m < 0.30; bin[j] = 2
+        elseif 0.30 <= m <= 0.50; bin[j] = 3
+        end
+    end
+    n_rare   = count(==(1), bin)
+    n_common = count(==(2), bin)
+    n_mid    = count(==(3), bin)
+
+    function bin_D(a::Vector{T}, b_id::Int)
+        s = 0.0
+        @inbounds for j in 1:p
+            bin[j] == b_id || continue
+            ppol = a[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
+            s += Float64(a[j]) * ppol
+        end
+        return s
+    end
+
+    D_obs = [bin_D(α, b) for b in 1:3]
+    D_null = [Vector{Float64}(undef, n_perm) for _ in 1:3]
+    a_b = Vector{T}(undef, p)
+    @inbounds for b in 1:n_perm
+        for j in 1:p; a_b[j] = raw_signs[j, b] * α[j]; end
+        for bi in 1:3
+            D_null[bi][b] = bin_D(a_b, bi)
+        end
+    end
+
+    function stats(obs, null)
+        nm = mean(null); nsd = std(null; corrected=true)
+        nsd > 1e-30 || return (Z=NaN, p=NaN)
+        Z = (obs - nm) / nsd
+        abs_dev = abs(obs - nm)
+        pp = (1 + count(x -> isfinite(x) && abs(x - nm) >= abs_dev, null)) / (length(null) + 1)
+        return (Z=Z, p=pp)
+    end
+    s_r = stats(D_obs[1], D_null[1])
+    s_c = stats(D_obs[2], D_null[2])
+    s_m = stats(D_obs[3], D_null[3])
+    return (Z_rare=s_r.Z, p_rare=s_r.p,
+            Z_common=s_c.Z, p_common=s_c.p,
+            Z_mid=s_m.Z, p_mid=s_m.p,
+            n_rare=n_rare, n_common=n_common, n_mid=n_mid)
+end
+
+# =============================================================================
+# C2 — (|B|-tertile × MAF-tertile) joint enrichment, max-|Z| summary
+#
+# For each perm: bin loci into 3×3 grid by (|B_j^(b)| tertile, MAF tertile).
+# Per-cell D = Σ_{cell} a_perm · p_pol_perm. Per-cell Z (using cell's null
+# moments). Stat = max_{cells} |Z|. Two-sided perm-p on max |Z|.
+# =============================================================================
+function _joint_BMAF_max_one(R_meta::Matrix{T}, α::Vector{T},
+                               p_pool::Vector{Float64}, raw_signs::Matrix{T},
+                               mask::BitMatrix) where {T<:AbstractFloat}
+    p = length(α)
+    n_perm = size(raw_signs, 2)
+    nan_out = (max_absZ = NaN, perm_p = NaN, max_cell = 0)
+
+    R_masked = Matrix{T}(undef, p, p)
+    @inbounds for k in 1:p, j in 1:p
+        R_masked[j, k] = (j != k && mask[j, k]) ? R_meta[j, k] : zero(T)
+    end
+
+    # MAF tertiles fixed by data
+    maf = [min(p_pool[j], 1.0 - p_pool[j]) for j in 1:p]
+    maf_qs = quantile(maf, [1/3, 2/3])
+    maf_bin = Vector{Int}(undef, p)
+    @inbounds for j in 1:p
+        maf_bin[j] = maf[j] < maf_qs[1] ? 1 : (maf[j] < maf_qs[2] ? 2 : 3)
+    end
+
+    a_all = Matrix{T}(undef, p, n_perm + 1)
+    @inbounds for b in 1:n_perm, j in 1:p; a_all[j, b] = raw_signs[j, b] * α[j]; end
+    @inbounds for j in 1:p; a_all[j, n_perm + 1] = α[j]; end
+    R_a_all = R_masked * a_all
+
+    # Per perm: 9-cell D values.
+    # D_all[cell, b] for cell ∈ 1..9 (cell = (B_t-1)*3 + maf_t)
+    D_all = zeros(Float64, 9, n_perm + 1)
+    @inbounds for b in 1:(n_perm + 1)
+        abs_B = [abs(Float64(a_all[j, b]) * Float64(R_a_all[j, b])) for j in 1:p]
+        Bq = quantile(abs_B, [1/3, 2/3])
+        for j in 1:p
+            B_t = abs_B[j] < Bq[1] ? 1 : (abs_B[j] < Bq[2] ? 2 : 3)
+            cell = (B_t - 1) * 3 + maf_bin[j]
+            ppol = a_all[j, b] >= 0 ? p_pool[j] : 1.0 - p_pool[j]
+            D_all[cell, b] += Float64(a_all[j, b]) * ppol
+        end
+    end
+
+    # Per-cell Z using null moments.
+    maxabsZ_obs = -1.0; max_cell_obs = 0
+    cell_μ = Vector{Float64}(undef, 9); cell_σ = Vector{Float64}(undef, 9)
+    for c in 1:9
+        null_c = view(D_all, c, 1:n_perm)
+        cell_μ[c] = mean(null_c); cell_σ[c] = std(null_c; corrected=true)
+    end
+    for c in 1:9
+        cell_σ[c] > 1e-30 || continue
+        Z = (D_all[c, n_perm + 1] - cell_μ[c]) / cell_σ[c]
+        if abs(Z) > maxabsZ_obs
+            maxabsZ_obs = abs(Z); max_cell_obs = c
+        end
+    end
+    maxabsZ_obs == -1.0 && return nan_out
+
+    # Perm null on max |Z|.
+    maxabsZ_null = Vector{Float64}(undef, n_perm)
+    @inbounds for b in 1:n_perm
+        m = 0.0
+        for c in 1:9
+            cell_σ[c] > 1e-30 || continue
+            z = (D_all[c, b] - cell_μ[c]) / cell_σ[c]
+            absz = abs(z); absz > m && (m = absz)
+        end
+        maxabsZ_null[b] = m
+    end
+    perm_p = (1 + count(x -> isfinite(x) && x >= maxabsZ_obs, maxabsZ_null)) /
+                 (n_perm + 1)
+    return (max_absZ = maxabsZ_obs, perm_p = perm_p, max_cell = max_cell_obs)
 end
 
 
@@ -1994,6 +2659,27 @@ function oracle_stats(result::SimResult;
     sel_class_dp80 = fill(:neutral, n_scopes)
     D1D_absdp80_v = fill(NaN, n_scopes); D1D_absdp80_p = fill(NaN, n_scopes)
     sel_class_absdp80 = fill(:neutral, n_scopes)
+    # A1 — Eρ enrichment
+    Eρ_obs = fill(NaN, n_scopes); Eρ_nm = fill(NaN, n_scopes)
+    Eρ_nsd = fill(NaN, n_scopes); Eρ_Z  = fill(NaN, n_scopes); Eρ_p = fill(NaN, n_scopes)
+    # B1 — pair asymmetry
+    Pair_obs = fill(NaN, n_scopes); Pair_nm = fill(NaN, n_scopes)
+    Pair_nsd = fill(NaN, n_scopes); Pair_Z  = fill(NaN, n_scopes); Pair_p = fill(NaN, n_scopes)
+    # A3 — sign-quadrant
+    Quad_amp    = fill(NaN, n_scopes); Quad_cancel = fill(NaN, n_scopes)
+    Quad_contr  = fill(NaN, n_scopes); Quad_Z      = fill(NaN, n_scopes); Quad_p = fill(NaN, n_scopes)
+    # A2 — B-decile Dres
+    BDR_obs = fill(NaN, n_scopes); BDR_Z = fill(NaN, n_scopes); BDR_p = fill(NaN, n_scopes)
+    # B2 — pair-level Eρ
+    PE_obs = fill(NaN, n_scopes); PE_Z = fill(NaN, n_scopes); PE_p = fill(NaN, n_scopes)
+    # B3 — pair Bulmer surplus
+    PB_obs = fill(NaN, n_scopes); PB_Z = fill(NaN, n_scopes); PB_p = fill(NaN, n_scopes)
+    # C1 — MAF-stratified Dp (global, broadcast)
+    MAF_Zr = fill(NaN, n_scopes); MAF_pr = fill(NaN, n_scopes)
+    MAF_Zc = fill(NaN, n_scopes); MAF_pc = fill(NaN, n_scopes)
+    MAF_Zm = fill(NaN, n_scopes); MAF_pm = fill(NaN, n_scopes)
+    # C2 — joint (|B|, MAF) max-|Z|
+    JBM_max = fill(NaN, n_scopes); JBM_p = fill(NaN, n_scopes); JBM_cell = zeros(Int, n_scopes)
     M3D_q25d80_st = fill(NaN, n_scopes); M3D_q25d80_p = fill(NaN, n_scopes)
     M3D_q25d80_rr = fill(NaN, n_scopes)
     M3D_q25d80_zb = fill(NaN, n_scopes); M3D_q25d80_zr = fill(NaN, n_scopes); M3D_q25d80_zd = fill(NaN, n_scopes)
@@ -2064,53 +2750,13 @@ function oracle_stats(result::SimResult;
             rho_nsd[s] = r.null_sd; rho_Z[s]  = r.Z
             rho_pp[s]  = r.perm_p
 
-            # cor_alpha_p — per-locus directional test, same in-scope filter.
-            cap = _per_locus_corr_one(α, p_pool, raw_signs, masks[s])
-            Cap_obs[s] = cap.rho;     Cap_nm[s] = cap.null_mean
-            Cap_nsd[s] = cap.null_sd; Cap_Z[s]  = cap.Z
-            Cap_p[s]   = cap.perm_p
-
-            # d_cor / dc20 / d_match compute pruned (fields stay NaN).
-
-            # d_res — residualized Dp via |α|-decile classes.
-            dres = _compute_d_res_one(α, p_pool, raw_signs, masks[s])
-            Dres_obs[s] = dres.D_obs
-            Dres_Z_sf[s] = dres.Z_sf; Dres_p_sf[s] = dres.p_sf
-            Dres_Z_cs[s] = dres.Z_cs; Dres_p_cs[s] = dres.p_cs
-
-            # rho_pearson q-variants (q05/q10/q25, unmasked + dp80-masked) and
-            # dp80-only variant. Restored to test sign-stability in deep MSD
-            # burn-in regimes where vanilla rho_pearson sign-flip rate is ~17%.
-            rq05 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.05)
-            Rq05_obs[s] = rq05.rho;     Rq05_nm[s]  = rq05.null_mean
-            Rq05_nsd[s] = rq05.null_sd; Rq05_Z[s]   = rq05.Z
-            Rq05_p[s]   = rq05.perm_p
-            rq10 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.10)
-            Rq10_obs[s] = rq10.rho;     Rq10_nm[s]  = rq10.null_mean
-            Rq10_nsd[s] = rq10.null_sd; Rq10_Z[s]   = rq10.Z
-            Rq10_p[s]   = rq10.perm_p
-            rq25 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, masks[s]; q=0.25)
-            Rq25_obs[s] = rq25.rho;     Rq25_nm[s]  = rq25.null_mean
-            Rq25_nsd[s] = rq25.null_sd; Rq25_Z[s]   = rq25.Z
-            Rq25_p[s]   = rq25.perm_p
+            # dp80-filtered rho (needed for the dp80 parallel Mahalanobis set).
             dp80_mask_s = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
             if dp80_mask_s !== nothing
                 rd80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_s)
                 Rdp80_obs[s] = rd80.rho;     Rdp80_nm[s]  = rd80.null_mean
                 Rdp80_nsd[s] = rd80.null_sd; Rdp80_Z[s]   = rd80.Z
                 Rdp80_p[s]   = rd80.perm_p
-                r05d = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask_s; q=0.05)
-                Q05D80_obs[s] = r05d.rho;     Q05D80_nm[s]  = r05d.null_mean
-                Q05D80_nsd[s] = r05d.null_sd; Q05D80_Z[s]   = r05d.Z
-                Q05D80_p[s]   = r05d.perm_p
-                r10d = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask_s; q=0.10)
-                Q10D80_obs[s] = r10d.rho;     Q10D80_nm[s]  = r10d.null_mean
-                Q10D80_nsd[s] = r10d.null_sd; Q10D80_Z[s]   = r10d.Z
-                Q10D80_p[s]   = r10d.perm_p
-                r25d = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs, dp80_mask_s; q=0.25)
-                Q25D80_obs[s] = r25d.rho;     Q25D80_nm[s]  = r25d.null_mean
-                Q25D80_nsd[s] = r25d.null_sd; Q25D80_Z[s]   = r25d.Z
-                Q25D80_p[s]   = r25d.perm_p
             end
 
             # 3D left-plane Mahalanobis-style gate. Configurable axes:
@@ -2124,24 +2770,13 @@ function oracle_stats(result::SimResult;
             scope_name_here = scope_names[s]
             # Build the rho axis based on the configured variant.
             axis_pair = nothing
-            if cfg.oracle_mahal_rho_variant === :rho_pearson_5pct
-                if scope_name_here == "win_5pct"
-                    r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s];
-                                                use_logit=false, demean=false)
-                    axis_pair = (r_main.rho, r_main.null)
-                end
+            if cfg.oracle_mahal_rho_variant === :rho_pearson
+                r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s])
+                axis_pair = (r_main.rho, r_main.null)
             elseif cfg.oracle_mahal_rho_variant === :rho_pearson_dp80
                 dp80_mask_cfg = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
                 if dp80_mask_cfg !== nothing
-                    r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_cfg;
-                                                use_logit=false, demean=false)
-                    axis_pair = (r_main.rho, r_main.null)
-                end
-            elseif cfg.oracle_mahal_rho_variant === :rho_pearson_q25_dp80
-                dp80_mask_cfg = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
-                if dp80_mask_cfg !== nothing
-                    r_main = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs,
-                                                    dp80_mask_cfg; q=0.25)
+                    r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_cfg)
                     axis_pair = (r_main.rho, r_main.null)
                 end
             end
@@ -2214,10 +2849,9 @@ function oracle_stats(result::SimResult;
                     # Build dp80 mask once per scope (intersect with pair |Δp_pol|).
                     dp80_mask_local = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
                     if dp80_mask_local !== nothing
-                        # rho_pearson on dp80-filtered mask, rawp variant.
+                        # rho_pearson on dp80-filtered mask.
                         r_dp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs,
-                                                    dp80_mask_local;
-                                                    use_logit=false, demean=false)
+                                                    dp80_mask_local)
                         m3d_dp80 = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
                                                          r_dp80.rho, r_dp80.null,
                                                          _dir_ap_obs, _dir_ap_null)
@@ -2256,31 +2890,6 @@ function oracle_stats(result::SimResult;
                                                        :directional_pos : :directional_neg
                         end
 
-                        # rho_pearson_q25 on dp80-filtered mask.
-                        r_q25d80 = _rho_pearson_q25_one(R_meta, α, p_pool, raw_signs,
-                                                          dp80_mask_local; q=0.25)
-                        m3d_q25d80 = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
-                                                           r_q25d80.rho, r_q25d80.null,
-                                                           _dir_ap_obs, _dir_ap_null)
-                        M3D_q25d80_st[s] = m3d_q25d80.stat; M3D_q25d80_p[s] = m3d_q25d80.perm_p
-                        M3D_q25d80_rr[s] = m3d_q25d80.r_radial
-                        M3D_q25d80_zb[s] = m3d_q25d80.z_b
-                        M3D_q25d80_zr[s] = m3d_q25d80.z_rho
-                        M3D_q25d80_zd[s] = m3d_q25d80.z_cor
-                        m2d_q25d80 = _2d_dir_test(r_q25d80.rho, r_q25d80.null,
-                                                    _dir_ap_obs, _dir_ap_null)
-                        M2D_q25d80_st[s] = m2d_q25d80.D2; M2D_q25d80_p[s] = m2d_q25d80.perm_p
-                        d1d_q25d80 = _1d_dir_test(r_q25d80.rho, r_q25d80.null,
-                                                    _dir_ap_obs, _dir_ap_null)
-                        D1D_q25d80_v[s] = d1d_q25d80.v; D1D_q25d80_p[s] = d1d_q25d80.perm_p
-                        sign_q25d80 = isfinite(d1d_q25d80.v) ? d1d_q25d80.v : m2d_q25d80.v_dir_signed
-                        if isnan(m3d_q25d80.perm_p) || m3d_q25d80.perm_p >= α_thr
-                            sel_class_q25d80[s] = :neutral
-                        elseif isnan(m2d_q25d80.perm_p) || m2d_q25d80.perm_p >= α_thr
-                            sel_class_q25d80[s] = :stabilizing
-                        else
-                            sel_class_q25d80[s] = sign_q25d80 >= 0 ? :directional_pos : :directional_neg
-                        end
                     end
                 end
             end
@@ -2301,6 +2910,14 @@ function oracle_stats(result::SimResult;
                          Cap_obs, Cap_nm, Cap_nsd, Cap_Z, Cap_p,
                          M3D_stat, M3D_p, M3D_rrad, M3D_zb, M3D_zrho, M3D_zcor,
                          M2D_stat, M2D_p, sel_class, sel_class_dirap,
+                         Eρ_obs, Eρ_nm, Eρ_nsd, Eρ_Z, Eρ_p,
+                         Pair_obs, Pair_nm, Pair_nsd, Pair_Z, Pair_p,
+                         Quad_amp, Quad_cancel, Quad_contr, Quad_Z, Quad_p,
+                         BDR_obs, BDR_Z, BDR_p,
+                         PE_obs, PE_Z, PE_p,
+                         PB_obs, PB_Z, PB_p,
+                         MAF_Zr, MAF_pr, MAF_Zc, MAF_pc, MAF_Zm, MAF_pm,
+                         JBM_max, JBM_p, JBM_cell,
                          D1D_v, D1D_p,
                          dir_ap_obs_v, Z_dir_ap_v, dir_ap_p_v,
                          M3D_dp80_st, M3D_dp80_p, M3D_dp80_rr,
@@ -2434,6 +3051,39 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "mahal_2d_dir_perm_p_", name, "\t", oracle.mahal_2d_dir_perm_p[s])
             println(io, "selection_class_",     name, "\t", String(oracle.selection_class[s]))
             println(io, "selection_class_dirap_", name, "\t", String(oracle.selection_class_dirap[s]))
+            println(io, "enrich_eρ_obs_",       name, "\t", oracle.enrich_eρ_obs[s])
+            println(io, "enrich_eρ_null_mean_", name, "\t", oracle.enrich_eρ_null_mean[s])
+            println(io, "enrich_eρ_null_sd_",   name, "\t", oracle.enrich_eρ_null_sd[s])
+            println(io, "enrich_eρ_Z_",         name, "\t", oracle.enrich_eρ_Z[s])
+            println(io, "enrich_eρ_perm_p_",    name, "\t", oracle.enrich_eρ_perm_p[s])
+            println(io, "pair_asym_obs_",       name, "\t", oracle.pair_asym_obs[s])
+            println(io, "pair_asym_null_mean_", name, "\t", oracle.pair_asym_null_mean[s])
+            println(io, "pair_asym_null_sd_",   name, "\t", oracle.pair_asym_null_sd[s])
+            println(io, "pair_asym_Z_",         name, "\t", oracle.pair_asym_Z[s])
+            println(io, "pair_asym_perm_p_",    name, "\t", oracle.pair_asym_perm_p[s])
+            println(io, "quad_D_amp_",          name, "\t", oracle.quad_D_amp[s])
+            println(io, "quad_D_cancel_",       name, "\t", oracle.quad_D_cancel[s])
+            println(io, "quad_contrast_",       name, "\t", oracle.quad_contrast[s])
+            println(io, "quad_contrast_Z_",     name, "\t", oracle.quad_contrast_Z[s])
+            println(io, "quad_contrast_perm_p_", name, "\t", oracle.quad_contrast_perm_p[s])
+            println(io, "bdec_dres_obs_",       name, "\t", oracle.bdec_dres_obs[s])
+            println(io, "bdec_dres_Z_",         name, "\t", oracle.bdec_dres_Z[s])
+            println(io, "bdec_dres_perm_p_",    name, "\t", oracle.bdec_dres_perm_p[s])
+            println(io, "pair_eρ_obs_",         name, "\t", oracle.pair_eρ_obs[s])
+            println(io, "pair_eρ_Z_",           name, "\t", oracle.pair_eρ_Z[s])
+            println(io, "pair_eρ_perm_p_",      name, "\t", oracle.pair_eρ_perm_p[s])
+            println(io, "pair_bulmer_obs_",     name, "\t", oracle.pair_bulmer_obs[s])
+            println(io, "pair_bulmer_Z_",       name, "\t", oracle.pair_bulmer_Z[s])
+            println(io, "pair_bulmer_perm_p_",  name, "\t", oracle.pair_bulmer_perm_p[s])
+            println(io, "maf_Z_rare_",          name, "\t", oracle.maf_Z_rare[s])
+            println(io, "maf_p_rare_",          name, "\t", oracle.maf_p_rare[s])
+            println(io, "maf_Z_common_",        name, "\t", oracle.maf_Z_common[s])
+            println(io, "maf_p_common_",        name, "\t", oracle.maf_p_common[s])
+            println(io, "maf_Z_mid_",           name, "\t", oracle.maf_Z_mid[s])
+            println(io, "maf_p_mid_",           name, "\t", oracle.maf_p_mid[s])
+            println(io, "joint_BMAF_maxZ_",     name, "\t", oracle.joint_BMAF_maxZ[s])
+            println(io, "joint_BMAF_perm_p_",   name, "\t", oracle.joint_BMAF_perm_p[s])
+            println(io, "joint_BMAF_max_cell_", name, "\t", oracle.joint_BMAF_max_cell[s])
         end
         # 1D combined directional (alternative stage 2).
         for (s, name) in enumerate(oracle.scope_names)

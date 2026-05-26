@@ -138,6 +138,47 @@ struct OracleResult
     # dir_ap_perm_p < α_thr → :directional_{pos,neg} by sign(Z_dir_ap);
     # else → :neutral. No :stabilizing category (one axis can't distinguish).
     selection_class_dirap::Vector{Symbol}
+    # A1 — Eρ enrichment (Bulmer-mediated displacement concentration). Per scope.
+    enrich_eρ_obs::Vector{Float64}
+    enrich_eρ_null_mean::Vector{Float64}
+    enrich_eρ_null_sd::Vector{Float64}
+    enrich_eρ_Z::Vector{Float64}
+    enrich_eρ_perm_p::Vector{Float64}
+    # B1 — ++ vs −− pair-class Bulmer asymmetry. Per scope.
+    pair_asym_obs::Vector{Float64}
+    pair_asym_null_mean::Vector{Float64}
+    pair_asym_null_sd::Vector{Float64}
+    pair_asym_Z::Vector{Float64}
+    pair_asym_perm_p::Vector{Float64}
+    # A3 — sign-quadrant decomposition contrast (D_amp − D_cancel). Per scope.
+    quad_D_amp::Vector{Float64}
+    quad_D_cancel::Vector{Float64}
+    quad_contrast::Vector{Float64}
+    quad_contrast_Z::Vector{Float64}
+    quad_contrast_perm_p::Vector{Float64}
+    # A2 — B-decile Dres (sign-flip null). Per scope.
+    bdec_dres_obs::Vector{Float64}
+    bdec_dres_Z::Vector{Float64}
+    bdec_dres_perm_p::Vector{Float64}
+    # B2 — pair-level Eρ enrichment (top-q% by |α α R|). Per scope.
+    pair_eρ_obs::Vector{Float64}
+    pair_eρ_Z::Vector{Float64}
+    pair_eρ_perm_p::Vector{Float64}
+    # B3 — within-category Bulmer surplus (++ vs −−). Per scope.
+    pair_bulmer_obs::Vector{Float64}
+    pair_bulmer_Z::Vector{Float64}
+    pair_bulmer_perm_p::Vector{Float64}
+    # C1 — MAF-stratified Dp (rare / common / mid bins). Global (broadcast).
+    maf_Z_rare::Vector{Float64}
+    maf_p_rare::Vector{Float64}
+    maf_Z_common::Vector{Float64}
+    maf_p_common::Vector{Float64}
+    maf_Z_mid::Vector{Float64}
+    maf_p_mid::Vector{Float64}
+    # C2 — (|B|, MAF) joint enrichment, max-|Z| over 3×3 grid. Per scope.
+    joint_BMAF_maxZ::Vector{Float64}
+    joint_BMAF_perm_p::Vector{Float64}
+    joint_BMAF_max_cell::Vector{Int}
     # 1D directional test along v_dir = (z_rho + z_cor)/√2. Two-sided
     # permutation-p (positive directional → v_dir > 0, negative → v_dir < 0).
     # Exposed alongside the 2D Mahalanobis test so the analyst can compare

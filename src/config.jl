@@ -725,9 +725,9 @@ function validate(cfg::Config)
         throw(ArgumentError("oracle_mahal_rho_axis must be one of the rho_pearson family; " *
                              "got :$(cfg.oracle_mahal_rho_axis)"))
     cfg.oracle_mahal_rho_variant in
-        (:rho_pearson_5pct, :rho_pearson_dp80, :rho_pearson_q25_dp80) ||
-        throw(ArgumentError("oracle_mahal_rho_variant must be one of :rho_pearson_5pct, " *
-                             ":rho_pearson_dp80, :rho_pearson_q25_dp80; got :$(cfg.oracle_mahal_rho_variant)"))
+        (:rho_pearson, :rho_pearson_dp80) ||
+        throw(ArgumentError("oracle_mahal_rho_variant must be :rho_pearson or " *
+                             ":rho_pearson_dp80; got :$(cfg.oracle_mahal_rho_variant)"))
     cfg.oracle_mahal_B_scope in (:within, :win_50pct) ||
         throw(ArgumentError("oracle_mahal_B_scope must be :within or :win_50pct; got :$(cfg.oracle_mahal_B_scope)"))
     isempty(cfg.oracle_phases) &&

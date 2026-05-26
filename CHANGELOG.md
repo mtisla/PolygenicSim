@@ -9,6 +9,68 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-05-26
+
+Oracle stats fast-path simplification. The default oracle stat set is now
+trimmed to the production-essential axes: B, dir_ap, rho_pearson and
+rho_pearson_dp80 at the configured rho scopes, plus the main + dp80
+parallel Mahalanobis sets (3D + 2D + 1D). Empirical sweeps at VS=65
+panmictic confirmed that the experimental enrichment tests (A1–C2),
+q-quantile rho variants (q05/q10/q25 and their dp80 versions other than
+q25_dp80), and per-scope d_res / cor_alpha_p compute did not add power
+beyond the kept axes. Removing them cuts per-sim oracle compute by
+~70–80% (5 min/sim → 1 min/sim at this config).
+
+### Breaking — `src/config.jl`
+
+- `oracle_mahal_rho_variant` accepted values reduced to `:rho_pearson`
+  and `:rho_pearson_dp80`. The previous `:rho_pearson_5pct` and
+  `:rho_pearson_q25_dp80` options are removed. Existing configs that
+  used either will fail validation.
+- `oracle_compute_enrichment::Bool` flag removed. The enrichment tests
+  (A1 Eρ, A2 B-decile Dres, A3 sign-quadrant, B1 ++/−− pair asymmetry,
+  B2 pair-level Eρ, B3 pair Bulmer surplus, C1 MAF-stratified Dp,
+  C2 (|B|,MAF) joint enrichment) are no longer computed regardless of
+  prior flag value. Their OracleResult fields stay populated as
+  Float64 NaN / Int 0 / `:neutral` placeholders for backward struct
+  compatibility, but the underlying functions are no longer invoked.
+
+### Breaking — `src/oracle.jl`
+
+- `_rho_pearson_one` keyword defaults are now `use_logit=false`,
+  `demean=false`. The rho axis correlates B_std_j against the raw
+  polarized allele frequency instead of `logit(p_pol)`. This changes
+  the numerical values of `rho_pearson` family stats and downstream
+  `mahal_3d_perm_p`, `mahal_2d_dir_perm_p`, `dir_1d_perm_p`, and
+  `selection_class`. Empirically validated: H0 calibration stays
+  clean, power equivalent or marginally better at threshold sg.
+- `_rho_pearson_q25_one` no longer applies the logit transform. The
+  rho is correlation of the bottom-q B_j with the raw polarized p.
+- The q25_dp80 parallel Mahalanobis set
+  (`mahal_3d_q25d80_*`, `mahal_2d_q25d80_*`, `dir_1d_q25d80_*`,
+  `selection_class_q25d80`) is no longer computed. Fields stay NaN /
+  `:neutral`. Use `oracle_mahal_rho_variant=:rho_pearson_dp80` for
+  the dp80 axis.
+
+### Changed — `src/oracle.jl` (compute removed)
+
+- `_compute_d_res_one` (residualized Dp via |α|-deciles) — no longer
+  called per rho scope. `d_res_*` fields stay NaN.
+- `_per_locus_corr_one` (cor_alpha_p) — no longer called per rho
+  scope. `cor_alpha_p_*` fields stay NaN.
+- Unmasked q-variants (`rho_pearson_q05_*`, `q10_*`, `q25_*`) and the
+  dp80 q-variants other than q25_dp80 (`q05_dp80_*`, `q10_dp80_*`) —
+  no longer called. Fields stay NaN.
+
+### Validated
+
+- VS=65 panmictic sweep (sg ∈ {0.04, 0.06, 0.08, 0.10}, 3 seeds, fast-
+  path): all classifications match the pre-0.17 results within the
+  margin expected from raw-p vs logit-p. H0 INIT directional FP rate:
+  0/3 across all 3 classifiers (main, dp80 parallel, dir_ap-only) and
+  all sgs. Wall-clock: ~70 sec/sim, ~5 min total for 4-way parallel
+  12-sim sweep. Test suite: 958/958 pass at JULIA_NUM_THREADS=4.
+
 ## [0.16.0] — 2026-05-25
 
 Mahalanobis test toggles + absdp80 1D default + dir_ap-only classifier.
