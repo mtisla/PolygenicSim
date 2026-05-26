@@ -1175,7 +1175,7 @@ end
     @test all(p -> 0 < p <= 1, or.B_perm_p)
 
     # With oracle_rho_scopes=[:all] vanilla rho_pearson has at least one
-    # finite cell. q05/q10/q25 variants pruned for speed; fields stay NaN.
+    # finite cell.
     @test any(isfinite, or.rho_pearson)
 
     # TSV side-effect: file exists and has expected header
@@ -1427,7 +1427,7 @@ end
     @test :final in keys(res_noseet.oracle_records)
 end
 
-@testset "Oracle — q05/q10/q25 tail-restricted rho_pearson stats" begin
+@testset "Oracle — dp80 rho_pearson stat shape" begin
     cfg = PS.Config(
         N=100, Ne=100, n_chr=2, chr_len_bp=10_000,
         n_qtl=60, Uqtl=0.02,
@@ -1443,16 +1443,11 @@ end
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
     o = res.oracle
-    # q05, q10, q25, dp80, and the combined q*_dp* family — fields still
-    # exist in the struct (NaN-filled) but compute is pruned for speed.
-    # Verify struct shape only.
-    @test length(o.rho_pearson_q05) == length(o.scope_names)
-    @test length(o.rho_pearson_q10) == length(o.scope_names)
-    @test length(o.rho_pearson_q25) == length(o.scope_names)
+    # rho_pearson + the dp80 (top 80% of pairs by |Δp_pol|) variant.
+    # The q05/q10/q25 family and the combined q*_dp* family were removed
+    # in the dead-code cleanup — only rho_pearson and rho_pearson_dp80 remain.
+    @test length(o.rho_pearson) == length(o.scope_names)
     @test length(o.rho_pearson_dp80) == length(o.scope_names)
-    @test length(o.rho_pearson_q05_dp80) == length(o.scope_names)
-    @test length(o.rho_pearson_q10_dp80) == length(o.scope_names)
-    @test length(o.rho_pearson_q25_dp80) == length(o.scope_names)
 end
 
 @testset "Oracle — per-stat scope subset (B_scopes / rho_scopes)" begin

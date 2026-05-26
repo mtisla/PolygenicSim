@@ -289,12 +289,14 @@ Base.@kwdef mutable struct Config
     # in the empirical sign-flip null, giving sharper p-values when a few
     # outlier perms inflate the empirical sd. Default false = back-compat.
     oracle_mag_robust::Bool = false
-    # If true, build R_meta as the genotype COVARIANCE matrix (cov(g_j, g_k)
-    # = D_buf[j,k] directly, no sd normalization). Default false uses the
-    # correlation matrix (cor(g_j, g_k) = D_buf[j,k] / (sd_j · sd_k)).
-    # Covariance weights pair contributions by genetic variance, giving more
-    # weight to common variants in the rho_pearson family and Z_Dld test.
-    oracle_R_meta_use_cov::Bool = false
+    # If true (default since 0.17.1), build R_meta as the genotype COVARIANCE
+    # matrix (cov(g_j, g_k) = D_buf[j,k] directly, no sd normalization).
+    # Setting `false` uses the correlation matrix
+    # (cor(g_j, g_k) = D_buf[j,k] / (sd_j · sd_k)). Covariance weights pair
+    # contributions by genetic variance, giving more weight to common variants
+    # in the rho_pearson family and Z_Dld test — empirically a slight power
+    # boost at threshold sel_grad with no H0 cost.
+    oracle_R_meta_use_cov::Bool = true
     # Per-stat scope subset config (v0.13.0).
     # Each entry is one of: `:all` (compute every scope) or an explicit scope
     # symbol like `:win_5pct`, `:win_10pct`, `:win_25pct`, `:win_50pct`,

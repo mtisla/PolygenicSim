@@ -9,6 +9,83 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-05-26
+
+Structural cleanup follow-up to 0.17.0 + R_meta covariance default flip.
+
+### Changed — `src/config.jl`
+
+- `oracle_R_meta_use_cov::Bool` default flipped from `false` to **`true`**.
+  R_meta is now the genotype COVARIANCE matrix by default (was correlation).
+  Empirical sweeps at VS=65 panmictic showed COV gives a marginal power edge
+  at threshold sg (3/36 borderline cells flipped stab→dpos under COV) with
+  identical H0 calibration. To keep the prior correlation behavior, set
+  `oracle_R_meta_use_cov=false` explicitly.
+
+### Removed — `src/oracle.jl` (~1814 lines, 19 dead function definitions)
+
+The following functions were referenced only by their own definitions
+(verified via grep — single occurrence each — and via test suite). All
+removed:
+
+- `_magnitude_stage2_test`, `_compute_dp_mafbin_global`,
+  `_compute_dp_demean_one`, `_compute_dld_one`, `_per_locus_corr_one`,
+  `_compute_d_res_one`, `_compute_d_match_one`, `_delta_cross_one`,
+  `_compute_d_cor_one`, `_rho_pearson_q25_one`, `_pick_rho_axis`,
+  `_enrichment_eρ_one`, `_pair_asymmetry_one`, `_sign_quadrant_one`,
+  `_b_decile_dres_one`, `_pair_enrichment_one`, `_pair_bulmer_surplus_one`,
+  `_maf_stratified_dp_one`, `_joint_BMAF_max_one`.
+
+Also cleaned: the corresponding local-array allocations in `oracle_stats`,
+all unused fields from the `OracleResult(...)` constructor call, and all
+TSV writer entries (`write_oracle_tsv`) for the removed fields.
+
+### Removed — `src/oracle_types.jl` (~161 lines, 86 fields from OracleResult)
+
+OracleResult struct trimmed from 138 → 52 fields. Removed groups:
+
+- All `rho_pearson_q05_*`, `rho_pearson_q10_*`, `rho_pearson_q25_*` and
+  their dp80 variants except `rho_pearson_dp80_*`.
+- `cor_alpha_p*` (5 fields).
+- `Dp_demean_*`, `Dp_mafbin_*`, `d_cor_*` (3 each).
+- `d_match_obs/Z/perm_p` (3 fields; `d_match_n_pairs` kept).
+- `d_res_*` (5 fields).
+- `mag_stage2_*`, `selection_class_mag` (3 fields).
+- `Dld_*` (3 fields).
+- All `mahal_*_v2_*`, `selection_class_v2`, `dir_1d_v2_*` (6 fields).
+- All `mahal_*_q25d80_*`, `selection_class_q25d80`, `dir_1d_q25d80_*`
+  (11 fields).
+- `enrich_eρ_*`, `pair_asym_*`, `quad_*`, `bdec_dres_*`, `pair_eρ_*`,
+  `pair_bulmer_*` (5+5+5+3+3+3 = 24 fields).
+- `maf_Z_/p_rare/common/mid`, `joint_BMAF_*` (6+3 = 9 fields).
+- `dir_1d_absdp80_*`, `selection_class_absdp80` (3 fields; redundant now
+  that absdp80 is the default 1D construction).
+
+### Changed — `test/runtests.jl`
+
+- The `"Oracle — q05/q10/q25 tail-restricted rho_pearson stats"` testset
+  (which directly referenced 6 removed fields) was rewritten to
+  `"Oracle — dp80 rho_pearson stat shape"`, verifying only the two
+  surviving rho_pearson families (vanilla + dp80).
+
+### Validated
+
+- Test suite: **953/953 pass** at `JULIA_NUM_THREADS=4` (down from 958
+  because the previously-passing q-variant test had 6 sub-checks tied
+  to removed fields; new shape test has 2 sub-checks).
+- Production stat surface unchanged: B, dir_ap, rho_pearson at scope,
+  rho_pearson_dp80 at scope, plus the main + dp80 parallel Mahalanobis
+  sets (3D + 2D + 1D), plus `selection_class_dirap`.
+
+### Net file-size impact
+
+| file | before | after | delta |
+|------|-------:|------:|------:|
+| src/oracle.jl | 3165 | 1351 | −1814 |
+| src/oracle_types.jl | 297 | 136 | −161 |
+| test/runtests.jl | — | — | −5 |
+| src/config.jl | — | — | +2 |
+
 ## [0.17.0] — 2026-05-26
 
 Oracle stats fast-path simplification. The default oracle stat set is now
