@@ -40,17 +40,6 @@ struct OracleResult
     rho_pearson_null_sd::Vector{Float64}
     rho_pearson_Z::Vector{Float64}
     rho_pearson_perm_p::Vector{Float64}
-    # rho_pearson_dp80 — rho_pearson restricted to pairs with high polarized
-    # frequency separation. The scope mask is AND-ed with |p_pol_j − p_pol_k|
-    # ≥ x, where x is the 20th percentile of in-scope pair |Δp_pol_obs|
-    # values (so the top 80% of pairs by |Δp_pol| are kept). The filter is
-    # built at observed polarization and held fixed across permutations; the
-    # logit predictor still repolarizes per perm.
-    rho_pearson_dp80::Vector{Float64}
-    rho_pearson_dp80_null_mean::Vector{Float64}
-    rho_pearson_dp80_null_sd::Vector{Float64}
-    rho_pearson_dp80_Z::Vector{Float64}
-    rho_pearson_dp80_perm_p::Vector{Float64}
     # 3D left-plane Mahalanobis-style gate test (experimental). Operates on
     # standardized (Z_B, Z_rho, Z_cor) per scope. Rejection: half-space
     # perpendicular to Z_obs through Z_obs (NOT through origin); side picked
@@ -105,20 +94,6 @@ struct OracleResult
     dir_ap_obs::Vector{Float64}
     Z_dir_ap::Vector{Float64}
     dir_ap_perm_p::Vector{Float64}
-    # Mahalanobis test set using rho_pearson on dp80-filtered mask
-    # (top 80% of pairs by |Δp_pol|). 11 fields (3D + 2D + 1D + class)
-    # mirroring the vanilla set above.
-    mahal_3d_dp80_stat::Vector{Float64}
-    mahal_3d_dp80_perm_p::Vector{Float64}
-    mahal_3d_dp80_r_radial::Vector{Float64}
-    mahal_3d_dp80_z_b::Vector{Float64}
-    mahal_3d_dp80_z_rho::Vector{Float64}
-    mahal_3d_dp80_z_dir_ap::Vector{Float64}
-    mahal_2d_dp80_stat::Vector{Float64}
-    mahal_2d_dp80_perm_p::Vector{Float64}
-    selection_class_dp80::Vector{Symbol}
-    dir_1d_dp80_v::Vector{Float64}
-    dir_1d_dp80_perm_p::Vector{Float64}
     # dc20 — restored delta-cross statistic at cutoff=20%.
     # Polarize p+; partition into L (p+<0.20) and H (p+>0.80);
     # delta = B_LH − 0.5·(B_LL + B_HH); sign-flip null with L/H fixed.

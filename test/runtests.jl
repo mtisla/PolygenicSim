@@ -1443,11 +1443,9 @@ end
         seed=UInt64(1), n_threads=1)
     res = PS.simulate(cfg)
     o = res.oracle
-    # rho_pearson + the dp80 (top 80% of pairs by |Δp_pol|) variant.
-    # The q05/q10/q25 family and the combined q*_dp* family were removed
-    # in the dead-code cleanup — only rho_pearson and rho_pearson_dp80 remain.
+    # rho_pearson only — the q05/q10/q25 family, the combined q*_dp* family,
+    # and the dp80 variant were all removed in the dead-code cleanups.
     @test length(o.rho_pearson) == length(o.scope_names)
-    @test length(o.rho_pearson_dp80) == length(o.scope_names)
 end
 
 @testset "Oracle — per-stat scope subset (B_scopes / rho_scopes)" begin

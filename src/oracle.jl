@@ -842,47 +842,6 @@ function _1d_dir_test(rho_obs::Float64, rho_null::Vector{Float64},
     return (v = v_obs, perm_p = perm_p, sign_obs = sign(v_obs))
 end
 
-# 1D directional test using |z_rho|·sign(z_dap) construction.
-# Motivation: vanilla v_1D = (z_r + z_d)/√2 suffers cancellation when z_rho
-# has spurious wrong-sign vs z_dap (~17% of cells at marginal selection).
-# This variant uses |z_rho| as a magnitude voucher and z_dap as the polarity
-# vote: v = sign(z_d) · (|z_r| + |z_d|) / √2. Under H0 the same construction
-# is applied to perm draws, so the perm-p stays calibrated.
-# Direction inference: sign(z_dap_obs).
-function _1d_dir_absrho_test(rho_obs::Float64, rho_null::Vector{Float64},
-                              cor_obs::Float64, cor_null::Vector{Float64})
-    nan_out = (v = NaN, perm_p = NaN, sign_obs = NaN)
-    isfinite(rho_obs) && isfinite(cor_obs) || return nan_out
-    n_perm = length(rho_null)
-    n_perm == length(cor_null) ||
-        throw(ArgumentError("null vector length mismatch in 1D absrho dir test"))
-    finite_rho = filter(isfinite, rho_null)
-    finite_cor = filter(isfinite, cor_null)
-    length(finite_rho) >= 5 && length(finite_cor) >= 5 || return nan_out
-    μ_r = mean(finite_rho); σ_r = std(finite_rho; corrected=true)
-    μ_c = mean(finite_cor); σ_c = std(finite_cor; corrected=true)
-    (σ_r > 1e-30 && σ_c > 1e-30) || return nan_out
-    z_r_obs = (rho_obs - μ_r) / σ_r
-    z_c_obs = (cor_obs - μ_c) / σ_c
-    s_obs = z_c_obs >= 0 ? 1.0 : -1.0
-    v_obs = s_obs * (abs(z_r_obs) + abs(z_c_obs)) / sqrt(2.0)
-    isfinite(v_obs) || return nan_out
-    abs_v_obs = abs(v_obs)
-    reject = 0; valid = 0
-    @inbounds for b in 1:n_perm
-        r_b = rho_null[b]; c_b = cor_null[b]
-        (isfinite(r_b) && isfinite(c_b)) || continue
-        z_r = (r_b - μ_r) / σ_r
-        z_c = (c_b - μ_c) / σ_c
-        s_b = z_c >= 0 ? 1.0 : -1.0
-        v_b = s_b * (abs(z_r) + abs(z_c)) / sqrt(2.0)
-        valid += 1
-        abs(v_b) >= abs_v_obs && (reject += 1)
-    end
-    valid >= 5 || return nan_out
-    return (v = v_obs, perm_p = (1 + reject) / (valid + 1), sign_obs = s_obs)
-end
-
 # Two-pass Pearson correlation of two equal-length Float64 vectors.
 # Returns NaN if either is constant (zero variance).
 @inline function _fast_cor(x::Vector{Float64}, y::Vector{Float64})
@@ -1092,9 +1051,8 @@ end
 """
     oracle_stats(result; kwargs...) -> OracleResult
 
-Compute Bulmer's `B`, `rho_pearson`, and the `rho_pearson_dp80` variant
-(top 80 % of pairs by |Δp_pol|) at user-specified scopes against the
-simulator's QTL genotypes and true effect sizes. Uses the sign-flip
+Compute Bulmer's `B` and `rho_pearson` at user-specified scopes against
+the simulator's QTL genotypes and true effect sizes. Uses the sign-flip
 permutation null (shared across demes) and deme-weighted component
 averaging. See module-level docstring for the algorithms.
 
@@ -1152,16 +1110,12 @@ function oracle_stats(result::SimResult;
             length(unique(deme_labels)), 0.0, n_perm, false,
             nv(), nv(),                                # B, B_perm_p
             nv(), nv(), nv(), nv(), nv(),              # rho_pearson (5)
-            nv(), nv(), nv(), nv(), nv(),              # rho_pearson_dp80 (5)
             nv(), nv(), nv(), nv(), nv(), nv(),         # mahal_3d (6)
             nv(), nv(),                                 # mahal_2d_dir (2)
             fill(:neutral, n_scopes),                   # selection_class
             fill(:neutral, n_scopes),                   # selection_class_dirap
             nv(), nv(),                                 # dir_1d (2)
             nv(), nv(), nv(),                           # dir_ap obs/Z/p (3)
-            nv(), nv(), nv(), nv(), nv(), nv(),         # m3d_dp80: stat/p/rr/zb/zr/zd
-            nv(), nv(), fill(:neutral, n_scopes),       # m2d_dp80: stat/p + sel_class
-            nv(), nv(),                                 # d1d_dp80: v/p
             zeros(Int, n_scopes), zeros(Int, n_scopes), # dc20 nL/nH (2)
             nv(), nv(), nv(),                           # dc20 delta/Z/p (3)
             zeros(Int, n_scopes),                       # d_match_n_pairs (1)
@@ -1210,8 +1164,6 @@ function oracle_stats(result::SimResult;
 
     rho_obs   = fill(NaN, n_scopes); rho_nm   = fill(NaN, n_scopes)
     rho_nsd   = fill(NaN, n_scopes); rho_Z    = fill(NaN, n_scopes); rho_pp   = fill(NaN, n_scopes)
-    Rdp80_obs = fill(NaN, n_scopes); Rdp80_nm = fill(NaN, n_scopes)
-    Rdp80_nsd = fill(NaN, n_scopes); Rdp80_Z  = fill(NaN, n_scopes); Rdp80_p  = fill(NaN, n_scopes)
     # 3D left-plane Mahalanobis gate test, per scope.
     M3D_stat  = fill(NaN, n_scopes); M3D_p     = fill(NaN, n_scopes)
     M3D_rrad  = fill(NaN, n_scopes); M3D_zb    = fill(NaN, n_scopes)
@@ -1224,13 +1176,6 @@ function oracle_stats(result::SimResult;
     D1D_v     = fill(NaN, n_scopes); D1D_p     = fill(NaN, n_scopes)
     # ─── Alternative directional stats Dp = Σ α·p ───
     dir_ap_obs_v = fill(NaN, n_scopes); Z_dir_ap_v = fill(NaN, n_scopes); dir_ap_p_v = fill(NaN, n_scopes)
-    # Buffers for the dp80 Mahalanobis test set.
-    M3D_dp80_st = fill(NaN, n_scopes); M3D_dp80_p = fill(NaN, n_scopes)
-    M3D_dp80_rr = fill(NaN, n_scopes)
-    M3D_dp80_zb = fill(NaN, n_scopes); M3D_dp80_zr = fill(NaN, n_scopes); M3D_dp80_zd = fill(NaN, n_scopes)
-    M2D_dp80_st = fill(NaN, n_scopes); M2D_dp80_p = fill(NaN, n_scopes)
-    D1D_dp80_v  = fill(NaN, n_scopes); D1D_dp80_p = fill(NaN, n_scopes)
-    sel_class_dp80 = fill(:neutral, n_scopes)
     # dc20 — restored delta-cross statistic (cutoff=20).
     Dc20_nL    = zeros(Int, n_scopes); Dc20_nH = zeros(Int, n_scopes)
     Dc20_delta = fill(NaN, n_scopes); Dc20_Z   = fill(NaN, n_scopes)
@@ -1240,8 +1185,6 @@ function oracle_stats(result::SimResult;
     Dmat_n     = zeros(Int, n_scopes)
 
     if !failed
-        # Polarized freqs reused for the dp80 mask construction.
-        p_pol_obs = [α[j] >= 0 ? p_pool[j] : 1.0 - p_pool[j] for j in 1:p]
         # ─── Global Dp = Σ α_j · p_pol_j (no scope), computed ONCE ──────
         _dir_ap_global = _compute_dir_ap_global(α, p_pool, raw_signs)
         _dir_ap_obs  = _dir_ap_global.dir_ap_obs
@@ -1274,44 +1217,18 @@ function oracle_stats(result::SimResult;
             rho_nsd[s] = r.null_sd; rho_Z[s]  = r.Z
             rho_pp[s]  = r.perm_p
 
-            # dp80-filtered rho (needed for the dp80 parallel Mahalanobis set).
-            dp80_mask_s = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
-            if dp80_mask_s !== nothing
-                rd80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_s)
-                Rdp80_obs[s] = rd80.rho;     Rdp80_nm[s]  = rd80.null_mean
-                Rdp80_nsd[s] = rd80.null_sd; Rdp80_Z[s]   = rd80.Z
-                Rdp80_p[s]   = rd80.perm_p
-            end
-
             # 3D left-plane Mahalanobis-style gate. Configurable axes:
-            #   - rho axis: cfg.oracle_mahal_rho_variant (one of
-            #     :rho_pearson_5pct, :rho_pearson_dp80, :rho_pearson_q25_dp80)
+            #   - rho axis: rho_pearson on the per-scope mask (vanilla; reuse `r`)
             #   - B axis:  cfg.oracle_mahal_B_scope (:within or :win_50pct)
             #   - 3rd axis: dir_ap (always)
             within_idx = findfirst(==("within"), scope_names)
             win50_idx  = findfirst(==("win_50pct"), scope_names)
             B_axis_idx = cfg.oracle_mahal_B_scope === :within ? within_idx : win50_idx
-            scope_name_here = scope_names[s]
-            # Build the rho axis based on the configured variant.
-            axis_pair = nothing
-            if cfg.oracle_mahal_rho_variant === :rho_pearson
-                r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, masks[s])
-                axis_pair = (r_main.rho, r_main.null)
-            elseif cfg.oracle_mahal_rho_variant === :rho_pearson_dp80
-                dp80_mask_cfg = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
-                if dp80_mask_cfg !== nothing
-                    r_main = _rho_pearson_one(R_meta, α, p_pool, raw_signs, dp80_mask_cfg)
-                    axis_pair = (r_main.rho, r_main.null)
-                end
-            end
-            # Also keep B_null_within around for the parallel dp80/q25d80 sets
-            # which are pinned to "within" by convention.
-            B_null_within = within_idx === nothing ? nothing :
-                              view(VG_off_null_meta, :, within_idx) ./ VA_meta
+            # Reuse `r` from the rho_pearson compute above for the Mahalanobis axes.
+            rho_axis_obs, rho_axis_null = r.rho, r.null
             if B_axis_idx !== nothing && is_B_scope[B_axis_idx] &&
-                 !failed && !isnan(B[B_axis_idx]) && axis_pair !== nothing
+                 !failed && !isnan(B[B_axis_idx])
                 B_null_axis = view(VG_off_null_meta, :, B_axis_idx) ./ VA_meta
-                rho_axis_obs, rho_axis_null = axis_pair
                 begin
                     m3d = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
                                                 rho_axis_obs, rho_axis_null,
@@ -1327,14 +1244,10 @@ function oracle_stats(result::SimResult;
                                           _dir_ap_obs, _dir_ap_null)
                     M2D_stat[s] = m2d.D2; M2D_p[s] = m2d.perm_p
 
-                    # Stage-2 alternative: 1D combined directional projection,
-                    # now using the absdp80 construction
-                    # v_dir = sign(z_Dp) · (|z_rho| + |z_Dp|) / √2.
-                    # Empirically more robust to wrong-sign rho_pearson cells
-                    # under MSD-equilibrated initial states (validated against
-                    # the vanilla (z_rho + z_Dp)/√2 on VS=65 sg=±0.05).
-                    d1d = _1d_dir_absrho_test(rho_axis_obs, rho_axis_null,
-                                                 _dir_ap_obs, _dir_ap_null)
+                    # Stage-2 alternative: 1D combined directional projection
+                    # v_dir = (z_rho + z_Dp) / √2.
+                    d1d = _1d_dir_test(rho_axis_obs, rho_axis_null,
+                                         _dir_ap_obs, _dir_ap_null)
                     D1D_v[s] = d1d.v; D1D_p[s] = d1d.perm_p
 
                     # Classifier (α_thr = 0.05): hierarchical decision tree.
@@ -1369,36 +1282,6 @@ function oracle_stats(result::SimResult;
                         dir_ap_p_v[s]   = _dir_ap_perm_p
                     end
 
-                    # ─── Two additional Mahalanobis test sets ───────────
-                    # Build dp80 mask once per scope (intersect with pair |Δp_pol|).
-                    dp80_mask_local = _dp_filtered_mask(masks[s], p_pol_obs, 0.20)
-                    if dp80_mask_local !== nothing
-                        # rho_pearson on dp80-filtered mask.
-                        r_dp80 = _rho_pearson_one(R_meta, α, p_pool, raw_signs,
-                                                    dp80_mask_local)
-                        m3d_dp80 = _left_plane_3d_test(B[B_axis_idx], B_null_axis,
-                                                         r_dp80.rho, r_dp80.null,
-                                                         _dir_ap_obs, _dir_ap_null)
-                        M3D_dp80_st[s] = m3d_dp80.stat; M3D_dp80_p[s] = m3d_dp80.perm_p
-                        M3D_dp80_rr[s] = m3d_dp80.r_radial
-                        M3D_dp80_zb[s] = m3d_dp80.z_b
-                        M3D_dp80_zr[s] = m3d_dp80.z_rho
-                        M3D_dp80_zd[s] = m3d_dp80.z_cor   # stored as z_dir_ap
-                        m2d_dp80 = _2d_dir_test(r_dp80.rho, r_dp80.null,
-                                                  _dir_ap_obs, _dir_ap_null)
-                        M2D_dp80_st[s] = m2d_dp80.D2; M2D_dp80_p[s] = m2d_dp80.perm_p
-                        d1d_dp80 = _1d_dir_test(r_dp80.rho, r_dp80.null,
-                                                  _dir_ap_obs, _dir_ap_null)
-                        D1D_dp80_v[s] = d1d_dp80.v; D1D_dp80_p[s] = d1d_dp80.perm_p
-                        sign_dp80 = isfinite(d1d_dp80.v) ? d1d_dp80.v : m2d_dp80.v_dir_signed
-                        if isnan(m3d_dp80.perm_p) || m3d_dp80.perm_p >= α_thr
-                            sel_class_dp80[s] = :neutral
-                        elseif isnan(m2d_dp80.perm_p) || m2d_dp80.perm_p >= α_thr
-                            sel_class_dp80[s] = :stabilizing
-                        else
-                            sel_class_dp80[s] = sign_dp80 >= 0 ? :directional_pos : :directional_neg
-                        end
-                    end
                 end
             end
         end
@@ -1408,15 +1291,10 @@ function oracle_stats(result::SimResult;
                          length(unique(deme_labels)), VA_meta, n_perm, use_memory,
                          B, B_perm_p,
                          rho_obs,   rho_nm,   rho_nsd,   rho_Z,   rho_pp,
-                         Rdp80_obs, Rdp80_nm, Rdp80_nsd, Rdp80_Z, Rdp80_p,
                          M3D_stat, M3D_p, M3D_rrad, M3D_zb, M3D_zrho, M3D_zcor,
                          M2D_stat, M2D_p, sel_class, sel_class_dirap,
                          D1D_v, D1D_p,
                          dir_ap_obs_v, Z_dir_ap_v, dir_ap_p_v,
-                         M3D_dp80_st, M3D_dp80_p, M3D_dp80_rr,
-                         M3D_dp80_zb, M3D_dp80_zr, M3D_dp80_zd,
-                         M2D_dp80_st, M2D_dp80_p, sel_class_dp80,
-                         D1D_dp80_v, D1D_dp80_p,
                          Dc20_nL, Dc20_nH, Dc20_delta, Dc20_Z, Dc20_p,
                          Dmat_n,
                          rs.mean_A, rs.delta_mean_A,
@@ -1433,7 +1311,6 @@ oracle scalars. Keys:
   - `B_<scope>`, `B_perm_p_<scope>` for each scope
   - `rho_pearson_<field>_<scope>` for each scope, with `<field>` ∈
     {(blank for obs), `null_mean`, `null_sd`, `Z`, `perm_p`}
-  - `rho_pearson_dp80_*_<scope>` — same field layout as `rho_pearson`.
 Plus header rows for `p_qtl`, `VA_meta`, `n_total`, `n_demes`, `n_perm`,
 `used_memory_path`.
 """
@@ -1467,11 +1344,6 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
                                 oracle.rho_pearson_null_sd,
                                 oracle.rho_pearson_Z,
                                 oracle.rho_pearson_perm_p),
-            ("rho_pearson_dp80", oracle.rho_pearson_dp80,
-                                oracle.rho_pearson_dp80_null_mean,
-                                oracle.rho_pearson_dp80_null_sd,
-                                oracle.rho_pearson_dp80_Z,
-                                oracle.rho_pearson_dp80_perm_p),
         )
         for (pfx, obs, nm, nsd, z, pp) in rho_specs
             for (s, name) in enumerate(oracle.scope_names)
@@ -1503,23 +1375,11 @@ function write_oracle_tsv(prefix::AbstractString, oracle::OracleResult;
             println(io, "dir_1d_v_",      name, "\t", oracle.dir_1d_v[s])
             println(io, "dir_1d_perm_p_", name, "\t", oracle.dir_1d_perm_p[s])
         end
-        # Alternative directional summary Dp = Σ α·p (global, broadcast)
-        # and the dp80 Mahalanobis test set.
+        # Alternative directional summary Dp = Σ α·p (global, broadcast).
         for (s, name) in enumerate(oracle.scope_names)
             println(io, "dir_ap_obs_",        name, "\t", oracle.dir_ap_obs[s])
             println(io, "Z_dir_ap_",          name, "\t", oracle.Z_dir_ap[s])
             println(io, "dir_ap_perm_p_",     name, "\t", oracle.dir_ap_perm_p[s])
-            println(io, "mahal_3d_dp80_stat_",   name, "\t", oracle.mahal_3d_dp80_stat[s])
-            println(io, "mahal_3d_dp80_perm_p_", name, "\t", oracle.mahal_3d_dp80_perm_p[s])
-            println(io, "mahal_3d_dp80_r_radial_",name,"\t", oracle.mahal_3d_dp80_r_radial[s])
-            println(io, "mahal_3d_dp80_z_b_",    name, "\t", oracle.mahal_3d_dp80_z_b[s])
-            println(io, "mahal_3d_dp80_z_rho_",  name, "\t", oracle.mahal_3d_dp80_z_rho[s])
-            println(io, "mahal_3d_dp80_z_dir_ap_",name,"\t", oracle.mahal_3d_dp80_z_dir_ap[s])
-            println(io, "mahal_2d_dp80_stat_",   name, "\t", oracle.mahal_2d_dp80_stat[s])
-            println(io, "mahal_2d_dp80_perm_p_", name, "\t", oracle.mahal_2d_dp80_perm_p[s])
-            println(io, "selection_class_dp80_", name, "\t", String(oracle.selection_class_dp80[s]))
-            println(io, "dir_1d_dp80_v_",        name, "\t", oracle.dir_1d_dp80_v[s])
-            println(io, "dir_1d_dp80_perm_p_",   name, "\t", oracle.dir_1d_dp80_perm_p[s])
             println(io, "dc20_nL_",           name, "\t", oracle.dc20_nL[s])
             println(io, "dc20_nH_",           name, "\t", oracle.dc20_nH[s])
             println(io, "dc20_delta_",        name, "\t", oracle.dc20_delta[s])

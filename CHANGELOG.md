@@ -9,6 +9,69 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-05-26
+
+Breaking cleanup of the rho axis. The main Mahalanobis 1D test reverts to
+the vanilla `(z_rho + z_dap)/√2` projection, and the entire `_dp80`
+parallel set is removed. With `oracle_maf_min=0.01` as default (since
+0.18.0), the dp80 filter is redundant — singletons are already excluded
+upstream, so the `:rho_pearson_dp80` toggle and its parallel Mahalanobis
+stack added no information.
+
+Empirical justification: at high polygenicity (n_qtl=10000), z_rho
+wrong-sign rate dropped to 0/12 across the polygenicity sweep, making the
+`|z_rho|` construction in `_1d_dir_absrho_test` unnecessary. Vanilla 1D
+has a cleaner null (symmetric around 0) and equivalent power on the
+cases we observed.
+
+### Removed — `src/oracle.jl`
+
+- `_1d_dir_absrho_test` function definition (dead after main path flipped
+  to `_1d_dir_test`).
+- The `cfg.oracle_mahal_rho_variant` toggle (if/elseif) — only one branch
+  remains, replaced with the unconditional vanilla `_rho_pearson_one`
+  call.
+- The dp80 parallel Mahalanobis compute block (`dp80_mask_local`, the
+  inner block filling `M3D_dp80_*`, `M2D_dp80_*`, `D1D_dp80_*`,
+  `sel_class_dp80`) and its array allocations.
+- The standalone `rho_pearson_dp80` compute (`dp80_mask_s = ...; rd80 =
+  _rho_pearson_one(...)`) in the rho per-scope loop and the
+  `Rdp80_*` allocations.
+- All `*_dp80_*` entries from `write_oracle_tsv`.
+
+### Removed — `src/oracle_types.jl`
+
+16 fields stripped from `OracleResult`:
+- `rho_pearson_dp80`, `rho_pearson_dp80_null_mean`,
+  `rho_pearson_dp80_null_sd`, `rho_pearson_dp80_Z`,
+  `rho_pearson_dp80_perm_p` (5)
+- `mahal_3d_dp80_stat`, `mahal_3d_dp80_perm_p`,
+  `mahal_3d_dp80_r_radial`, `mahal_3d_dp80_z_b`, `mahal_3d_dp80_z_rho`,
+  `mahal_3d_dp80_z_dir_ap` (6)
+- `mahal_2d_dp80_stat`, `mahal_2d_dp80_perm_p` (2)
+- `selection_class_dp80`, `dir_1d_dp80_v`, `dir_1d_dp80_perm_p` (3)
+
+### Removed — `src/config.jl`
+
+- `oracle_mahal_rho_variant::Symbol` field + its validation block.
+
+### Removed — `src/summary.jl`
+
+- `:oracle_mahal_rho_variant` from `_CONFIG_CATEGORIES["oracle"]`.
+
+### Changed — `test/runtests.jl`
+
+- Dropped the `@test length(o.rho_pearson_dp80) == ...` assertion
+  (953 → 952 tests). The retained `rho_pearson` assertion covers the
+  surviving stat.
+
+### Migration
+
+Anything downstream that consumed `*_dp80_*` TSV columns or
+`OracleResult.*_dp80_*` fields will error on load. The vanilla
+`rho_pearson` / `mahal_3d_*` / `dir_1d_*` columns remain identical to
+prior runs (same compute path).
+
 ## [0.19.1] — 2026-05-26
 
 Float-typed (t½-multiple) checkpoints now work with `ngen_eq=0` —
