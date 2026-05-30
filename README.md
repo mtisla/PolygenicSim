@@ -7,11 +7,48 @@ population expansion, and SLiM-style ancestry recording with post-hoc neutral
 mutation overlay (msprime-recapitation analog, pure Julia). Selection regimes:
 neutral, stabilizing, directional.
 
-This package implements **Phases 1, 2, 4, 5, 6** of the spec in
+This package implements **Phases 1, 2, 4, 5, 6, 7** of the spec in
 `IMPLEMENTATION_PLAN.md` — Phase 6 (oracle Bulmer **B** + Δ_cross +
-ρ_pearson direction tests) shipped in v0.6.x and has been extended through
-v0.13.x. Phase 3 (haplotype additive-value tracking) remains deferred — see
-[`SUMMARY.md`](./SUMMARY.md).
+ρ_pearson direction tests) shipped in v0.6.x and has been progressively
+extended through **v0.21.x** (current series). Phase 3 (haplotype
+additive-value tracking) remains deferred — see [`SUMMARY.md`](./SUMMARY.md).
+
+## Recent changes (v0.17 → v0.21)
+
+The oracle stack has evolved substantially since v0.13. Highlights — see
+[`CHANGELOG.md`](./CHANGELOG.md) for the full version-by-version log.
+
+- **v0.21.0 — ISM + expansion compatibility.** `mutation_model=:infinite_sites`
+  now works with `expansion_factor > 1`. The auto-sized slot pool scales for
+  post-expansion `N`, and the expansion step dispatches to the ISM kernel
+  instead of the FSM recurrent-flip kernel.
+- **v0.20.1 — Calibration helpers** (`src/calibration.jl`):
+  - `effect_scale_for_polygenicity(n_qtl; ref_n_qtl, ref_effect_scale)` —
+    exact `1/√n_qtl` scaling for matched V_A(0) sweeps.
+  - `effect_scale_for_va_0(cfg, target_va_0)`, `expected_va_0(cfg)` —
+    analytic prediction + inversion for V_A(0) (10–20% gap vs realized).
+- **v0.20.0 — Cleanup of the rho axis.** The `_dp80` parallel Mahalanobis
+  stack and the `oracle_mahal_rho_variant` toggle were removed. The 1D
+  directional test reverted to vanilla `(z_ρ + z_dap)/√2` (`p1D` field).
+- **v0.19.1 — Float t½ checkpoints with `ngen_eq=0`.** Resolves the
+  checkpoints from gen-0 V_P when the settling phase is skipped.
+- **v0.19.0 — `oracle_mahal_rho_variant=:rho_pearson` default.**
+- **v0.18.0 — `oracle_maf_min=0.01` default** (was 0.0).
+- **v0.17.x — Per-phase response summary.** When
+  `oracle_record_response=true`, the oracle records `Δmean_A`,
+  `delta_avg_p_pol`, `pct_change_avg_p_pol`, `delta_p_pol_mean_abs`,
+  `n_standing`, and `n_standing_alive` for each phase. Backed by
+  BLAS-vectorized `compute_response_summary`.
+- **3D / 2D / 1D Mahalanobis omnibus + directional tests.** Each scope now
+  produces `mahal_3d_*` (omnibus on `z_B`, `z_ρ`, `z_dap`),
+  `mahal_2d_dir_*` and `dir_1d_*` (directional on the `(z_ρ, z_dap)`
+  plane), plus `selection_class` and `selection_class_dirap` symbolic
+  labels. See [Oracle statistics](#oracle-statistics) below.
+
+> **Note on test semantics.** `p3D` (`mahal_3d_perm_p_*`) is an
+> **omnibus** that fires under both stabilizing and directional selection
+> (`z_B` carries the Bulmer signature). Use **`p1D`, `p2D`, or `p_dap`**
+> when you want a *directional-only* power metric.
 
 ---
 
@@ -682,6 +719,14 @@ on `N=200` gives `300`; `factor=2.7` gives `540`). All demes scale
 simultaneously. The expansion event samples `factor · N_old` offspring per
 deme from the existing parents.
 
+**Mutation-model compatibility.** As of v0.21.0, expansion works under both
+`mutation_model=:finite_sites` and `mutation_model=:infinite_sites`. Under
+ISM the slot capacity is auto-sized for the post-expansion `N`
+(`expected_watterson_S` uses `floor(expansion_factor·Ne)` as the effective
+`Ne` when `expansion_factor > 1`), so the pre-allocated slot pool has
+headroom for the increased mutation flux at the larger population size.
+Explicit `ism_capacity` overrides are honored unchanged.
+
 ---
 
 ## Backends
@@ -822,6 +867,90 @@ oracle = PS.oracle_stats(result;
 PS.write_oracle_tsv("recompute", oracle)
 ```
 
+### Mahalanobis omnibus + directional tests (3D / 2D / 1D)
+
+The `OracleResult` exposes a layered selection-classifier built on three
+standardized per-scope axes:
+- **`z_B`** — Bulmer signal (negative under stab AND directional).
+- **`z_ρ`** — `rho_pearson` Z (positive under +directional selection).
+- **`Z_dap`** — Z of `dir_ap = Σ α_j · p_pol_j` (signed directional axis;
+  positive under +directional).
+
+Output fields per scope (suffix `_<scope>` e.g. `_within`, `_win_5pct`):
+
+| Field | Test | Tests for | Notes |
+|---|---|---|---|
+| `mahal_3d_perm_p` (`p3D`) | 3D omnibus on `(z_B, z_ρ, z_dap)` | **Any selection vs neutrality** | Fires under stab too — NOT directional-specific |
+| `mahal_2d_dir_perm_p` (`p2D`) | 2D Mahalanobis on `(z_ρ, z_dap)` | Directional selection | Stays null under pure stab |
+| `dir_1d_perm_p` (`p1D`) | Vanilla 1D projection `(z_ρ + z_dap)/√2` | Directional selection | Workhorse directional test (post-0.20.0) |
+| `dir_ap_perm_p` (`p_dap`) | dir_ap axis alone | Directional selection | Strongest single Z, loosest null |
+
+Plus auxiliary fields: `mahal_3d_stat`, `mahal_3d_r_radial`,
+`mahal_3d_z_b/z_rho/z_cor`, `selection_class` (symbolic label using p3D + p2D),
+`selection_class_dirap` (using p_dap only), `dir_ap_obs`, `Z_dir_ap`.
+
+> **Don't confuse `p3D` with a directional test.** `p3D` is the omnibus
+> *neutrality* gate; it can reject at the settled state under strong
+> stabilizing selection by design. For "did directional selection produce a
+> detectable directional response?" use **`p1D`** (preferred), `p2D`, or
+> `p_dap`.
+
+### Per-phase response summary (opt-in)
+
+When `oracle_record_response=true` (introduced v0.17.x), each oracle
+snapshot also records aggregate response statistics tracked from gen-0
+standing polymorphic variation by `(bp, chr)` identity (so ISM cleanup is
+tolerated):
+
+| Field | Definition |
+|---|---|
+| `mean_A` | Population mean breeding value = `2 · Σ p · α` (current QTLs) |
+| `delta_mean_A` | `mean_A − mean_A_init` (0 at init) |
+| `avg_p_pol` | Mean polarized `+` frequency over standing-alive loci |
+| `delta_avg_p_pol` | `avg_p_pol − avg_p_pol_init` |
+| `pct_change_avg_p_pol` | `100 · delta_avg_p_pol / avg_p_pol_init` |
+| `delta_p_pol_mean_abs` | Mean `|Δp_pol|` over standing-alive (magnitude) |
+| `n_standing` | Standing polymorphic QTLs at init |
+| `n_standing_alive` | Still trackable in the current vt at this phase |
+
+Frequencies are polarized by `sign(α)`: `p_pol = p` if `α > 0` else `1 - p`.
+Under positive `sel_grad`, `p_pol` should rise. All fields are `NaN`/`0`
+when the flag is off.
+
+### Effect-size calibration helpers (v0.20.1+)
+
+Polygenicity sweeps at fixed `effect_scale` confound `n_qtl` with V_A(0)
+(under `:infinite_sites + :from_recap`, V_A(0) ≈ `2 · n_qtl · E[p(1-p)] ·
+E[α²]` is linear in `n_qtl`). The opt-in `src/calibration.jl` helpers let
+you compensate:
+
+```julia
+using PolygenicSim
+# Polygenicity sweep at matched V_A(0):
+σ_ref = 0.03                              # at n_qtl_ref=4000
+for n_qtl in (1000, 4000, 10_000)
+    σ = effect_scale_for_polygenicity(n_qtl;
+            ref_n_qtl=4000, ref_effect_scale=σ_ref)
+    cfg = Config(; n_qtl, effect_scale=σ, ...)
+    simulate(cfg)
+end
+```
+
+Three helpers, all exported, none invoked unless called explicitly:
+- `effect_scale_for_polygenicity(n_qtl; ref_n_qtl, ref_effect_scale)` —
+  exact `σ ∝ 1/√n_qtl` scaling anchored to an empirical reference. Use
+  this for matched-V_A(0) polygenicity sweeps.
+- `effect_scale_for_va_0(cfg, target_va_0)` — closed-form inversion of
+  the analytic prediction.
+- `expected_va_0(cfg)` — analytic V_A(0) prediction (handles `:from_recap`
+  / `:ism_watterson` / `:beta_mutation_drift` / `:uniform` / `:fixed_p` /
+  `:beta_asymmetric`; returns `NaN` otherwise).
+
+Distribution mapping (`E[α²] = k · effect_scale²`): signed_exponential
+`k=2`, normal `k=1`, fixed `k=1`. Analytic vs realized V_A(0) typically
+agree to within ~10–20% — the 1/√n_qtl scaling itself is exact across
+matched architectures.
+
 ### Multi-phase recording — compare regimes in one run
 
 For directional studies that need a neutral baseline and a stabilizing
@@ -891,10 +1020,11 @@ and the `n_perm = 1000` perm-p quantization floor.
 ### MAF filter
 
 `oracle_maf_min` drops low-MAF sites from every oracle statistic before any
-window / quantile / Δp filter runs. The default `0.0` keeps every polymorphic
-site (back-compat). For GWAS / fine-mapping-style analyses, set e.g. `0.01`
-to match the empirical convention of dropping singletons and near-monomorphic
-variants whose per-locus tests are unstable:
+window / quantile / Δp filter runs. The default is **`0.01`** (since
+v0.18.0) to match GWAS / fine-mapping practice — singletons and
+near-monomorphic variants whose per-locus tests are unstable are excluded
+upstream. Set `0.0` to recover the legacy "include every polymorphic site"
+behavior:
 
 ```julia
 cfg = PS.Config(
