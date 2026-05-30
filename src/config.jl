@@ -420,7 +420,12 @@ to size the ISM slot pool when `ism_capacity = 0`.
 function expected_watterson_S(cfg::Config)
     Utot = cfg.Uqtl + effective_Uneu(cfg)
     Utot == 0 && return 0.0
-    return 4.0 * cfg.Ne * Utot * harmonic(2 * cfg.Ne - 1)
+    # Account for `expansion_factor` so the ISM slot pool, auto-sized via this
+    # value, has headroom for the post-expansion mutation flux (Ne·U scales
+    # linearly with N). When no expansion: Ne_eff = cfg.Ne.
+    Ne_eff = cfg.expansion_factor > 1.0 ?
+                 floor(Int, cfg.expansion_factor * cfg.Ne) : cfg.Ne
+    return 4.0 * Ne_eff * Utot * harmonic(2 * Ne_eff - 1)
 end
 
 """
@@ -601,8 +606,6 @@ function validate(cfg::Config)
         cap > 0 || throw(ArgumentError("ISM requires positive slot_capacity (set ism_capacity > 0 or Uqtl + Uneu > 0)"))
         cap <= cfg.n_chr * cfg.chr_len_bp ||
             throw(ArgumentError("ism_capacity=$(cap) exceeds total bp ($(cfg.n_chr * cfg.chr_len_bp))"))
-        cfg.expansion_factor == 1.0 ||
-            throw(ArgumentError("ISM is not yet compatible with expansion_factor > 1"))
     end
     cfg.xovers_per_chr >= 0 ||
         throw(ArgumentError("xovers_per_chr must be >= 0"))

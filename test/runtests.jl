@@ -753,6 +753,68 @@ end
 # ---------------------------------------------------------------------------
 # Phase 5 — fractional expansion factor (floored to integer per-deme size)
 # ---------------------------------------------------------------------------
+@testset "Phase 5 — ISM + expansion" begin
+    # ISM was previously hard-blocked from expansion. After the wiring fix,
+    # the ISM kernel must run on the expanded buffer with the new 2N, and the
+    # auto-sized slot pool must have room for the post-expansion mutation flux.
+    cfg = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+                     n_qtl=200, n_neutral=0, Uqtl=0.02,
+                     mutation_model=:infinite_sites,
+                     recap_first=true, init_distribution=:from_recap,
+                     ism_cleanup_interval=5,
+                     selection_mode=:neutral, ngen_eq=20, ngen_dir=0,
+                     expansion_factor=2.0, expansion_k_before_end=5,
+                     seed=UInt64(0x15E001), output_formats=Symbol[], n_int=0)
+    res = PS.simulate(cfg)
+
+    # Population size doubled.
+    @test res.pop.N == 400
+    @test size(res.pop.H, 2) == 2 * res.pop.N
+
+    # Auto-sized slot pool accounted for the 2× expansion: capacity should
+    # exceed the pre-expansion Watterson-S baseline.
+    cap = PS.slot_capacity(cfg)
+    cfg_no_exp = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+                            n_qtl=200, n_neutral=0, Uqtl=0.02,
+                            mutation_model=:infinite_sites,
+                            recap_first=true, init_distribution=:from_recap,
+                            selection_mode=:neutral, ngen_eq=20, ngen_dir=0,
+                            seed=UInt64(0x15E001), output_formats=Symbol[], n_int=0)
+    cap_no_exp = PS.slot_capacity(cfg_no_exp)
+    @test cap > cap_no_exp
+
+    # Fractional expansion factor under ISM.
+    cfg_frac = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+                          n_qtl=200, n_neutral=0, Uqtl=0.02,
+                          mutation_model=:infinite_sites,
+                          recap_first=true, init_distribution=:from_recap,
+                          ism_cleanup_interval=5,
+                          selection_mode=:neutral, ngen_eq=20, ngen_dir=0,
+                          expansion_factor=2.5, expansion_k_before_end=5,
+                          seed=UInt64(0x15E002), output_formats=Symbol[], n_int=0)
+    res_frac = PS.simulate(cfg_frac)
+    @test res_frac.pop.N == 500
+
+    # ISM + expansion still bit-identical under fixed (seed, T). Re-run.
+    res_b = PS.simulate(cfg)
+    @test res.pop.H == res_b.pop.H
+    @test res.pop.N == res_b.pop.N
+
+    # Explicit ism_capacity should still work under expansion (no auto-scaling).
+    cfg_explicit = PS.Config(N=200, Ne=200, n_chr=2, chr_len_bp=50_000,
+                              n_qtl=200, n_neutral=0, Uqtl=0.02,
+                              mutation_model=:infinite_sites,
+                              recap_first=true, init_distribution=:from_recap,
+                              ism_capacity=2000,
+                              ism_cleanup_interval=5,
+                              selection_mode=:neutral, ngen_eq=20, ngen_dir=0,
+                              expansion_factor=2.0, expansion_k_before_end=5,
+                              seed=UInt64(0x15E003), output_formats=Symbol[], n_int=0)
+    res_explicit = PS.simulate(cfg_explicit)
+    @test res_explicit.pop.N == 400
+    @test PS.slot_capacity(cfg_explicit) == 2000
+end
+
 @testset "Phase 5 — fractional expansion factor" begin
     cfg = PS.Config(N=100, Ne=100, n_chr=1, chr_len_bp=10_000,
                      n_qtl=100, n_neutral=0, Uqtl=0.02, theta_override=0.5,

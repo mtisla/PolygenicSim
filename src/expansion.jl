@@ -65,9 +65,12 @@ function _finalize_expansion!(pop, scratch::GenScratch, new_buf,
     resize!(scratch.env, new_total)
     resize!(scratch.w, new_total)
     resize!(scratch.cumw, new_total)
-    # Re-allocate the per-individual genotype buffer for the new size.
-    n_qtl = length(scratch.qtl_idx)
-    scratch.genotype_buf = zeros(UInt8, max(1, n_qtl), new_total)
+    # Re-allocate the per-individual genotype buffer for the new size,
+    # preserving the original row dimension. Under ISM the constructor sizes
+    # this to the slot capacity `L` so that newly-activated QTL slots from
+    # subsequent ISM mutations don't trigger BoundsErrors in BV compute.
+    n_qtl_cap = max(1, size(scratch.genotype_buf, 1))
+    scratch.genotype_buf = zeros(UInt8, n_qtl_cap, new_total)
     scratch.layout = new_layout
     cc = scratch.chunk_count
     chunk_size_new = cld(new_total, cc)
@@ -121,11 +124,16 @@ function step_generation_packed_expand!(pop::PackedPop, vt::VariantTable,
         end
     end
 
-    # Mutate the new buffer (uses NEW total slots, two-pool kernel).
-    _apply_mutations_packed!(new_H_buf, 2 * new_total,
-                              scratch.qtl_idx, mu_per_qtl_site(cfg),
-                              scratch.neutral_idx, mu_per_neutral_site(cfg),
-                              rng, scratch.mscratch)
+    # Mutate the new buffer at the NEW total. ISM uses the slot-pool kernel,
+    # FSM the recurrent-flip kernel.
+    if cfg.mutation_model === :infinite_sites
+        _mutate_packed_ism!(new_H_buf, 2 * new_total, cfg, scratch, vt, rng)
+    else
+        _apply_mutations_packed!(new_H_buf, 2 * new_total,
+                                  scratch.qtl_idx, mu_per_qtl_site(cfg),
+                                  scratch.neutral_idx, mu_per_neutral_site(cfg),
+                                  rng, scratch.mscratch)
+    end
 
     _finalize_expansion!(pop, scratch, new_H_buf, new_layout, n_blocks, UInt64(0))
     return nothing
@@ -188,11 +196,16 @@ function step_generation_dense_expand!(pop::DensePop, vt::VariantTable,
         end
     end
 
-    # Mutate the new buffer (two-pool kernel).
-    _apply_mutations_dense!(new_H_buf, 2 * new_total,
-                             scratch.qtl_idx, mu_per_qtl_site(cfg),
-                             scratch.neutral_idx, mu_per_neutral_site(cfg),
-                             rng, scratch.mscratch)
+    # Mutate the new buffer at the NEW total. ISM uses the slot-pool kernel,
+    # FSM the recurrent-flip kernel.
+    if cfg.mutation_model === :infinite_sites
+        _mutate_dense_ism!(new_H_buf, 2 * new_total, cfg, scratch, vt, rng)
+    else
+        _apply_mutations_dense!(new_H_buf, 2 * new_total,
+                                 scratch.qtl_idx, mu_per_qtl_site(cfg),
+                                 scratch.neutral_idx, mu_per_neutral_site(cfg),
+                                 rng, scratch.mscratch)
+    end
 
     _finalize_expansion!(pop, scratch, new_H_buf, new_layout, L, UInt8(0))
     return nothing

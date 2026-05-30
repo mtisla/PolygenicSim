@@ -133,7 +133,7 @@ FSM recurrent-flip kernel or the ISM new-site kernel.
 function mutate_dense!(pop::DensePop, cfg::Config, scratch,
                        vt::VariantTable, rng::Xoshiro)
     if cfg.mutation_model === :infinite_sites
-        return _mutate_dense_ism!(pop, cfg, scratch, vt, rng)
+        return _mutate_dense_ism!(pop.H_buf, 2 * pop.N, cfg, scratch, vt, rng)
     end
     return _apply_mutations_dense!(pop.H_buf, 2 * pop.N,
                                     scratch.qtl_idx, mu_per_qtl_site(cfg),
@@ -149,7 +149,7 @@ Same as `mutate_dense!` but on the packed offspring buffer.
 function mutate_packed!(pop::PackedPop, cfg::Config, scratch,
                         vt::VariantTable, rng::Xoshiro)
     if cfg.mutation_model === :infinite_sites
-        return _mutate_packed_ism!(pop, cfg, scratch, vt, rng)
+        return _mutate_packed_ism!(pop.H_buf, 2 * pop.N, cfg, scratch, vt, rng)
     end
     return _apply_mutations_packed!(pop.H_buf, 2 * pop.N,
                                      scratch.qtl_idx, mu_per_qtl_site(cfg),
@@ -191,15 +191,13 @@ end
     return nothing
 end
 
-function _mutate_packed_ism!(pop::PackedPop, cfg::Config, scratch,
+function _mutate_packed_ism!(H::Matrix{UInt64}, twoN::Int, cfg::Config, scratch,
                               vt::VariantTable, rng::Xoshiro)
-    twoN = 2 * pop.N
     M_qtl = cfg.Uqtl > 0 ? rand(rng, Poisson(twoN * cfg.Uqtl)) : 0
     Uneu  = effective_Uneu(cfg)
     M_neu = Uneu > 0 ? rand(rng, Poisson(twoN * Uneu)) : 0
     (M_qtl == 0 && M_neu == 0) && return 0
     _ism_resize_batch!(scratch, M_qtl, M_neu)
-    H = pop.H_buf
 
     # QTL pool
     if M_qtl > 0
@@ -254,15 +252,13 @@ function _mutate_packed_ism!(pop::PackedPop, cfg::Config, scratch,
     return M_qtl + M_neu
 end
 
-function _mutate_dense_ism!(pop::DensePop, cfg::Config, scratch,
+function _mutate_dense_ism!(H::Matrix{UInt8}, twoN::Int, cfg::Config, scratch,
                              vt::VariantTable, rng::Xoshiro)
-    twoN = 2 * pop.N
     M_qtl = cfg.Uqtl > 0 ? rand(rng, Poisson(twoN * cfg.Uqtl)) : 0
     Uneu  = effective_Uneu(cfg)
     M_neu = Uneu > 0 ? rand(rng, Poisson(twoN * Uneu)) : 0
     (M_qtl == 0 && M_neu == 0) && return 0
     _ism_resize_batch!(scratch, M_qtl, M_neu)
-    H = pop.H_buf
 
     if M_qtl > 0
         _ism_sample_hap_indices!(scratch.ism_hap_idx, rng, twoN, M_qtl)

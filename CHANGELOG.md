@@ -9,6 +9,71 @@ backward compatibility for the major series.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-05-29
+
+Population expansion now works under `mutation_model=:infinite_sites`.
+The combination was previously hard-blocked by a `validate()` throw;
+this release wires the expansion step to dispatch on the mutation
+model and grows the auto-sized slot pool to accommodate the
+post-expansion mutation flux.
+
+### Background
+
+The expansion step in `src/expansion.jl` mutates the newly-allocated
+expanded buffer using `_apply_mutations_*!`, which is the finite-sites
+recurrent-flip kernel — the ISM equivalent (`_mutate_*_ism!`) was never
+wired into this path. Additionally, the auto slot-capacity formula
+`4·Ne·U·H_{2Ne-1}` used `cfg.Ne` only, so the slot pool was sized for
+the pre-expansion population and risked under-provisioning when N
+grew mid-run.
+
+### Changed — `src/mutation.jl`
+
+The `_mutate_packed_ism!` and `_mutate_dense_ism!` kernels now take an
+explicit `(H, twoN, ...)` signature instead of reading from `pop`.
+This decouples them from `pop` so they can be invoked on an
+arbitrary buffer (e.g., the newly-allocated expanded `new_H_buf`).
+The `mutate_packed!` / `mutate_dense!` dispatchers are updated to
+pass `pop.H_buf` and `2*pop.N` explicitly.
+
+### Changed — `src/expansion.jl`
+
+`step_generation_packed_expand!` and `step_generation_dense_expand!`
+now branch on `cfg.mutation_model`:
+- ISM → call the slot-pool kernel on `new_H_buf` at `2*new_total`
+- FSM → call the recurrent-flip kernel (existing path)
+
+`_finalize_expansion!` now preserves the original `genotype_buf` row
+dimension when resizing rather than shrinking to current QTL count.
+The constructor sizes this buffer to `L` (slot capacity) under ISM so
+that new mutations don't trigger `BoundsError` in subsequent breeding-
+value computes; the previous expansion logic broke that invariant.
+
+### Changed — `src/config.jl`
+
+- Removed the hard `expansion_factor == 1.0` check inside the ISM
+  validation block. `expansion_factor > 1.0` is now accepted under
+  ISM after the wiring fix.
+- `expected_watterson_S` now uses `floor(Int, expansion_factor·Ne)` as
+  the effective N when `expansion_factor > 1`, so the auto-sized
+  slot pool has headroom for the larger post-expansion mutation rate
+  (`2N·U` flux). Explicit `ism_capacity` overrides are unaffected.
+
+### Tests — `test/runtests.jl`
+
+New testset "Phase 5 — ISM + expansion" (8 assertions): population
+size grows correctly, slot capacity exceeds the no-expansion baseline,
+fractional `expansion_factor` works under ISM, end-to-end runs are
+deterministic under fixed `(seed, T)`, and explicit `ism_capacity`
+overrides are honored. 965 → 973 tests.
+
+### Migration
+
+If you previously hit `"ISM is not yet compatible with expansion_factor > 1"`,
+remove the `expansion_factor=1.0` workaround. The slot pool will
+auto-size for post-expansion N, so existing `ism_capacity` overrides
+sized for pre-expansion `Ne` may now be conservative.
+
 ## [0.20.1] — 2026-05-26
 
 Calibration helpers to keep V_A(0) fixed across architecture sweeps —
