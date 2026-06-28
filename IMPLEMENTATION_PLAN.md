@@ -7,7 +7,7 @@ You are implementing **PolygenicSim.jl**, a Julia forward-time simulator for pol
 - Working directory: the `PolygenicSim` repository (current dir).
 - Authoritative spec: `./IMPLEMENTATION_PLAN.md`. This supersedes any conflicting choice in the reference repos.
 - Reference Julia implementation: `./qcseln/` (nested). Read for insights; do not copy slavishly.
-- Reference SLiM/Nextflow pipeline: `/Users/touhid/mycode/bulmer/` — SLiM scripts and `main.nf`. Read specifically for **parameter conventions** and **burn-in / settling phase design**. Note that PolygenicSim does **not** model mutation, so SLiM's MSD burn-in does not translate directly; the PolygenicSim analogue is a settling phase where LD equilibrates over standing variation. Flag this gap explicitly when asking questions.
+- Reference SLiM/Nextflow pipeline: an internal `bulmer/` directory — SLiM scripts and `main.nf`. Read specifically for **parameter conventions** and **burn-in / settling phase design**. Note that PolygenicSim does **not** model mutation, so SLiM's MSD burn-in does not translate directly; the PolygenicSim analogue is a settling phase where LD equilibrates over standing variation. Flag this gap explicitly when asking questions.
 
 ## Scope
 Implement **Phases 1, 2, 4, 5** from the plan. **Defer Phases 3 and 6.** Both dense and packed backends must support all four phases.
@@ -67,12 +67,12 @@ Implement via rejection sampling: draw from $\operatorname{Beta}(\theta, \theta)
 
 1. Read `./IMPLEMENTATION_PLAN.md` end to end.
 2. Read `./qcseln/` and produce a ~150-word summary covering: data structures, recombination approach, threading patterns, what's reusable, what you will deliberately diverge from.
-3. Read `/Users/touhid/mycode/bulmer/` — focus on `main.nf` and the SLiM scripts. Identify the parameters that drive the burn-in / settling phase: $V_S$, $h^2$, $N$, $\theta_0$, optimum-shift schedule, effect-size distribution, MAF spectrum, generations to settling, convergence criteria, etc. Produce a parameter inventory table mapping bulmer-repo names to PolygenicSim Config fields.
+3. Read the internal `bulmer/` reference — focus on `main.nf` and the SLiM scripts. Identify the parameters that drive the burn-in / settling phase: $V_S$, $h^2$, $N$, $\theta_0$, optimum-shift schedule, effect-size distribution, MAF spectrum, generations to settling, convergence criteria, etc. Produce a parameter inventory table mapping bulmer-repo names to PolygenicSim Config fields.
 4. **Compile a Q&A list** of clarifications needed before implementing. Expected topics include (non-exhaustive):
    - Whether PolygenicSim should have a separate **settling phase** + **experimental phase** structure (mirroring bulmer's burn-in + experiment), or a single $\theta$-schedule covering all generations.
    - How to handle the missing-mutation gap: is the settling phase neutral, stabilizing-with-static-optimum, or something else?
    - Default numerical values for $V_S$, $h^2$, optimum, $\Delta$, $\tau$, $t_{\text{shift}}$ — should they match bulmer's conventions or be exposed as required Config fields with no defaults?
-   - Verify whether `/Users/touhid/mycode/bulmer/` uses `Beta(4Ne μ, 4Ne μ)` for standing variation, an empirical SFS, or something else (e.g., uniform-on-MAF). If it diverges from the spec'd default, surface this and decide whether to expose `init_distribution` alternatives or keep only the Beta-mutation-drift default.
+   - Verify whether the internal `bulmer/` reference uses `Beta(4Ne μ, 4Ne μ)` for standing variation, an empirical SFS, or something else (e.g., uniform-on-MAF). If it diverges from the spec'd default, surface this and decide whether to expose `init_distribution` alternatives or keep only the Beta-mutation-drift default.
    - Effect size distribution for QTLs (normal, signed exponential, fixed grid) and which is the default.
    - Checkpoint convention ($t_{1/2}$, $2 t_{1/2}$) — is this in scope for this prompt or deferred?
 5. Post the qcseln summary, the parameter inventory table, the Q&A list, and a package skeleton (modules, types, file layout).
@@ -127,7 +127,7 @@ The dense backend is the **oracle** for the packed backend. All tests live in `t
 - `SUMMARY.md`: deferred items (Phases 3, 6), known technical debt, design divergences with rationale, and a record of the Q&A round answers
 
 ## Begin
-Step 1: read `IMPLEMENTATION_PLAN.md`, `./qcseln/`, and `/Users/touhid/mycode/bulmer/`.
+Step 1: read `IMPLEMENTATION_PLAN.md`, `./qcseln/`, and the internal `bulmer/` reference.
 Step 2: post the qcseln summary, the bulmer parameter inventory, the Q&A list, and the package skeleton.
 **Stop. Wait for answers.**
 ````

@@ -1500,8 +1500,8 @@ Workflow for pre-1.0 development:
 
 ## Reference
 
-The simulator was scoped against the SLiM/Nextflow pipeline at
-`/Users/touhid/mycode/bulmer/` (parameter conventions, burn-in / settling
-phase design). The Julia reference at `qcseln/` was read for ideas only;
+The simulator was scoped against an internal SLiM/Nextflow reference
+pipeline (parameter conventions, burn-in / settling phase design). The
+Julia reference at `qcseln/` was read for ideas only;
 PolygenicSim's data layout and kernels are designed from scratch around the
 finite-sites bit-packed model (see `SUMMARY.md` for the full design log).
