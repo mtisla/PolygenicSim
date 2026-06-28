@@ -4,7 +4,7 @@
 > This source code is published for review purposes. It is **not open source**. Use,
 > copying, modification, or redistribution requires explicit written
 > permission from the author. Contact:
-> [islamtouhid87@gmail.com](mailto:todd.islam@gmail.com).
+> [todd.islam@gmail.com](mailto:todd.islam@gmail.com).
 
 Forward-time simulator for polygenic-trait evolution under Gaussian fitness.
 Supports finite-sites and infinite-sites mutation models, multiple chromosomes,
