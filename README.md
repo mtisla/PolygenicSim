@@ -1,5 +1,12 @@
 # PolygenicSim.jl
 
+> **License.** Copyright © 2026 Touhid Islam. All rights reserved.
+> This source code is published for review purposes (e.g. job/internship
+> applications, academic evaluation). It is **not open source**. Use,
+> copying, modification, or redistribution requires explicit written
+> permission from the author. Contact:
+> [islamtouhid87@gmail.com](mailto:islamtouhid87@gmail.com).
+
 Forward-time simulator for polygenic-trait evolution under Gaussian fitness.
 Supports finite-sites and infinite-sites mutation models, multiple chromosomes,
 panmictic or 2D non-toroidal stepping-stone demography, instantaneous
