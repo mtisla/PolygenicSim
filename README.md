@@ -19,6 +19,13 @@ This package implements **Phases 1, 2, 4, 5, 6, 7** of the spec in
 extended through **v0.21.x** (current series). Phase 3 (haplotype
 additive-value tracking) remains deferred — see [`SUMMARY.md`](./SUMMARY.md).
 
+> **Reproducing or defending a result (e.g. for journal review)?** Start
+> at [`SPEC_DRIVEN_DEVELOPMENT.md`](./SPEC_DRIVEN_DEVELOPMENT.md) — it
+> indexes the full spec → Q&A → implementation → validation trail (genetic
+> model, design-decision ledger, correctness-test framework, statistical
+> calibration record, reproducibility guarantees, and a submission
+> defense checklist) in one place.
+
 ## Recent changes (v0.17 → v0.21)
 
 The oracle stack has evolved substantially since v0.13. Highlights — see
@@ -1432,37 +1439,177 @@ PS.simulate(PS.Config(load_plink_prefix = "external",
 ## Tests
 
 ```bash
-julia --project=. -e 'using Pkg; Pkg.test()'
-```
-
-**512 tests** covering Phase-1 correctness (init AF, V_A, Mendelian
-segregation, Haldane recombination at `d ∈ {0.01, 0.1, 0.5, 1.0} M`,
-cross-chr LD, neutral drift, selection regimes), Phase-2 zero-allocation
-kernels and chunk determinism, Phase-4 spatial structure (DemeLayout, `m=0`
-isolation vs `m=high` panmictic asymptote, cline gradient), Phase-5
-expansion (size scaling including fractional factors, mean-AF preservation,
-stepping-stone integration, checkpoint correctness), Phase-6 oracle
-statistics (B perm-p, Δ_cross sign-flip null, ρ_pearson family with
-dp80 / q05 / q10 / q25 / q05_dp80 / q10_dp80 / q25_dp80 variants,
-panmictic + structured paths, multi-phase recording, MAF cutoff, TSV
-side-effects), ISM mutation kernel + Watterson init, weighted-average
-per-deme diagnostics for 2D, the `Uqtl/Uneu` auto-derivation and validation,
-the QTL-only fast path, a regression test asserting threaded reductions
-match the `Statistics` reference under `JULIA_NUM_THREADS=4`, the
-single-knob `ngen` mode, the `:twoD_recent` demography (structure onset,
-panmictic vs structured `load_from` interaction), the `:fixed_p` init
-distribution, `save_settled` round-trip + TOML sidecar, t½-multiple
-checkpoints with `save_at_checkpoints` toggle, and the ancestry/overlay
-pipeline (recording-is-non-invasive invariant, `simplify!` loss-free
-on surviving lineages at any `simplify_interval`, sample-node bookkeeping
-across buffer-swaps and disk roundtrip, in-memory overlay parity with
-disk-roundtrip overlay, merged-PLINK file-size formula).
-
-To run with parallelism (recommended):
-
-```bash
 JULIA_NUM_THREADS=4 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
+
+**973 tests, ~65s at `JULIA_NUM_THREADS=4`.** Covers Phase-1 correctness
+(init AF, V_A, Mendelian segregation, Haldane recombination at
+`d ∈ {0.01, 0.1, 0.5, 1.0} M`, cross-chr LD, neutral drift, selection
+regimes), Phase-2 zero-allocation kernels and chunk determinism, Phase-4
+spatial structure (DemeLayout, `m=0` isolation vs `m=high` panmictic
+asymptote, cline gradient), Phase-5 expansion (size scaling including
+fractional factors, mean-AF preservation, stepping-stone integration,
+checkpoint correctness, ISM compatibility), oracle statistics (B perm-p,
+Δ_cross sign-flip null, ρ_pearson family, panmictic + structured paths,
+multi-phase recording, MAF cutoff), the ISM mutation kernel + Watterson
+init, the structured-coalescent recapitation engine (panmictic MRCA
+timing, Watterson TBL under recombination, F_ST under migration,
+multi-chromosome threading, `recap_first` integration, `:twoD_recent`
+workflow routing), calibration helpers, and the ancestry/overlay
+pipeline. See [`SPEC_DRIVEN_DEVELOPMENT.md`](./SPEC_DRIVEN_DEVELOPMENT.md#8-correctness--validation-framework)
+for how this suite maps back to the 13 correctness tests mandated by
+`IMPLEMENTATION_PLAN.md`, and for the statistical-validation record
+behind the oracle test family (what `p3D` vs `p1D` actually test, the
+VS/VP regime calibration series, etc.) — the material a journal reviewer
+would ask about.
+
+> **Determinism note.** Results are bit-identical for a fixed
+> `(seed, n_threads, backend)` but **not** across different thread
+> counts. The project convention is `JULIA_NUM_THREADS=4` for all runs,
+> tests, and benchmarks unless a specific comparison requires otherwise.
+
+### Running a single test with its exact parameter set
+
+Every `@testset` in `test/runtests.jl` is self-contained — the only
+state it shares with the rest of the file is the `using ...` preamble
+and `const PS = PolygenicSim` at the top. That means any one of them can
+be extracted by name and run standalone, with **zero edits to the test
+file**, using the bundled helper:
+
+```bash
+scripts/run_single_test.sh --list                                    # print every testset name + line
+scripts/run_single_test.sh "Test 9 — dense ≡ packed (bit-identical)"  # run exactly that one
+```
+
+The script greps the block from `@testset "<name>" begin` to its
+closing `end`, drops it into a temp file, and runs it under a fresh
+`using` preamble at `JULIA_NUM_THREADS=4` (override by exporting the env
+var first). This is the intended way for an agent or reviewer to
+independently re-verify one specific claim — e.g. "is backend
+equivalence (Test 9) actually bit-identical" — without paying for the
+full ~65s suite.
+
+### Full testset index
+
+Exact `Config` parameter sets, condensed. `theta_override` pins V_S
+directly (test-only convenience); production configs normally use
+`vs_over_vp0`. Seeds are given where the test pins one explicitly.
+
+**Phase 1 — core correctness (spec `IMPLEMENTATION_PLAN.md` Tests 1–13)**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Test 1+13 — Beta(θ,θ) init AF` | 15–30 | N=500, n_chr=1, n_qtl=2000, Uqtl=0.02, seed=42 | Init AF ~ `Beta(θ,θ)`; KS test across θ values (spec Tests 1, 13) |
+| `init_distribution = :fixed_p` | 32–67 | N=2000, n_qtl=500, `init_distribution=:fixed_p`, `init_p=0.5`, seed=42 | `:fixed_p` init mode (every locus starts at a fixed p) |
+| `Test 2 — V_A: sum 2pq α² ≈ var(A)` | 72–94 | N=400, n_chr=2, n_qtl=500, n_neutral=200, `theta_override=0.5`, `maf_min=0.05`, seed=7 | Σ 2pq·α² matches realized Var(A) at gen 0 (spec Test 2) |
+| `Test 3 — Mendelian segregation 0.5 ± 3 SE` | 99–133 | N=500, n_chr=1, n_qtl=100, Uqtl=0.0, `theta_override=0.5`, ngen_eq=1, seed=11 | Heterozygote transmission rate (spec Test 3) |
+| `Test 4 — Haldane recomb fraction` | 138–189 | N=2, n_chr=1, `xovers_per_chr∈{0.01,0.1,0.5,1.0}`, n_qtl=2, seed=99 | Empirical recomb fraction vs `r(d)=(1-e^{-2d})/2` (spec Test 4) |
+| `Test 5 — Cross-chr LD ≈ 0 at gen 0` | 194–245 | N=1000, n_chr=4, n_qtl=80, n_neutral=20, `theta_override=0.5`, seed=31 | Independent assortment across chromosomes (spec Test 5) |
+| `Test 6 — neutral drift variance` | 250–279 | N=250, T=30 gens, n_chr=20, n_qtl=4000, `theta_override=10.0`, seed=2024 | Var(p_T\|p_0) vs `p_0(1-p_0)(1-(1-1/2N)^T)` (spec Test 6) |
+| `Test 7 — stabilizing: B < 0` | 284–298 | N=400, n_chr=2, n_qtl=500, `vs_over_vp0=10.0`, `:stabilizing`, ngen_eq=20, seed=3, `n_threads=1` | Bulmer B < 0 after settling (spec Test 7) |
+| `Test 8 — directional: mean shifts` | 303–326 | N=500, n_chr=2, n_qtl=500, `vs_over_vp0=10.0`, `:directional`, `directional_start_from=:msd`, ngen_eq=10, ngen_dir=20, seed=101; compares `shift_sd∈{0.0,2.0}` | Mean BV moves toward θ_t under a shift (spec Test 8) |
+| `Test 9 — dense ≡ packed (bit-identical)` | 331–362 | N=200, n_chr=2, n_qtl=200, n_neutral=50, `vs_over_vp0=20.0`, `:stabilizing`, ngen_eq=8, seed=777; `backend∈{:dense,:packed}` | **Critical.** Dense/packed produce bit-identical haplotypes + variant tables (spec Test 9) |
+| `Test 12 — selection_mode coverage` | 367–388 | N=100, n_chr=1, n_qtl=100, `vs_over_vp0=20.0`, `directional_start_from=:msd`; loops `mode×backend` over all 3 regimes × 2 backends | Every `selection_mode` runs end-to-end on both backends (spec Test 12) |
+
+**I/O**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `IO round-trip — PLINK + native` | 393–446 | N=120, n_chr=2, n_qtl=100, n_neutral=50, `:stabilizing`, ngen_eq=3, seed=909, `output_formats=[:plink,:native]` | Write/load round-trip for both output formats |
+
+**Phase 2 — packed kernels**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Phase 2 — zero-alloc kernels` | 451–500 | N=200, n_chr=3, n_qtl=300, n_neutral=100, `vs_over_vp0=20.0`, `:stabilizing`, ngen_eq=2, `n_threads=1` | Recombination/fitness/parent-sampling kernels allocate 0 bytes (`@allocated`) |
+| `Phase 2 — chunk-count determinism` | 506–520 | N=200, n_chr=2, n_qtl=200, n_neutral=50, `vs_over_vp0=10.0`, `:stabilizing`, ngen_eq=4, seed=0xCC; `n_threads∈{4,1}` | Same `n_threads` → bit-identical; different `n_threads` → valid but different trajectory |
+
+**Phase 4 — spatial structure**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Phase 4 — DemeLayout and migration` | 525–555 | N=10, n_chr=1, n_qtl=10, `demography=:twoD_perp`, `grid_size=3`, `migration_rate=0.05` | DemeLayout construction + neighbor/migration bookkeeping |
+| `Phase 4 — m=0 isolates demes; m=0.25 ≈ panmictic asymptote` | 557–616 | N=200, n_chr=2, n_qtl=200, `vs_over_vp0=20.0`, `:stabilizing`, ngen_eq=10; `twoD_perp`, `grid_size=3`, `migration_rate∈{0.0,0.25}` | m=0 → demes diverge (F_ST>0); m→large → panmictic asymptote (spec Test 10) |
+| `Phase 4 — stepping stone end-to-end (3 selection modes)` | 618–637 | N=50, n_chr=2, n_qtl=100, n_neutral=20, `twoD_perp`, `grid_size=3`, `migration_rate=0.05`, `vs_over_vp0=15.0`; loops all 3 `selection_mode` | Full stepping-stone run for each regime |
+| `Phase 4 — cline produces per-deme phenotype gradient` | 639–667 | N=200, n_chr=2, n_qtl=400, `twoD_perp`, `grid_size=3`, `migration_rate=0.05`, `cline_amp=2.0`, `vs_over_vp0=10.0`, `:stabilizing` | Nonzero `cline_amp` produces a spatial phenotype gradient |
+
+**Phase 5 — population expansion**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Phase 5 — expansion sets new population size` | 672–686 | N=100, n_chr=1, n_qtl=200, `:neutral`, ngen_eq=6; `expansion_factor=3.0`, `expansion_k_before_end=2`, seed=0xE100 | Post-expansion N = N_old·factor; 2N haplotypes (spec Test 11) |
+| `Phase 5 — expansion preserves mean AF` | 688–714 | N=200, n_chr=2, n_qtl=400, `:neutral`, ngen_eq=6; `expansion_factor∈{1.0,4.0}`, seed=0xE2A0 | Mean AF preserved in expectation across expansion (spec Test 11) |
+| `Phase 5 — expansion in stepping-stone metapopulation` | 716–731 | N=50, n_chr=2, n_qtl=100, `twoD_perp`, `grid_size=3`, `migration_rate=0.05`, `:stabilizing`, ngen_eq=8, `vs_over_vp0=15.0` | Expansion composes correctly with 2D demography |
+| `Phase 5 — checkpoints around the expansion event` | 733–751 | N=80, n_chr=1, n_qtl=200, n_neutral=50, `:neutral`, ngen_eq=8; `expansion_factor=3.0`, `expansion_k_before_end=3`, `checkpoints=[3,8]` | Checkpoint output straddling the expansion generation |
+| `Phase 5 — ISM + expansion` | 756–816 | N=200, n_chr=2, n_qtl=200, `mutation_model=:infinite_sites`, `recap_first=true`, `init_distribution=:from_recap`, `ism_cleanup_interval=5`, `:neutral`, ngen_eq=20 | ISM slot pool + expansion dispatch (v0.21.0 gap closed) |
+| `Phase 5 — fractional expansion factor` | 818–838 | N=100, n_chr=1, n_qtl=100, `:neutral`, ngen_eq=4; `expansion_factor=1.5`, `expansion_k_before_end=1` | Fractional factor floors to a valid integer per-deme size |
+
+**Diagnostics, mutation, threading**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Diagnostics — weighted-average Bulmer B for 2D` | 843–870 | N=400, n_chr=2, n_qtl=300, `vs_over_vp0=10.0`, `:stabilizing`, ngen_eq=10, seed=0xD0C0, `n_threads=1` | Per-deme size-weighted average for B/V_A/V_P/h² |
+| `Diagnostics — weighted_avg_demes equals simple mean for equal sizes` | 872–881 | N=20, n_chr=1, n_qtl=10, `twoD_perp`, `grid_size=4`, `migration_rate=0.0`, `:neutral` | Weighted average reduces to plain mean at equal deme sizes |
+| `Mutation — Uqtl/Uneu auto-derivation and validation` | 883–931 | N=100, n_chr=1, n_qtl=100, n_neutral=200, `Uqtl=0.01`, `:neutral` | `Uneu` auto-derivation (`Uqtl·n_neutral/n_qtl`) + validation rules |
+| `Mutation — QTL-only fast path skips neutral pool` | 933–958 | N=200, n_chr=2, n_qtl=400, `vs_over_vp0=20.0`, `:stabilizing`, ngen_eq=3, `n_threads=1`, seed=0xC0DE | `n_neutral=0` fast path skips the neutral-pool machinery entirely |
+| `Threading — reductions race-free against Statistics reference` | 960–1019 | Vector sizes above the `_parallel_chunks` threshold (1024); `Random.seed!(20260512)` | Regression test for a closure-capture race in threaded mean/var reductions |
+
+**Phase structure / demography**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Phases — \`ngen\` single-knob mode` | 1021–1099 | N=50, n_chr=1, n_qtl=20, `theta_override=0.3`, h2=0.5, `:neutral`, `ngen=5`, ngen_eq=3, seed=1 | Single-knob `ngen` mode vs the two-phase `ngen_eq`/`ngen_dir` model |
+| `Demography — :twoD_recent (recent structure onset)` | 1101–1206 | `demography=:panmictic→:twoD_recent`, `grid_size=3`, n_qtl=20, `theta_override=0.3`, `:neutral`, ngen_eq=5 | Structure onset timing; panmictic-vs-structured `load_from` interaction |
+
+**Oracle statistics**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Oracle — B + delta-cross statistics` | 1208–1332 | N=200, n_chr=2, n_qtl=100, h2=0.5, `vs_over_vp0=10.0`, `:stabilizing`, ngen_eq=10, `output_formats=[:oracle]` | Bulmer B perm-p + Δ_cross sign-flip null |
+| `save_settled — Phase A snapshot + TOML sidecar` | 1334–1427 | N=80, n_chr=2, n_qtl=30, `mutation_model=:infinite_sites`, `init_distribution=:ism_watterson`, h2=0.5, ngen_eq=5, `save_settled=true`, seed=771 | Settled-state snapshot + TOML sidecar round-trip |
+| `Oracle — multi-phase recording` | 1429–1490 | N=50, n_chr=1, n_qtl=30, h2=0.5, ngen_eq=2, `output_formats=[:oracle]`, seed=1 | Recording at multiple named phases in one run |
+| `Oracle — dp80 rho_pearson stat shape` | 1492–1511 | N=100, n_chr=2, n_qtl=60, `mutation_model=:infinite_sites`, `init_distribution=:ism_watterson`, h2=0.5, `:directional`, `directional_start_from=:msd`, `vs_over_vp0=20.0` | `rho_pearson` family stat-vector shape |
+| `Oracle — per-stat scope subset (B_scopes / rho_scopes)` | 1513–1566 | N=100, n_chr=2, n_qtl=60, `mutation_model=:infinite_sites`, `init_distribution=:ism_watterson`, h2=0.5, ngen_eq=10, `oracle_n_perm=50` | Restricting `oracle_B_scopes`/`oracle_rho_scopes` to a subset |
+| `Oracle — MAF cutoff (oracle_maf_min)` | 2047–2097 | N=200, n_chr=2, n_qtl=300, h2=0.5, `:stabilizing`, `vs_over_vp0=20.0`, ngen_eq=40, `oracle_n_perm=20`; `oracle_maf_min∈{0.0,0.01}` | Oracle-side MAF filter (default 0.01 since v0.18.0) |
+| `Checkpoints — Float t½ multiples, oracle-only emission` | 2102–2154 | N=80, n_chr=1, n_qtl=60, h2=0.5, `:directional`, `directional_start_from=:msd`, `vs_over_vp0=20.0`, `shift_sd=2.0` | Float (t½-multiple) checkpoints, incl. `ngen_eq=0` edge case |
+
+**ISM (infinite-sites mutation)**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `ISM — infinite-sites mutation model` | 1568–1651 | N=50, n_chr=1, n_qtl=30, `Uqtl=0.01`, `mutation_model=:infinite_sites`, ngen_eq=1, seed=1 | ISM kernel mechanics + `init_distribution` mismatch guard |
+
+**Ancestry recording + neutral overlay**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `Ancestry recording + neutral overlay` | 1656–1730 | N=100, n_chr=2, n_qtl=80, `mutation_model=:infinite_sites`, `init_distribution=:ism_watterson`, h2=0.5, `:stabilizing`, `vs_over_vp0=20.0`, ngen_eq=20 | Recording-is-non-invasive invariant; overlay pipeline end-to-end |
+| `Ancestry — cross-phase invariants` | 1737–1850 | Same base config, seed=11; `record_ancestry=false` control run included | `simplify!` loss-free on surviving lineages; sample-node bookkeeping across buffer swaps |
+| `Config — f_neutral fraction parameterization` | 1855–1970 | N=80, n_chr=2, n_qtl=4, `f_neutral=0.96`, `mutation_model=:infinite_sites`, `init_distribution=:ism_watterson`, `:stabilizing`, `vs_over_vp0=20.0`, ngen_eq=5 | `n_neutral` derived from `n_qtl`+`f_neutral` (SLiM `fneu` convention) |
+| `Overlay — mu_per_bp auto-derived from cfg` | 1976–2042 | N=80, n_chr=2, n_qtl=60, `mutation_model=:infinite_sites`, `init_distribution=:ism_watterson`, h2=0.5, ngen_eq=15, seed=23; `n_neutral=600` case | `mu_per_bp` auto-derivation (`effective_Uneu(cfg) / (n_chr·chr_len_bp)`); explicit-override case |
+
+**Structured coalescent (recapitation engine, `RECAPITATION_PLAN.md`)**
+
+| Testset | Lines | Validates |
+|---|---|---|
+| `Structured coalescent — panmictic no-recomb (Phase 1B)` | 2162–2244 | `T_MRCA ≈ 4N·H_{2N-1}`; single-tree topology per chromosome |
+| `Structured coalescent — recombination + Watterson TBL (Phase 1C)` | 2257–2324 | Watterson `θ_W=4Nμ` segregating-site recovery under recombination |
+| `Structured coalescent — demography + migration (Phase 2)` | 2333–2466 | `F_ST = 1/(1+4Nm)` for symmetric 2-deme and 3-deme cyclic structure |
+| `Structured coalescent — multi-chromosome driver (Phase 3a)` | 2480–2585 | Bit-identical edge tables per `(seed, n_threads)`; chromosome independence |
+
+**Recapitation-first integration**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `recap_first Config integration (Phase 4)` | 2598–2731 | N=10, n_qtl=10, `recap_first=true`, `init_distribution=:beta_mutation_drift`, `Uqtl=0.0`, ngen_eq=1 | `recap_first`↔`init_distribution` strict-validation coupling |
+| `Phase 5: :twoD_recent workflow routing` | 2751–2863 | N=10, n_chr=1, n_qtl=20, `demography=:twoD_recent`, `grid_size=2`, `n_recent=3`, `migration_rate=0.02`, `:neutral`, `ngen_eq=10000` (deliberately absurd — must be ignored) | Workflow A (neutral skip-forward) + structure-onset gen computation |
+| `recap_first + ISM (Phase 7)` | 2871–2956 | N=40, n_chr=2, n_qtl=50, `Uqtl=0.02`, `mutation_model=:infinite_sites`, `recap_first=true`, `init_distribution=:from_recap`, `:neutral`, ngen_eq=1, seed=1 | Coalescent gen-0 seeding + ISM forward mutation together |
+
+**Calibration**
+
+| Testset | Lines | Key params | Validates |
+|---|---|---|---|
+| `calibration — effect_scale helpers` | 2958–3018 | N=5000, n_qtl=4000, `mutation_model=:infinite_sites`, `recap_first=true`, `init_distribution=:from_recap`, `effect_distribution=:signed_exponential`, `effect_scale=0.03`, h2=0.5, `vs_over_vp0=170.0` | `effect_scale_for_polygenicity` / `effect_scale_for_va_0` / `expected_va_0` |
 
 ---
 
@@ -1505,3 +1652,11 @@ pipeline (parameter conventions, burn-in / settling phase design). The
 Julia reference at `qcseln/` was read for ideas only;
 PolygenicSim's data layout and kernels are designed from scratch around the
 finite-sites bit-packed model (see `SUMMARY.md` for the full design log).
+
+**Document index:**
+
+- [`SPEC_DRIVEN_DEVELOPMENT.md`](./SPEC_DRIVEN_DEVELOPMENT.md) — synthesis + defense record: canonical genetic model, full Q&A ledger, correctness/validation framework, statistical-calibration record, reproducibility guarantees, journal-submission checklist.
+- [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) — original spec (Phases 1/2/4/5, 13 correctness tests).
+- [`SUMMARY.md`](./SUMMARY.md) — Q&A round 1 + design divergences from spec/bulmer/qcseln.
+- [`RECAPITATION_PLAN.md`](./RECAPITATION_PLAN.md) — structured-coalescent engine spec + phase log.
+- [`CHANGELOG.md`](./CHANGELOG.md) — full version-by-version ledger.
